@@ -4,12 +4,15 @@ The switches are FakeWalker objects serving tests/fixtures/snmp/<profile>.snmpre
 fake pysnmp module. Per-VLAN SNMPv3 contexts are files named <profile>@<context>.snmprec.
 Regenerate the golden files with UPDATE_GOLDEN=1 python3 -m unittest tests.test_switch_profiles, then review the diff.
 """
-import asyncio, json, logging, os, sys, tempfile, types, unittest
+import asyncio, contextlib, io, json, logging, os, sys, tempfile, types, unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch import snmp_profiles
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _env import clean_env, restore
+from leasewatch import snmp_profiles, switch
+from leasewatch.__main__ import main
 from leasewatch.snmp_profiles import ProfileError
 from leasewatch.switch import SwitchClient, build_snapshot, short_ifname
 
@@ -297,7 +300,23 @@ class LoaderTests(unittest.TestCase):
                      {"profile": "x", "api_version": 1, "extends": "standard", "match": {"sysdescr_regex": ["("]}},
                      {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"max_repetitions": 500}},
                      {"profile": "x", "api_version": 1},
-                     "[1, 2]", "{not json"):
+                     {"profile": "x", "api_version": "1", "extends": "standard"},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "oids": {"ifname": 5}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "oids": ["1.3"]},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "port_name": {"short": {"GigabitEthernet": 1}}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "bridge_port_map": {"name_match": ["ge{port}{0}"]}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "bridge_port_map": {"name_match": ["ge{port.real}"]}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "bridge_port_map": {"name_match": ["ge{port"]}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"bulk": "yes"}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"no_bulk": "ifname"}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"allow_unordered": [1]}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"timeout": "4"}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"retries": 1.5}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"max_repetitions": "10"}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"keep_status": ["3"]}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"keep_status": 3}},
+                     {"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"index_fix": "row_number"}},
+                     "[1, 2]", "{not json", "[" * 100000):
             with self.subTest(data=data), self.assertRaises(ProfileError):
                 snmp_profiles.load_file(self.user_file(data))
         for name in ("nope", "../standard", "", None):
@@ -305,6 +324,18 @@ class LoaderTests(unittest.TestCase):
                 snmp_profiles.load(name)
         with self.assertRaises(ProfileError):
             snmp_profiles.load_file("/nonexistent/profile.json")
+
+    def test_unknown_keys_are_named(self):
+        for data, key in (({"fdb": {"stratgy": "qbridge"}}, "fdb.stratgy"), ({"uplinks": {}}, "'uplinks'"),
+                          ({"snmp": {"timout": 5}}, "snmp.timout")):
+            with self.subTest(key=key), self.assertRaisesRegex(ProfileError, f"unknown key {key}"):
+                snmp_profiles.load_file(self.user_file({"profile": "x", "api_version": 1, "extends": "standard", **data}))
+        row = {"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"strategy": "bridge", "index_fix": "row_number"}}
+        self.assertEqual(snmp_profiles.load_file(self.user_file(row))["fdb"]["index_fix"], "row_number")
+
+    def test_a_file_may_share_the_name_of_the_builtin_it_extends(self):
+        p = snmp_profiles.load_file(self.user_file({"profile": "comware", "api_version": 1, "extends": "comware", "uplink": {"min_macs": 9}}))
+        self.assertEqual((p["profile"], p["uplink"]["min_macs"]), ("comware", 9))
 
     def test_detect(self):
         d = snmp_profiles.detect
@@ -386,12 +417,32 @@ class BuildSnapshotProfileTests(unittest.TestCase):
     def test_short_names_come_from_the_profile(self):
         names = [("1", "GigabitEthernet1/0/1")]
         rows = [("1.2.0.0.0.0.1", 1)]
-        self.assertEqual(build_snapshot(rows, [], names, [], profile=self.prof()).describe("02:00:00:00:00:01")[0], "GigabitEthernet1/0/1")
+        self.assertEqual(build_snapshot(rows, [], names, [], profile=self.prof()).describe("02:00:00:00:00:01")[0], "GE1/0/1")
         self.assertEqual(build_snapshot(rows, [], names, [], profile=self.prof("comware")).describe("02:00:00:00:00:01")[0], "GE1/0/1")
+        self.assertNotIn("port_name", json.loads((Path(snmp_profiles.__file__).parent / "comware.json").read_text()))  # inherits
         self.assertEqual(build_snapshot(rows, [], names, []).describe("02:00:00:00:00:01")[0], "GE1/0/1")  # None = 1.0
         mine = self.prof(port_name={"short": {"GigabitEthernet": "Gi"}})
         self.assertEqual(build_snapshot(rows, [], names, [], profile=mine).describe("02:00:00:00:00:01")[0], "Gi1/0/1")
         self.assertEqual((short_ifname("FortyGigE1/0/1"), short_ifname("GigabitEthernet1", {})), ("FGE1/0/1", "GigabitEthernet1"))
+
+    def test_standard_short_names_are_generic_and_leave_other_vendors_alone(self):
+        short = self.prof()["port_name"]["short"]
+        cases = {"Ten-GigabitEthernet1/0/49": "XGE1/0/49", "GigabitEthernet0/1": "GE0/1", "FortyGigE1/0/53": "FGE1/0/53",
+                 "HundredGigE1/0/1": "HGE1/0/1", "TwentyFiveGigE1/0/1": "TGE1/0/1", "Bridge-Aggregation2": "BAGG2",
+                 "Port-channel1": "Po1",
+                 # not shortened: lower-case JetStream names, FastEthernet, already short names (no "Ethernet" key)
+                 "gigabitEthernet1/0/1": "gigabitEthernet1/0/1", "FastEthernet0/1": "FastEthernet0/1", "ether1": "ether1",
+                 "Ethernet1": "Ethernet1"}
+        for long, want in cases.items():
+            self.assertEqual(short_ifname(long, short), want, long)
+        for name in snmp_profiles.BUILTIN:
+            self.assertEqual(self.prof(name)["port_name"]["short"], short, name)
+
+    def test_drop_fallback_keeps_an_offset_that_hits_an_interface(self):
+        names = [("49156", "port4")]
+        s = build_snapshot([("1.2.0.0.0.0.4", 4), ("1.2.0.0.0.0.5", 5)], [], names, [],
+                           profile=self.prof("jetstream", bridge_port_map={"fallback": "drop"}))
+        self.assertEqual(s.by_mac, {"02:00:00:00:00:04": (49156, 1)})  # :05 -> 49157: no interface, dropped
 
     def test_lldp_local_port_and_uplink_settings(self):
         names = [("14", "ge14"), ("3", "ge3")]
@@ -404,6 +455,237 @@ class BuildSnapshotProfileTests(unittest.TestCase):
         self.assertFalse(build_snapshot(rows, [], names, [], profile=self.prof()).ports[14].uplink)
         no_lldp = build_snapshot([], [], names, [("1.3.1", "ap-hall")], profile=self.prof(uplink={"lldp_neighbor": False}))
         self.assertEqual((no_lldp.ports[3].neighbor, no_lldp.ports[3].uplink), ("ap-hall", False))
+
+
+def add_rows(walker: FakeWalker, rows: list, context: str = "") -> FakeWalker:
+    """Extra (oid, value) rows in one context of a FakeWalker."""
+    walker.tables[context] = sorted(walker.tables.get(context, []) + [(_otuple(o), o, v) for o, v in rows])
+    return walker
+
+
+VTP = "1.3.6.1.4.1.9.9.46.1.3.1.1.2"
+
+
+class PerVlanFallbackTests(unittest.TestCase):
+    """cisco_per_vlan without usable vlan-N contexts reads Q-BRIDGE for that poll (standard.snmprec has Q-BRIDGE)."""
+
+    def setUp(self):
+        switch._per_vlan_warned = False  # the module flag is once per process; each test starts unwarned
+        self.addCleanup(setattr, switch, "_per_vlan_warned", False)
+
+    def walker(self, vlans=(10, 20)):
+        return add_rows(FakeWalker("standard"), [(f"{VTP}.1.{v}", 1) for v in vlans])
+
+    def run_cisco(self, walker, fail_contexts=False):
+        c = SwitchClient(CFG, snmp_profiles.load("cisco_ios"))
+        with FakePysnmp(walker) as fake:
+            if fail_contexts:
+                m, inner = sys.modules["pysnmp.hlapi.v3arch.asyncio"], sys.modules["pysnmp.hlapi.v3arch.asyncio"].next_cmd
+
+                async def next_cmd(eng, user, tgt, ctx, oid):
+                    if ctx:  # what an agent says for a context it does not have
+                        return "unknownContextName", 0, 0, []
+                    return await inner(eng, user, tgt, ctx, oid)
+                m.next_cmd = next_cmd
+            snap = c.snapshot()
+        return snap, fake
+
+    def standard_macs(self):
+        return {mac: tuple(v[k] for k in ("ifindex", "vlan")) for mac, v in json.loads((FIXTURES / "standard.json").read_text())["macs"].items()}
+
+    def test_all_contexts_failing_falls_back_once_with_one_warning(self):
+        with self.assertLogs("leasewatch.switch", "WARNING") as logs:
+            snap, fake = self.run_cisco(self.walker(), fail_contexts=True)
+            snap2, _ = self.run_cisco(self.walker(), fail_contexts=True)
+        self.assertEqual((snap.strategy, snap2.strategy), ("qbridge", "qbridge"))
+        self.assertEqual(snap.by_mac, self.standard_macs())
+        self.assertEqual(len([r for r in logs.output if "per-VLAN contexts unavailable, using Q-BRIDGE" in r]), 1)
+        self.assertEqual([oid for k, ctx, oid in fake.calls if ctx == "" and oid == "1.3.6.1.2.1.17.7.1.2.2.1.2"], ["1.3.6.1.2.1.17.7.1.2.2.1.2"])
+
+    def test_contexts_without_rows_and_an_empty_vlan_list_fall_back(self):
+        for vlans in ((10,), ()):  # vlan-10 not in the fixture = 0 rows; no VTP rows = no VLAN at all
+            with self.subTest(vlans=vlans), self.assertLogs("leasewatch.switch", "WARNING"):
+                switch._per_vlan_warned = False
+                snap, _ = self.run_cisco(self.walker(vlans))
+                self.assertEqual((snap.strategy, snap.by_mac), ("qbridge", self.standard_macs()))
+
+    def test_per_vlan_rows_keep_the_strategy_and_a_partial_failure_still_fails(self):
+        snap, _ = run("cisco_ios", SwitchClient(CFG))
+        self.assertEqual(snap.strategy, "cisco_per_vlan")
+        self.assertFalse(switch._per_vlan_warned)
+        w = add_rows(self.walker((10, 20)), [("1.3.6.1.2.1.17.4.3.1.2.2.0.0.0.0.9", 1)], "vlan-10")
+        c = SwitchClient(CFG, snmp_profiles.load("cisco_ios"))
+        with FakePysnmp(w):
+            m, inner = sys.modules["pysnmp.hlapi.v3arch.asyncio"], sys.modules["pysnmp.hlapi.v3arch.asyncio"].next_cmd
+
+            async def next_cmd(eng, user, tgt, ctx, oid):
+                return ("unknownContextName", 0, 0, []) if ctx == "vlan-20" else await inner(eng, user, tgt, ctx, oid)
+            m.next_cmd = next_cmd
+            with self.assertRaisesRegex(RuntimeError, "unknownContextName"):
+                c.snapshot()
+
+    def test_a_vlan_in_two_vtp_domains_is_walked_once(self):
+        w = add_rows(FakeWalker("cisco_ios"), [(f"{VTP}.2.10", 1)])
+        snap, fake = run_walker(w, SwitchClient(CFG))
+        fdb_oid = "1.3.6.1.2.1.17.4.3.1.2"
+        self.assertEqual(sum(1 for k, ctx, oid in fake.calls if ctx == "vlan-10" and oid == fdb_oid), 1)
+
+
+def run_walker(walker: FakeWalker, client: SwitchClient):
+    with FakePysnmp(walker) as fake:
+        snap = client.snapshot()
+    return snap, fake
+
+
+class DetectionFailureTests(unittest.TestCase):
+    def test_a_failing_detection_get_uses_standard_and_retries(self):
+        c = SwitchClient(CFG)
+        with FakePysnmp(FakeWalker("comware")) as fake, self.assertLogs("leasewatch.switch", "WARNING") as logs:
+            async def get_cmd(eng, user, tgt, ctx, *oids):
+                fake.calls.append(("get", ctx, oids))
+                return None, 2, 0, []  # e.g. an authorization error status for sysObjectID
+            sys.modules["pysnmp.hlapi.v3arch.asyncio"].get_cmd = get_cmd
+            snap = c.snapshot(); c.snapshot()
+        self.assertEqual(c.profile_name, "standard")
+        self.assertEqual(len(snap.by_mac), 3)
+        self.assertEqual(sum(1 for k, *_ in fake.calls if k == "get"), 2)  # not cached: tried again next poll
+        self.assertEqual(len([r for r in logs.output if "detection failed" in r]), 1)
+        with FakePysnmp(FakeWalker("comware")):
+            c.snapshot()
+        self.assertEqual(c.profile_name, "comware")  # a later working GET still detects
+
+    def test_values_missing_from_the_view_detect_standard(self):
+        w = FakeWalker("comware")
+        w.tables[""] = [r for r in w.tables[""] if not r[1].startswith("1.3.6.1.2.1.1.")]
+        snap, _ = run_walker(w, c := SwitchClient(CFG))
+        self.assertEqual((c.profile_name, len(snap.by_mac)), ("standard", 3))
+
+
+class RowValueTests(unittest.TestCase):
+    def test_non_integer_status_is_a_runtimeerror(self):
+        prof = snmp_profiles.load("standard")
+        prof["fdb"]["keep_status"] = [3]
+        w = add_rows(FakeWalker("standard"), [("1.3.6.1.2.1.17.7.1.2.2.1.3.10.2.0.0.0.0.9", b"x")])
+        with self.assertRaisesRegex(RuntimeError, "non-integer"):
+            run_walker(w, SwitchClient(CFG, prof))
+
+    def test_an_integer_address_is_skipped_not_a_zero_mac(self):
+        prof = snmp_profiles.load("standard")
+        prof["fdb"].update(strategy="bridge", index_fix="row_number")
+        w = add_rows(FakeWalker("standard"), [("1.3.6.1.2.1.17.4.3.1.1.1", bytes.fromhex("02000000000a")),
+                                              ("1.3.6.1.2.1.17.4.3.1.1.2", 5),
+                                              ("1.3.6.1.2.1.17.4.3.1.2.1", 1), ("1.3.6.1.2.1.17.4.3.1.2.2", 2)])
+        snap, _ = run_walker(w, SwitchClient(CFG, prof))
+        self.assertEqual(snap.by_mac, {"02:00:00:00:00:0a": (1, 0)})
+
+
+class MinMacsTests(unittest.TestCase):
+    def test_override_applies_to_the_snapshot_not_the_cached_profile(self):
+        c = SwitchClient(CFG, min_macs=1)
+        snap, _ = run("standard", c)
+        self.assertTrue(snap.ports[1].uplink)  # one MAC, no LLDP: an uplink only because of the override
+        self.assertEqual(c.profile["uplink"]["min_macs"], 6)
+        self.assertFalse(run("standard", SwitchClient(CFG))[0].ports[1].uplink)
+
+
+class NoPysnmp:
+    """Makes `import pysnmp...` raise ImportError (a None entry in sys.modules does that)."""
+
+    def __enter__(self):
+        self._saved = {k: sys.modules.get(k) for k in FakePysnmp.MODS}
+        for k in FakePysnmp.MODS:
+            sys.modules[k] = None
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def cli(*argv: str) -> tuple[int, str]:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(list(argv))
+    return rc, buf.getvalue()
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        # snmp-detect reads SNMP_* through Config(): the developer's own variables must not reach it
+        self.addCleanup(restore, clean_env({"TEST_AK": "test-auth", "TEST_PK": "test-priv"}))
+        root = logging.getLogger()  # main() may call basicConfig; keep the test run's handlers as they were
+        self.addCleanup(setattr, root, "handlers", list(root.handlers))
+        self.addCleanup(root.setLevel, root.level)
+
+    def test_snmp_profiles_lists_every_builtin_with_its_rule(self):
+        with NoPysnmp():
+            rc, out = cli("snmp-profiles")
+        self.assertEqual(rc, 0)
+        self.assertIn("pysnmp not installed", out)
+        for name in snmp_profiles.BUILTIN:
+            self.assertRegex(out, rf"(?m)^{name} ")
+        self.assertIn("sysObjectID 1.3.6.1.4.1.25506.*", out)
+        self.assertIn("by name only", out)
+        with FakePysnmp(FakeWalker("standard")):
+            self.assertNotIn("pysnmp not installed", cli("snmp-profiles")[1])
+
+    def test_snmp_detect_without_pysnmp(self):
+        with NoPysnmp():
+            rc, out = cli("snmp-detect", "--host", "10.0.0.2")
+        self.assertEqual((rc, out.strip()), (1, "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"))
+
+    def test_snmp_detect_with_flags_reads_keys_from_env_names(self):
+        with FakePysnmp(FakeWalker("comware")) as fake:
+            rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_AK", "--priv-key-env", "TEST_PK", "--rows", "2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("sysObjectID: 1.3.6.1.4.1.25506", out)
+        self.assertIn("profile:     comware (detected)", out)
+        self.assertIn("walk fdb_port (1.3.6.1.2.1.17.7.1.2.2.1.2):", out)
+        self.assertIn("walk lldp_rem_sysname", out)
+        fdb = out.split("walk fdb_port")[1].split("walk ")[0]
+        self.assertEqual(fdb.count(" = "), 2)  # --rows 2
+        self.assertNotIn("test-auth", out)
+        self.assertEqual(fake.targets[0][0], ("10.0.0.2", 161))
+
+    def test_snmp_detect_missing_key_env_is_a_config_problem(self):
+        with FakePysnmp(FakeWalker("comware")):
+            rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_NOPE")
+        self.assertEqual(rc, 2)
+        self.assertIn("AUTH_KEY", out)
+
+    def test_snmp_detect_by_instance_uses_its_settings(self):
+        os.environ.update({"SNMP_HOST": "10.0.0.3", "SNMP_AUTH_KEY": "test-auth", "SNMP_PRIV_KEY": "test-priv", "FW1_URL": "https://fw1.example.lan"})
+        with FakePysnmp(FakeWalker("cisco_ios")) as fake:
+            rc, out = cli("snmp-detect", "switch")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(fake.targets[0][0], ("10.0.0.3", 161))
+            self.assertIn("profile:     cisco_ios (detected)", out)
+            self.assertIn("context vlan-1:", out)
+            rc, out = cli("snmp-detect", "nope")
+        self.assertEqual(rc, 2)
+        self.assertIn("no snmp_switch instance 'nope'", out)
+
+    def test_snmp_detect_shows_the_profile_file_error_on_the_terminal(self):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"strategy": "magic"}}, f)
+        self.addCleanup(os.unlink, path)
+        with FakePysnmp(FakeWalker("standard")):
+            rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_AK", "--priv-key-env", "TEST_PK", "--profile-file", path)
+        self.assertEqual(rc, 2)
+        self.assertIn("PROFILE_FILE is not a valid snmp profile", out)
+        self.assertIn("fdb.strategy 'magic'", out)
+
+    def test_no_subcommand_keeps_the_server_path(self):
+        import leasewatch.__main__ as m
+        with mock.patch.object(m, "Config", side_effect=RuntimeError("server path")):
+            with self.assertRaisesRegex(RuntimeError, "server path"):
+                main([])
+            with self.assertRaisesRegex(RuntimeError, "server path"):
+                main(["--unknown"])  # unknown arguments were ignored before, and still are
 
 
 if __name__ == "__main__":

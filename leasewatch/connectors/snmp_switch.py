@@ -4,10 +4,12 @@ A thin wrapper around switch.SwitchClient. pysnmp stays a lazy import inside the
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
+from .. import snmp_profiles
 from ..switch import SwitchClient, SwitchSnapshot
 from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin
 
@@ -58,6 +60,9 @@ class SnmpSwitchConnector(SettingsMixin):
             Setting("auth", default="SHA", choices=("SHA", "SHA256"), help="SNMPv3 auth protocol"),
             Setting("auth_key", required=True, secret=True, help="SNMPv3 auth key"),
             Setting("priv_key", required=True, secret=True, help="SNMPv3 privacy key (AES-128)"),
+            Setting("profile", choices=snmp_profiles.BUILTIN, help="built-in SNMP profile; empty = detect from sysObjectID/sysDescr"),
+            Setting("profile_file", help="path to a JSON SNMP profile; wins over profile"),
+            Setting("min_macs", help="MACs on a port without LLDP that make it an uplink; empty = the profile's uplink.min_macs"),
         ),
     )
 
@@ -65,20 +70,66 @@ class SnmpSwitchConnector(SettingsMixin):
         self._init_settings(name, settings, ctx)
         self.settings["auth"] = self.settings["auth"].upper().replace("-", "")
         s = self.settings
+        # problems with profile/profile_file/min_macs, reported by validate(); collect()/check() refuse to run with one,
+        # so a bad profile setting never falls back to detection unnoticed
+        self.profile_problems: list[str] = []
+        self._bad_profile_name = False
+        profile = self._profile()
+        min_macs = self._min_macs()
         # read at call time: the host (and tests) may swap the client object
-        self.client = client or SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]))  # type: ignore[arg-type]
+        self.client = client or SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]),  # type: ignore[arg-type]
+                                             profile=profile, min_macs=min_macs)
+
+    def _profile(self) -> dict | None:
+        """profile_file > profile > None (detection). Reads the file (a local config file, not the device)."""
+        path, name = self.settings["profile_file"].strip(), self.settings["profile"].strip()
+        where = f"connector {self.name} ({self.INFO.type})"
+        if path:
+            if not (os.path.isfile(path) and os.access(path, os.R_OK)):
+                self.profile_problems.append(f"{where}: PROFILE_FILE cannot be read")
+                return None
+            try:
+                return snmp_profiles.load_file(path)
+            except snmp_profiles.ProfileError:
+                # the detail quotes values from the file; it is shown by `python -m leasewatch snmp-detect`, not here
+                self.profile_problems.append(f"{where}: PROFILE_FILE is not a valid snmp profile (run: python -m leasewatch snmp-detect {self.name})")
+                return None
+        if name:
+            try:
+                return snmp_profiles.load(name)
+            except snmp_profiles.ProfileError:
+                self._bad_profile_name = True  # validate() reports it through the generic choices check
+                return None
+        return None
+
+    def _min_macs(self) -> int | None:
+        v = self.settings["min_macs"].strip()
+        if not v:
+            return None
+        if v.isdigit() and int(v) >= 1:
+            return int(v)
+        self.profile_problems.append(f"connector {self.name} ({self.INFO.type}): MIN_MACS must be an integer >= 1")
+        return None
 
     def validate(self) -> list[str]:
-        return self._generic_problems()
+        return self._generic_problems() + self.profile_problems
+
+    def _refuse_if_invalid(self) -> None:
+        if self.profile_problems or self._bad_profile_name:
+            raise ConnectorError("invalid profile settings (see the configuration check)")
 
     def check(self) -> None:
-        # a full walk is not a cheap probe; until a sysObjectID GET exists, check that the library is there
+        """One GET of sysObjectID and sysDescr: reachability and credentials, without a walk."""
+        self._refuse_if_invalid()
         try:
-            import pysnmp  # noqa: F401
+            self.client.probe()
         except ImportError as e:
             raise ConnectorError("missing dependency pysnmp") from e
+        except RuntimeError as e:
+            raise ConnectorError(str(e) or type(e).__name__) from e
 
     def collect(self) -> Batch:
+        self._refuse_if_invalid()
         try:
             snap = self.client.snapshot()
         except RuntimeError as e:

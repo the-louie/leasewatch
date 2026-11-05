@@ -1,5 +1,5 @@
 {
-  "_source": "leasewatch 1.0 behaviour (switch.py before profiles): Q-BRIDGE dot1qTpFdbPort, dot1dBasePortIfIndex with 'assume base port = ifIndex' on a miss (research notes Focus 1 and Focus 2, LibreNMS bridge.inc.php), LLDP local port via lldpLocPortId/lldpLocPortDesc name then ifIndex (Focus 3, first steps of LibreNMS PortFinder), uplink = LLDP neighbour or >= 6 MACs (leasewatch's own heuristic, Focus 5), GETNEXT walks with timeout 4 s and 1 retry. Profiles may set snmp.bulk true to use GETBULK with snmp.max_repetitions (Focus 6: Telegraf/Zabbix default 10). OIDs: notes' OID table.",
+  "_source": "leasewatch 1.0 behaviour (switch.py before profiles): Q-BRIDGE dot1qTpFdbPort, dot1dBasePortIfIndex with 'assume base port = ifIndex' on a miss (research notes Focus 1 and Focus 2, LibreNMS bridge.inc.php), LLDP local port via lldpLocPortId/lldpLocPortDesc name then ifIndex (Focus 3, first steps of LibreNMS PortFinder), uplink = LLDP neighbour or >= 6 MACs (leasewatch's own heuristic, Focus 5), GETNEXT walks with timeout 4 s and 1 retry. Profiles may set snmp.bulk true to use GETBULK with snmp.max_repetitions (Focus 6: Telegraf/Zabbix default 10). OIDs: notes' OID table. port_name.short: plain substring replacements, longest first ('Ten-GigabitEthernet' before 'GigabitEthernet'); every key is a full interface-type word (Comware, Cisco IOS/NX-OS ifDescr) that means only that type; the one partial hit is Cisco's 'TenGigabitEthernet' -> 'TenGE', which stays unambiguous. 'Ethernet' is left out: it is a substring of 'gigabitEthernet' (TP-Link JetStream ifName) and of 'FastEthernet', so it would turn those into half-abbreviated names.",
   "profile": "standard",
   "api_version": 1,
   "match": {"sysobjectid_prefix": [], "sysdescr_regex": []},
@@ -15,7 +15,7 @@
   },
   "bridge_port_map": {"strategy": "dot1dBasePortIfIndex", "offset": 0, "fallback": "identity", "name_match": false},
   "lldp": {"local_port": "auto", "v2_fallback": false},
-  "port_name": {"prefer": "ifName", "short": {}},
+  "port_name": {"prefer": "ifName", "short": {"Ten-GigabitEthernet": "XGE", "GigabitEthernet": "GE", "FortyGigE": "FGE", "HundredGigE": "HGE", "TwentyFiveGigE": "TGE", "Bridge-Aggregation": "BAGG", "Port-channel": "Po"}},
   "uplink": {"lldp_neighbor": true, "min_macs": 6, "trunk": null},
   "snmp": {"bulk": false, "max_repetitions": 10, "timeout": 4, "retries": 1, "no_bulk": [], "allow_unordered": []},
   "oids": {

@@ -24,7 +24,7 @@ OID_LLDP_LOC_PORTID = "1.0.8802.1.1.2.1.3.7.1.3"    # lldpLocPortId: lldpLocPort
 OID_LLDP_LOC_PORTDESC = "1.0.8802.1.1.2.1.3.7.1.4"  # lldpLocPortDesc: lldpLocPortNum -> description
 UPLINK_MACS = 6  # 1.0 default of the profiles' uplink.min_macs: this many MACs on a port without LLDP = uplink/AP port
 # 1.0's hard-coded Comware abbreviations, used when no profile map is given; the profiles carry their own map
-# (comware.json has these). Order matters: the longer name first, so "Ten-GigabitEthernet" is not turned into "Ten-GE".
+# (standard.json has these plus a few generic ones, and every built-in profile inherits it). Order matters: the longer name first, so "Ten-GigabitEthernet" is not turned into "Ten-GE".
 DEFAULT_SHORT = {"Ten-GigabitEthernet": "XGE", "GigabitEthernet": "GE", "FortyGigE": "FGE", "Bridge-Aggregation": "BAGG"}
 
 
@@ -53,6 +53,7 @@ class SwitchSnapshot:
     ports: dict = field(default_factory=dict)      # ifindex -> PortInfo
     by_mac: dict = field(default_factory=dict)     # mac -> (ifindex, vlan)
     short: dict | None = None                      # port_name.short of the profile; None = DEFAULT_SHORT
+    strategy: str = ""                             # fdb strategy that produced by_mac (cisco_per_vlan may fall back to qbridge)
 
     def describe(self, mac: str) -> tuple[str, str]:
         """(port label, via) for the UI, e.g. ("GE1/0/14", "") or ("GE1/0/3", "ap-hall")."""
@@ -138,7 +139,7 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
                 neighbors[loc2if.get(n, n)] = str(name)
             except ValueError:
                 pass
-    snap = SwitchSnapshot(short=short)
+    snap = SwitchSnapshot(short=short, strategy=fdb_p["strategy"])
     for ifindex, name in names.items():
         snap.ports[ifindex] = PortInfo(ifindex=ifindex, name=name, neighbor=neighbors.get(ifindex, ""))
 
@@ -146,11 +147,12 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
         if use_bp_map and port in bp2if:
             return bp2if[port]
         cand = port + bpm["offset"]
-        if names and cand not in names:
-            for tmpl in bpm["name_match"] or []:  # JetStream: the offset missed, try the interface name
-                hit = by_name.get(tmpl.format(port=port))
-                if hit is not None:
-                    return hit
+        if cand in names:  # the offset hit a real interface: kept even with fallback "drop"
+            return cand
+        for tmpl in bpm["name_match"] or []:  # JetStream: the offset missed, try the interface name
+            hit = by_name.get(tmpl.format(port=port))
+            if hit is not None:
+                return hit
         return cand if bpm["fallback"] == "identity" else None
 
     keep = set(fdb_p["keep_status"])
@@ -198,12 +200,19 @@ def _oid_tuple(s: str) -> tuple[int, ...]:
     return tuple(int(x) for x in s.split("."))
 
 
+# module global, set once: the per-VLAN fallback warning is logged once per process, not at every poll
+_per_vlan_warned = False
+
+
 class SwitchClient:
-    def __init__(self, cfg: Config, profile: dict | None = None):
+    def __init__(self, cfg: Config, profile: dict | None = None, min_macs: int | None = None):
         self.cfg = cfg
         # None: detected from sysObjectID/sysDescr at the first snapshot and cached here (see _snapshot_async)
         self.profile = profile
         self.profile_name = profile["profile"] if profile else ""
+        self.min_macs = min_macs  # per-instance override of the profile's uplink.min_macs; None = the profile's
+        self._detect_warned = False
+        self._auto = profile is None  # detect at the next snapshot (again after a failed detection GET)
 
     @staticmethod
     def _context(name: str) -> object:
@@ -222,7 +231,7 @@ class SwitchClient:
             return None
         return s
 
-    async def _walk(self, eng, tgt, user, base: str, context: str = "") -> list[tuple[str, object]]:
+    async def _walk(self, eng: object, tgt: object, user: object, base: str, context: str = "", limit: int = 0) -> list[tuple[str, object]]:
         from pysnmp.hlapi.v3arch.asyncio import ObjectIdentity, ObjectType, next_cmd
         out = []
         cur_oid = base
@@ -239,9 +248,11 @@ class SwitchClient:
                 break
             out.append((s[len(base) + 1:], vbs[0][1]))
             cur_oid = s
+            if limit and len(out) >= limit:  # snmp-detect shows only the first rows
+                break
         return out
 
-    async def _bulk_walk(self, eng, tgt, user, base: str, context: str = "") -> list[tuple[str, object]]:
+    async def _bulk_walk(self, eng: object, tgt: object, user: object, base: str, context: str = "", limit: int = 0) -> list[tuple[str, object]]:
         """GETBULK walk with the same end rules as _walk; pysnmp 7's bulk_cmd returns a flat list of var-binds."""
         from pysnmp.hlapi.v3arch.asyncio import ObjectIdentity, ObjectType, bulk_cmd
         reps = int(self.profile["snmp"]["max_repetitions"]) if self.profile else 10
@@ -261,18 +272,20 @@ class SwitchClient:
                     return out
                 out.append((s[len(base) + 1:], vb[1]))
                 cur_oid = s
+                if limit and len(out) >= limit:
+                    return out
         return out
 
-    async def _walk_key(self, eng, tgt, user, key: str, context: str = "") -> list[tuple[str, object]]:
+    async def _walk_key(self, eng: object, tgt: object, user: object, key: str, context: str = "", limit: int = 0) -> list[tuple[str, object]]:
         """Walk the profile's oids[key] (or a numeric OID) with GETBULK when snmp.bulk is on and the OID is not in no_bulk."""
         oid = self.profile["oids"].get(key, key)
         snmp = self.profile["snmp"]
         if snmp["bulk"] and key not in snmp["no_bulk"] and oid not in snmp["no_bulk"]:
-            return await self._bulk_walk(eng, tgt, user, oid, context)
-        return await self._walk(eng, tgt, user, oid, context)
+            return await self._bulk_walk(eng, tgt, user, oid, context, limit)
+        return await self._walk(eng, tgt, user, oid, context, limit)
 
-    async def _detect_profile(self, eng, tgt, user) -> str:
-        """Built-in profile name for this agent from a GET of sysObjectID and sysDescr."""
+    async def _get_sys(self, eng: object, tgt: object, user: object) -> tuple[str, str]:
+        """(sysObjectID, sysDescr) from one GET; "" for a value the agent's view does not have."""
         from pysnmp.hlapi.v3arch.asyncio import ObjectIdentity, ObjectType, get_cmd
         oids = snmp_profiles.load("standard")["oids"]
         err_ind, err_stat, _, vbs = await get_cmd(eng, user, tgt, self._context(""), ObjectType(ObjectIdentity(oids["sysobjectid"])),
@@ -282,8 +295,13 @@ class SwitchClient:
         if err_stat:
             raise RuntimeError(f"snmp get sysObjectID: status {err_stat}")
         vals = ["" if type(vb[1]).__name__ in _END else str(vb[1]) for vb in vbs or []] + ["", ""]
-        name = snmp_profiles.detect(vals[0], vals[1])
-        log.info("snmp profile %s detected (sysObjectID %s)", name, vals[0] or "-")
+        return vals[0], vals[1]
+
+    async def _detect_profile(self, eng: object, tgt: object, user: object) -> str:
+        """Built-in profile name for this agent from a GET of sysObjectID and sysDescr."""
+        oid, descr = await self._get_sys(eng, tgt, user)
+        name = snmp_profiles.detect(oid, descr)
+        log.info("snmp profile %s detected (sysObjectID %s)", name, oid or "-")
         return name
 
     def fdb_decoder(self, rows: dict[str, list[tuple[str, object]]]) -> list[tuple[str, int, int]]:
@@ -292,9 +310,11 @@ class SwitchClient:
         A subclass supplies this for a vendor table (EdgeSwitch, VRP style); the base class has no decoder."""
         raise NotImplementedError(f"snmp profile {self.profile_name}: fdb strategy 'private' needs a fdb_decoder")
 
-    async def _fdb_async(self, eng, tgt, user) -> tuple[list, list, list, list]:
-        """(fdb, baseport, fdb_status, fdb_address) rows for build_snapshot, in Q-BRIDGE index form (vlan.<mac part>)."""
+    async def _fdb_async(self, eng: object, tgt: object, user: object) -> tuple[list, list, list, list, str]:
+        """(fdb, baseport, fdb_status, fdb_address, strategy) rows for build_snapshot, in Q-BRIDGE index form
+        (vlan.<mac part>); strategy is the one that produced the rows."""
         f, use_bp = self.profile["fdb"], self.profile["bridge_port_map"]["strategy"] == "dot1dBasePortIfIndex"
+        strategy = f["strategy"]
         fdb: list = []
         bp: list = []
         status: list = []
@@ -320,52 +340,183 @@ class SwitchClient:
                     vlan, state = int(k.split(".")[-1]), int(v)
                 except (ValueError, TypeError):
                     continue
-                if state == 1 and vlan not in f["skip_vlans"]:  # vtpVlanState operational(1)
+                # vtpVlanState operational(1); the same VLAN in two VTP domains is walked once
+                if state == 1 and vlan not in f["skip_vlans"] and vlan not in vlans:
                     vlans.append(vlan)
+            failed: list[RuntimeError] = []
             for vlan in vlans:
                 ctx = f"{f['context_prefix']}{vlan}"
-                fdb += await rows("bridge_fdb_port", f"{vlan}.", ctx)
-                if f["keep_status"]:
-                    status += await rows("bridge_fdb_status", f"{vlan}.", ctx)
-                if use_bp:  # a bridge port maps to the same ifIndex in every VLAN, so the per-VLAN maps are merged
-                    bp += await rows("baseport_ifindex", "", ctx)
-            return fdb, bp, status, addr
+                try:  # a context missing from the SNMPv3 view fails its walk (unknown context or no response)
+                    c_fdb = await rows("bridge_fdb_port", f"{vlan}.", ctx)
+                    c_status = await rows("bridge_fdb_status", f"{vlan}.", ctx) if f["keep_status"] else []
+                    # a bridge port maps to the same ifIndex in every VLAN, so the per-VLAN maps are merged
+                    c_bp = await rows("baseport_ifindex", "", ctx) if use_bp else []
+                except RuntimeError as e:
+                    failed.append(e)
+                    continue
+                fdb, status, bp = fdb + c_fdb, status + c_status, bp + c_bp
+            if fdb:
+                if failed:  # some VLANs answered, some did not: a partial table would silently drop ports
+                    raise failed[0]
+                return fdb, bp, status, addr, "cisco_per_vlan"
+            # no context gave a row (none configured on the switch, or no VLAN listed because the VTP table is outside
+            # the view or absent, as on NX-OS): 0 MACs would look like success, so this poll reads Q-BRIDGE
+            global _per_vlan_warned
+            if not _per_vlan_warned:
+                _per_vlan_warned = True
+                log.warning("snmp profile %s: per-VLAN contexts unavailable, using Q-BRIDGE", self.profile_name)
+            bp, status = [], []
+            fdb = await rows("fdb_port", "")
+            if f["keep_status"]:
+                status = await rows("fdb_status", "")
+            strategy = "qbridge"
         else:  # private
             walked = {oid: await self._walk_key(eng, tgt, user, oid) for oid in f["private_oids"]}
             for mac, vlan, ifindex in self.fdb_decoder(walked):
                 fdb.append((f"{int(vlan)}." + ".".join(str(int(x, 16)) for x in mac.split(":")), int(ifindex)))
         if use_bp:
             bp = await rows("baseport_ifindex", "")
-        return fdb, bp, status, addr
+        return fdb, bp, status, addr, strategy
 
-    async def _snapshot_async(self) -> SwitchSnapshot:
+    async def _session(self, snmp: dict) -> tuple[object, object, object]:
+        """(engine, target, user) for one snapshot or probe; the caller closes the engine's dispatcher."""
         from pysnmp.hlapi.v3arch.asyncio import (SnmpEngine, UdpTransportTarget, UsmUserData, usmAesCfb128Protocol,
                                                  usmHMAC192SHA256AuthProtocol, usmHMACSHAAuthProtocol)
         auth = {"SHA": usmHMACSHAAuthProtocol, "SHA256": usmHMAC192SHA256AuthProtocol}[self.cfg.snmp_auth]
         eng = SnmpEngine()
         try:
-            snmp = (self.profile or snmp_profiles.load("standard"))["snmp"]
             tgt = await UdpTransportTarget.create((self.cfg.snmp_host, 161), timeout=snmp["timeout"], retries=snmp["retries"])
             user = UsmUserData(self.cfg.snmp_user, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, authProtocol=auth, privProtocol=usmAesCfb128Protocol)
-            if self.profile is None:
-                # cached for this client's lifetime; a failed detection raises and is retried at the next snapshot
-                self.profile = snmp_profiles.load(await self._detect_profile(eng, tgt, user))
-                self.profile_name = self.profile["profile"]
+        except BaseException:
+            eng.close_dispatcher()
+            raise
+        return eng, tgt, user
+
+    async def _resolve_profile(self, eng: object, tgt: object, user: object) -> bool:
+        """Set self.profile by detection when none was given; True if it was detected now (and cached).
+
+        A failed detection GET (an error; a value missing from the view just detects "standard") sets standard for
+        this snapshot and is retried at the next one, so detection alone never fails a poll; the warning is logged
+        once per client."""
+        if not self._auto:
+            return False
+        try:
+            name = await self._detect_profile(eng, tgt, user)
+        except RuntimeError as e:
+            self.profile, self.profile_name = snmp_profiles.load("standard"), "standard"
+            if not self._detect_warned:
+                self._detect_warned = True
+                log.warning("snmp profile detection failed (%s), using standard", e)
+            return False
+        self.profile = snmp_profiles.load(name)
+        self.profile_name = self.profile["profile"]
+        self._auto = False  # cached for this client's lifetime
+        return True
+
+    def probe(self) -> tuple[str, str]:
+        """Blocking; (sysObjectID, sysDescr) from one GET, the connector's cheap check. Raises RuntimeError on failure,
+        ImportError without pysnmp."""
+        async def run() -> tuple[str, str]:
+            eng, tgt, user = await self._session((self.profile or snmp_profiles.load("standard"))["snmp"])
+            try:
+                return await self._get_sys(eng, tgt, user)
+            finally:
+                eng.close_dispatcher()
+        try:
+            return asyncio.run(asyncio.wait_for(run(), timeout=60))
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            raise RuntimeError("snmp: timeout after 60 s") from e
+
+    def detect_report(self, limit: int = 5) -> dict:
+        """Blocking; what snmp-detect prints: sysObjectID, sysDescr, the detected and the used profile, and the first
+        `limit` rows of each walk the profile makes ({"walks": [(label, rows or error text)]}). A walk error is kept as
+        text so the other walks still show."""
+        async def run() -> dict:
+            eng, tgt, user = await self._session((self.profile or snmp_profiles.load("standard"))["snmp"])
+            try:
+                oid, descr = await self._get_sys(eng, tgt, user)
+                given = not self._auto
+                if not given:
+                    self.profile = snmp_profiles.load(snmp_profiles.detect(oid, descr))
+                    self.profile_name = self.profile["profile"]
+                p, f = self.profile, self.profile["fdb"]
+                walks: list[tuple[str, str]] = []  # (oids key or numeric OID, context)
+                if f["strategy"] == "qbridge":
+                    walks += [("fdb_port", "")] + ([("fdb_status", "")] if f["keep_status"] else [])
+                elif f["strategy"] == "bridge":
+                    walks += [("bridge_fdb_port", "")] + ([("bridge_fdb_status", "")] if f["keep_status"] else [])
+                    walks += [("bridge_fdb_address", "")] if f["index_fix"] == "row_number" else []
+                elif f["strategy"] == "private":
+                    walks += [(o, "") for o in f["private_oids"]]
+                if p["bridge_port_map"]["strategy"] == "dot1dBasePortIfIndex" and f["strategy"] != "cisco_per_vlan":
+                    walks.append(("baseport_ifindex", ""))
+                walks += [("ifname", ""), ("lldp_rem_sysname", "")]
+                if p["lldp"]["local_port"] == "auto":
+                    walks += [("lldp_loc_portid", ""), ("lldp_loc_portdesc", "")]
+                out: list[tuple[str, object]] = []
+
+                async def show(key: str, ctx: str) -> list:
+                    label = f"{key} ({p['oids'].get(key, key)})" + (f" context {ctx}" if ctx else "")
+                    try:
+                        rows = await self._walk_key(eng, tgt, user, key, ctx, limit)
+                    except RuntimeError as e:
+                        out.append((label, str(e)))
+                        return []
+                    out.append((label, [(k, str(v)) for k, v in rows]))
+                    return rows
+                if f["strategy"] == "cisco_per_vlan":
+                    vlans = await show(f["vlan_source"], "")
+                    first = next((int(k.split(".")[-1]) for k, v in vlans if str(v) == "1" and k.split(".")[-1].isdigit()
+                                  and int(k.split(".")[-1]) not in f["skip_vlans"]), None)
+                    if first is not None:
+                        ctx = f"{f['context_prefix']}{first}"
+                        for key in ("bridge_fdb_port", "baseport_ifindex"):
+                            await show(key, ctx)
+                    await show("fdb_port", "")  # what the Q-BRIDGE fallback would read
+                for key, ctx in walks:
+                    await show(key, ctx)
+                return {"sysobjectid": oid, "sysdescr": descr, "detected": snmp_profiles.detect(oid, descr),
+                        "profile": self.profile_name, "given": given, "walks": out}
+            finally:
+                eng.close_dispatcher()
+        try:
+            return asyncio.run(asyncio.wait_for(run(), timeout=120))
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            raise RuntimeError("snmp: timeout after 120 s") from e
+
+    async def _snapshot_async(self) -> SwitchSnapshot:
+        snmp = (self.profile or snmp_profiles.load("standard"))["snmp"]
+        eng, tgt, user = await self._session(snmp)
+        try:
+            if await self._resolve_profile(eng, tgt, user):
                 if (self.profile["snmp"]["timeout"], self.profile["snmp"]["retries"]) != (snmp["timeout"], snmp["retries"]):
+                    from pysnmp.hlapi.v3arch.asyncio import UdpTransportTarget
                     snmp = self.profile["snmp"]
                     tgt = await UdpTransportTarget.create((self.cfg.snmp_host, 161), timeout=snmp["timeout"], retries=snmp["retries"])
             p = self.profile
-            fdb_raw, bp_raw, status_raw, addr_raw = await self._fdb_async(eng, tgt, user)
-            fdb = [(k, int(v)) for k, v in fdb_raw]
-            bp = [(k, int(v)) for k, v in bp_raw]
-            status = [(k, int(v)) for k, v in status_raw]
-            addr = [(k, ":".join(f"{b:02x}" for b in bytes(v))) for k, v in addr_raw]
+            if self.min_macs is not None:  # a copy: the cached profile keeps the profile's own value
+                p = {**p, "uplink": {**p["uplink"], "min_macs": self.min_macs}}
+            fdb_raw, bp_raw, status_raw, addr_raw, strategy = await self._fdb_async(eng, tgt, user)
+            try:  # a non-integer value from the agent stays a RuntimeError, the client's one exception type
+                fdb = [(k, int(v)) for k, v in fdb_raw]
+                bp = [(k, int(v)) for k, v in bp_raw]
+                status = [(k, int(v)) for k, v in status_raw]
+            except (ValueError, TypeError) as e:
+                raise RuntimeError(f"snmp: non-integer value in the forwarding table ({type(e).__name__})") from None
+            addr = []
+            for k, v in addr_raw:
+                # only a 6-octet string is a MAC; bytes() of an Integer would give a row of zero bytes
+                raw = v.asOctets() if hasattr(v, "asOctets") else v if isinstance(v, (bytes, bytearray)) else None
+                if raw is not None and len(raw) == 6:
+                    addr.append((k, ":".join(f"{b:02x}" for b in raw)))
             names = [(k, str(v)) for k, v in await self._walk_key(eng, tgt, user, "ifname")]
             lldp = [(k, str(v)) for k, v in await self._walk_key(eng, tgt, user, "lldp_rem_sysname")]
             locports = []
             if p["lldp"]["local_port"] == "auto":  # "ifindex" never reads the local port table
                 locports = [(k, str(v)) for key in ("lldp_loc_portid", "lldp_loc_portdesc") for k, v in await self._walk_key(eng, tgt, user, key)]
-            return build_snapshot(fdb, bp, names, lldp, locports, profile=p, fdb_status=status or None, fdb_address=addr or None)
+            snap = build_snapshot(fdb, bp, names, lldp, locports, profile=p, fdb_status=status or None, fdb_address=addr or None)
+            snap.strategy = strategy
+            return snap
         finally:
             eng.close_dispatcher()
 
