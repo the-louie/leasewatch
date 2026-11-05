@@ -4,6 +4,11 @@ A connector is one configured instance of a source type (an OPNsense firewall, a
 The host builds it from a flat dict of string settings, asks it to validate them (no I/O), probes it once with
 check(), then calls collect() once per poll. The connector returns plain records in a Batch; it never writes to
 the database or to the device it reads from.
+
+What the host does with a Batch (merge.normalise_batch): it sets every record's `source` to the instance name (a
+connector may leave it ""), normalises `mac` with norm_mac() and drops records that fail it (logged once per
+instance, counted in stats["dropped"]). Errors: only a ConnectorError's text is shown in the UI and status; any
+other exception from check()/collect() is shown as its type name only (and logged with a traceback).
 """
 from __future__ import annotations
 
@@ -42,24 +47,30 @@ class Setting:
 @dataclass(frozen=True)
 class ConnectorInfo:
     """What a connector type is: its name ([a-z0-9_]+), its own version, the contract version it was written
-    against (must equal API_VERSION), which record kinds it emits ("sighting", "attachment") and its settings."""
+    against (must equal API_VERSION), which record kinds it emits ("sighting", "attachment") and its settings.
+    roles: "controller" = its attachments are a Wi-Fi controller's complete client list, so a device missing from
+    an answered batch has left Wi-Fi, and a failed poll leaves Wi-Fi devices "blind" (see merge.py)."""
     type: str
     version: str
     api_version: int
     produces: frozenset[str]
     settings: tuple[Setting, ...]
+    roles: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class Sighting:
     """L2/L3 identity of one device, as one source saw it.
 
-    mac: normalised "aa:bb:cc:dd:ee:ff". source: the connector instance name. kind: what the evidence is,
-    "dhcp" | "arp" | "client" | "scan". presence: True only if the source saw the device on the wire now (an ARP
-    entry, ISC's "online" lease status, an active controller client); a lease or reservation alone is False.
-    observed_at: epoch seconds when the connector collected it. network: human interface name (LAN, IOT), the
-    "vlan" column today. iface: source-specific interface id (opt3). lease_type: "static" | "dynamic" | "",
-    only kind "dhcp" sets it. client_id: DHCP client-id / DUID when known (reserved, unused so far)."""
+    mac: as the source gives it; the host normalises it to "aa:bb:cc:dd:ee:ff" and drops the record if it is not a
+    MAC. source: the connector instance name, filled in by the host (the connector may leave it ""). kind: what the
+    evidence is, "dhcp" | "arp" | "client" | "scan" (ranking in merge.py). presence: True only if the source saw the
+    device on the wire now (an ARP entry, ISC's "online" lease status, an active controller client); a lease or
+    reservation alone is False. Only presence=True makes a device online and moves last_online, for every kind.
+    observed_at: epoch seconds when the connector collected it; informational in API 1 (reserved as a tie-break
+    for C6). network: human interface name (LAN, IOT), the "vlan" column today. iface: source-specific interface
+    id (opt3). lease_type: "static" | "dynamic" | "", only kind "dhcp" sets it. client_id: DHCP client-id / DUID
+    when known (reserved, unused so far)."""
     mac: str
     source: str
     kind: str
@@ -78,10 +89,14 @@ class Sighting:
 class Attachment:
     """Where one device hangs: a switch port, a Wi-Fi AP, a port behind a controller-managed switch.
 
-    link: "wired" | "wifi". device: the switch/AP name as the operator knows it. port: short port label
+    mac, source, observed_at: as for Sighting (the host normalises mac and fills source; observed_at is
+    informational in API 1). link: exactly "wired" or "wifi"; any other value is ignored by the host (logged once).
+    From an instance with the "controller" role, "wired" means the controller sees the device on a cable: its
+    Wi-Fi details are cleared. device: the switch/AP name as the operator knows it. port: short port label
     ("GE1/0/14"), "" for Wi-Fi. uplink: the port leads to more infrastructure, so it is not where the device
     really is; via: what sits behind that port (LLDP neighbour or "7 devices"). vlan: VLAN id, if the source knows
-    it. ssid/ap/signal (dBm)/radio/alias: Wi-Fi details and the name set in the controller."""
+    it. ssid/ap/signal (dBm)/alias: Wi-Fi details and the name set in the controller. radio: free text, shown as
+    given ("2.4 GHz", "5 GHz", "6 GHz" suggested)."""
     mac: str
     source: str
     observed_at: int
@@ -100,7 +115,9 @@ class Attachment:
 
 @dataclass
 class Batch:
-    """The result of one collect(). stats: raw counts for status (e.g. leases/arp)."""
+    """The result of one collect(). stats: raw counts for status, all optional (the host reads a missing key as 0):
+    "leases", "arp", "reservations" (sighting producers), "macs" (switch), "clients" (controller); the host adds
+    "dropped" (records with an invalid MAC)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
@@ -157,9 +174,10 @@ class HostContext:
 @runtime_checkable
 class Connector(Protocol):
     """Lifecycle: describe() (class level, no instance) -> __init__ (no I/O) -> validate() (no I/O, list of
-    problems, empty = fine) -> check() (one cheap probe, raises ConnectorError, may be retried) -> collect() once
-    per poll (raises ConnectorError) -> close() (never raises). Third-party libraries are imported inside
-    check()/collect(), never at module import."""
+    problems, empty = fine) -> check() (one cheap probe, raises ConnectorError; the host calls it once before the
+    first collect() and again, with backoff, after it failed) -> collect() once per poll (raises ConnectorError)
+    -> close() (never raises). Third-party libraries are imported inside check()/collect(), never at module
+    import. Only a ConnectorError's text reaches the UI; any other exception is shown as its type name."""
 
     @classmethod
     def describe(cls) -> ConnectorInfo: ...
@@ -219,8 +237,11 @@ class SettingsMixin:
         return setting_problems(self.name, self.INFO.type, self.INFO.settings, self.settings)
 
     def __repr__(self) -> str:
+        # declared secrets, plus anything that looks like one (a key outside describe(), a path to a secret file)
         secret = {s.key for s in self.INFO.settings if s.secret}
-        shown = {k: ("***" if k in secret and v else v) for k, v in self.settings.items()}
+        hidden = lambda k: (k in secret or k.lower().endswith("_file")
+                            or any(w in k.lower() for w in ("key", "secret", "password", "token")))
+        shown = {k: ("***" if hidden(k) and v else v) for k, v in self.settings.items()}
         return f"{type(self).__name__}({self.name!r}, {shown!r})"
 
 

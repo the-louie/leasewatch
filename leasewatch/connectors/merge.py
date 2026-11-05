@@ -3,14 +3,43 @@
 Identity (ip, network, hostname, lease type, presence) comes from the sightings, the switch-port and Wi-Fi columns
 from the attachments, and events and history from the diff against the previous rows. No database and no clock:
 the caller passes the previous rows and `now`, and writes MergeResult.
+
+RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ranks after all listed ones:
+
+    field                 order                         rule
+    online, last_online   any kind                      a sighting with presence=True this poll (rule 1)
+    ip, network, iface    presence, dhcp>arp>client>scan  taken together from one sighting: the DHCP lease whose IP a
+                                                        presence sighting confirms (shown where that sighting saw
+                                                        it), else the first by presence, kind, then the sort keys
+    hostname, vendor      dhcp, client, arp, scan       the lease's hostname first, then the first non-empty value
+    lease_type            dhcp                          the chosen lease only
+
+Attachments: link must be "wired" or "wifi" (anything else is ignored, logged once per instance and value). A
+controller (ConnectorInfo.roles has "controller") sends its whole client list: "wifi" places a device on Wi-Fi,
+"wired" means the controller sees it on a cable, so its Wi-Fi details are cleared.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass, field, replace
 
 from ..config import Config
 from ..fw1 import Sighting as Fw1Sighting
+from ..fw1 import norm_mac
 from . import Attachment, Batch, Sighting
+
+log = logging.getLogger("leasewatch.merge")
+
+IDENTITY_KINDS = ("dhcp", "arp", "client", "scan")  # ip/network/iface, after presence
+NAME_KINDS = ("dhcp", "client", "arp", "scan")      # hostname/vendor fallback
+LINKS = ("wired", "wifi")
+# module globals, written by the merge: each warning below is logged once per process, not at every poll
+_mac_warned: set[str] = set()                # instance names that sent a record with an invalid MAC
+_link_warned: set[tuple[str, str]] = set()   # (instance name, link value) outside LINKS
+
+
+def _rank(order: tuple[str, ...], kind: str) -> int:
+    return order.index(kind) if kind in order else len(order)
 
 # device columns the merge owns; user fields (name, note, acked, acked_at) and baseline/first_seen of an existing
 # row are never written
@@ -70,40 +99,62 @@ def to_fw1(s: Sighting) -> Fw1Sighting:
 
 
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
-    """One record per MAC, independent of the order fw1 returns rows in.
+    """One record per MAC, independent of the order the sources return rows in (see RANKING above).
 
-    The lease whose IP is actually in the ARP table wins; ip/vlan/iface always come from one and the same
-    sighting (what is on the wire), so a device that moved VLAN while its old lease is still listed is shown
-    where it really is. DHCP gives hostname and lease type; ARP decides 'online'."""
+    s.source is the sighting's kind here and s.online its presence claim (to_fw1). The lease whose IP a presence
+    sighting confirms wins; ip/vlan/iface always come from one and the same sighting (what is on the wire), so a
+    device that moved VLAN while its old lease is still listed is shown where it really is."""
     by_mac: dict[str, list[Fw1Sighting]] = {}
     for s in sightings:
         by_mac.setdefault(s.mac, []).append(s)
     out: dict[str, Merged] = {}
+    # an empty IP sorts last (it cannot be where the device is), a static lease before a dynamic one
+    pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname)
+    # one total order over every sighting, so ties (same vlan/ip, several hostnames) never depend on row order
+    order = lambda s: (not s.online, _rank(IDENTITY_KINDS, s.source), s.source) + pick(s)
     for mac, ss in by_mac.items():
-        # a total order over the rows, so ties (same vlan/ip, several hostnames) never depend on fw1's row order
-        ss = sorted(ss, key=lambda s: (s.source != "dhcp", s.vlan == "", s.vlan, s.ip == "", s.ip, s.lease_type != "static", s.hostname))
-        # an empty IP sorts last (it cannot be where the device is), a static lease before a dynamic one
-        pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname)
+        ss = sorted(ss, key=order)
         dhcp = sorted((s for s in ss if s.source == "dhcp"), key=pick)
-        arp = sorted((s for s in ss if s.source == "arp"), key=pick)
-        arp_ips = {s.ip for s in arp if s.ip}
-        lease = next((s for s in dhcp if s.ip in arp_ips), dhcp[0] if dhcp else None)
-        wire = next((s for s in arp if lease and s.ip == lease.ip), arp[0] if arp else None)
-        loc = wire or lease
+        seen_ips = {s.ip for s in ss if s.online and s.source != "dhcp" and s.ip}
+        confirmed = next((s for s in dhcp if s.ip in seen_ips), None)
+        lease = confirmed or (dhcp[0] if dhcp else None)
+        # a confirmed lease is shown where the presence sighting saw it (that sighting's network and interface)
+        loc = next(s for s in ss if s.online and s.source != "dhcp" and s.ip == confirmed.ip) if confirmed else ss[0]
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
-                   sources={s.source for s in ss}, online=bool(arp) or any(s.online for s in dhcp))
+                   sources={s.source for s in ss}, online=any(s.online for s in ss))
         if lease:
             m.hostname, m.lease_type = lease.hostname, lease.lease_type
-        m.hostname = m.hostname or next((s.hostname for s in ss if s.hostname), "")
-        m.vendor = next((s.vendor for s in ss if s.vendor), "")
+        named = sorted(ss, key=lambda s: (_rank(NAME_KINDS, s.source), s.source) + pick(s))
+        m.hostname = m.hostname or next((s.hostname for s in named if s.hostname), "")
+        m.vendor = next((s.vendor for s in named if s.vendor), "")
         out[mac] = m
     return out
+
+
+def normalise_batch(name: str, b: Batch) -> Batch:
+    """The host's part of the record contract, for one instance's batch: `source` set to the instance name, `mac`
+    normalised, records whose MAC fails norm_mac dropped (stats["dropped"], one WARNING per instance per process).
+    Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
+    def fix(records: list) -> list:
+        out = []
+        for r in records:
+            mac = norm_mac(r.mac)
+            if mac:
+                out.append(r if (mac, name) == (r.mac, r.source) else replace(r, mac=mac, source=name))
+        return out
+    sightings, attachments = fix(b.sightings), fix(b.attachments)
+    dropped = len(b.sightings) + len(b.attachments) - len(sightings) - len(attachments)
+    if dropped and name not in _mac_warned:
+        _mac_warned.add(name)
+        log.warning("connector %s: %d records with invalid MAC dropped", name, dropped)
+    return Batch(sightings=sightings, attachments=attachments,
+                 stats={**b.stats, "dropped": b.stats.get("dropped", 0) + dropped})
 
 
 def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], cfg: Config, now: int,
           state: MergeState) -> MergeResult:
     """prev: every device row (mac -> column dict). batches: this poll's result per connector instance."""
-    ok = {n: b for n, b in batches.items() if isinstance(b, Batch)}
+    ok = {n: normalise_batch(n, b) for n, b in batches.items() if isinstance(b, Batch)}
     merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
@@ -168,23 +219,30 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
 
 def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches: dict[str, Batch | ConnectorFailure],
                        ok: dict[str, Batch], state: MergeState, res: MergeResult) -> None:
-    """Switch-port and Wi-Fi columns from the attachments, on the rows after the identity merge (in place)."""
+    """Switch-port and Wi-Fi columns from the attachments, on the rows after the identity merge (in place).
+
+    Several controllers: a device has left Wi-Fi only when every controller answered and none lists it; while any
+    controller failed this poll, a Wi-Fi device is "blind" (keeps its last values, gets no switch port). A "wifi"
+    attachment from an instance without the controller role is ignored (its list is not complete)."""
     controllers = [n for n in batches if n in state.controllers]
     # C6: one controller and one switch today; with several, the first instance listing a MAC wins here instead of
     # the report's "edge port beats Wi-Fi beats uplink, newest observation breaks ties"
     wifi: dict[str, Attachment] = {}
-    for n in controllers:
-        if n in ok:
-            for a in ok[n].attachments:
-                wifi.setdefault(a.mac, a)
     wired: dict[str, Attachment] = {}
     for n, b in ok.items():
-        if n not in state.controllers:
-            for a in b.attachments:
-                if a.link == "wired":
-                    wired.setdefault(a.mac, a)
+        for a in b.attachments:
+            if a.link not in LINKS:
+                value = str(a.link)[:40]  # whatever the connector put there; capped so a log line stays one line
+                if (n, value) not in _link_warned:
+                    _link_warned.add((n, value))
+                    log.warning("connector %s: attachments with link %r ignored (allowed: wired, wifi)", n, value)
+                continue
+            if n in state.controllers:
+                wifi.setdefault(a.mac, a)
+            elif a.link == "wired":
+                wired.setdefault(a.mac, a)
     ctrl_ok = any(n in ok for n in controllers)
-    ctrl_failed = bool(controllers) and not ctrl_ok
+    ctrl_failed = any(n not in ok for n in controllers)
     for mac, row in rows.items():
         cur = dict(row)
         upd: dict = {}  # later keys win, as the rightmost assignment of a repeated column in an SQL UPDATE does
@@ -212,8 +270,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
         # its last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
-        if ctrl_ok and on_wire and cur["wifi_ssid"] and mac not in wifi:
-            # the controller answered but no longer lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
+        if ctrl_ok and not ctrl_failed and on_wire and cur["wifi_ssid"] and mac not in wifi:
+            # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
             # branch above already recorded its port, so a cable is shown in this same poll.
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if sw else "")
         if cur["online"] and sw and not on_wifi and cur["link"] != "wifi":

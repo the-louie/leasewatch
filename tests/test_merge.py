@@ -1,12 +1,13 @@
 """merge() called directly with Batch objects: (prev rows, batches, state) -> rows, events, history."""
-import itertools, os, sys, tempfile, unittest
+import itertools, logging, os, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, HostContext, Sighting
-from leasewatch.connectors.merge import ROW_DEFAULTS, UPDATE_COLUMNS, ConnectorFailure, MergeState, merge
+from leasewatch.connectors import merge as merge_mod
+from leasewatch.connectors.merge import ROW_DEFAULTS, UPDATE_COLUMNS, ConnectorFailure, MergeState, merge, normalise_batch
 from leasewatch.connectors.snmp_switch import SnmpSwitchConnector
 from leasewatch.switch import build_snapshot
 
@@ -44,12 +45,23 @@ def ctl_wired(mac, alias=""):
     return Attachment(mac=mac, source="unifi", observed_at=NOW, link="wired", alias=alias)
 
 
+def K(mac, ip, kind, presence=True, host="", vendor="", net="HomeNet", src="ctl"):
+    """A sighting of any kind from a non-firewall instance (controller client list, scanner)."""
+    return Sighting(mac=mac, source=src, kind=kind, presence=presence, observed_at=NOW, ip=ip, hostname=host, vendor=vendor,
+                    network=net, iface="wlan")
+
+
+def att(mac, link, source="unifi"):
+    return Attachment(mac=mac, source=source, observed_at=NOW, link=link, device="sw-rack", port="GE1/0/7", ssid="HomeNet", ap="ap-hall")
+
+
 def fw1(*sightings):
     return Batch(sightings=list(sightings), stats={"leases": 1, "arp": 1})
 
 
 ON_WIFI = dict(link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall", wifi_signal=-50, wifi_radio="5 GHz")
 FAILED = ConnectorFailure("unifi", "TimeoutError", NOW)
+CTRL2 = frozenset({"unifi", "unifi2"})
 
 # name, prev rows, batches, state kwargs, expected row fields per mac (None = row not written), events, history macs
 CASES = [
@@ -129,6 +141,64 @@ CASES = [
     ("roaming to another AP writes a wifi event",
      [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "unifi": Batch(attachments=[wifi(A, ap="ap-attic")])}, {"controllers": CTRL},
      {A: dict(wifi_ap="ap-attic", link="wifi")}, [(A, "wifi", "HomeNet @ ap-hall -> HomeNet @ ap-attic")], []),
+    # C2b item 1: kinds client/scan, one total order for identity, RANKING for hostname/vendor
+    ("client sighting only: no crash, identity from it",
+     [], {"ctl": Batch(sightings=[K(A, "10.0.0.7", "client", host="alex-ipad", vendor="Apple")])}, {},
+     {A: dict(ip="10.0.0.7", vlan="HomeNet", iface="wlan", hostname="alex-ipad", vendor="Apple", online=1, sources="client")},
+     [(A, "new", "10.0.0.7 alex-ipad Apple (HomeNet)")], [A]),
+    ("scan sighting without presence: listed, not online",
+     [], {"scan": Batch(sightings=[K(A, "10.0.0.8", "scan", presence=False)])}, {},
+     {A: dict(ip="10.0.0.8", online=0, last_online=None, sources="scan")}, [(A, "new", "10.0.0.8 (HomeNet)")], [A]),
+    ("presence first: an unconfirmed lease loses to a client seen now",
+     [], {"fw1": fw1(S(A, "10.0.0.5", "pc", presence=False)), "ctl": Batch(sightings=[K(A, "10.0.0.7", "client")])}, {},
+     {A: dict(ip="10.0.0.7", vlan="HomeNet", hostname="pc", lease_type="dynamic", online=1)},
+     [(A, "new", "10.0.0.7 pc Acme (HomeNet)")], [A]),
+    ("a lease confirmed by a client beats an arp entry elsewhere",
+     [], {"fw1": fw1(S(A, "10.0.0.5", "pc", presence=False), arp(A, "10.0.1.9", net="Servers")),
+          "ctl": Batch(sightings=[K(A, "10.0.0.5", "client")])}, {},
+     {A: dict(ip="10.0.0.5", vlan="HomeNet", iface="wlan", hostname="pc")}, [(A, "new", "10.0.0.5 pc Acme (HomeNet)")], [A]),
+    ("hostname and vendor: client before arp",
+     [], {"fw1": fw1(arp(A, host="aa-arp", vendor="ArpCo")), "ctl": Batch(sightings=[K(A, "10.0.0.5", "client", host="zz-client",
+                                                                                     vendor="Apple", net="Clients")])}, {},
+     {A: dict(hostname="zz-client", vendor="Apple")}, [(A, "new", "10.0.0.5 zz-client Apple (Clients)")], [A]),
+    # item 2: presence decides online for every kind, also arp
+    ("arp without presence: not online",
+     [], {"fw1": fw1(arp(A, presence=False))}, {},
+     {A: dict(online=0, last_online=None)}, [(A, "new", "10.0.0.5 Acme (Clients)")], [A]),
+    ("arp without presence: last_online does not move, offline after grace",
+     [row(A, last_online=NOW - 700)], {"fw1": fw1(arp(A, presence=False))}, {},
+     {A: dict(online=0, last_online=NOW - 700, last_seen=NOW)}, [], []),
+    ("client with presence: online, last_online moves",
+     [row(A, online=0, last_online=NOW - 700)], {"ctl": Batch(sightings=[K(A, "10.0.0.5", "client", net="Clients")])}, {},
+     {A: dict(online=1, last_online=NOW)}, [], []),
+    # item 3: link outside {wired, wifi} is ignored
+    ("controller link 'wireless' ignored: as if not listed (left Wi-Fi), not 'wired'",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "unifi": Batch(attachments=[att(A, "wireless")])}, {"controllers": CTRL},
+     {A: dict(link="", wifi_ssid="", wifi_ap="")}, [], []),
+    ("switch link 'Wired' ignored: no port",
+     [row(A)], {"fw1": fw1(arp(A)), "switch": Batch(attachments=[att(A, "Wired", "switch")])}, {},
+     {A: dict(sw_port="", link="")}, [], []),
+    # item 4: the host normalises MACs and drops records that fail
+    ("MAC normalised, invalid MAC dropped",
+     [], {"fw1": fw1(arp("02-00-00-00-00-0A"), arp("not-a-mac", "10.0.0.9"))}, {},
+     {"02:00:00:00:00:0a": dict(ip="10.0.0.5"), "not-a-mac": None, "02-00-00-00-00-0A": None},
+     [("02:00:00:00:00:0a", "new", "10.0.0.5 Acme (Clients)")], ["02:00:00:00:00:0a"]),
+    # item 5: several controllers
+    ("two controllers: listed by one of them, stays on Wi-Fi",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "unifi": Batch(), "unifi2": Batch(attachments=[wifi(A, ap="ap-attic")])},
+     {"controllers": CTRL2},
+     {A: dict(link="wifi", wifi_ap="ap-attic")}, [(A, "wifi", "HomeNet @ ap-hall -> HomeNet @ ap-attic")], []),
+    ("two controllers: both answered, neither lists it: left Wi-Fi",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "unifi": Batch(), "unifi2": Batch()}, {"controllers": CTRL2},
+     {A: dict(link="", wifi_ssid="")}, [], []),
+    ("two controllers: one failed: blind, keeps Wi-Fi and gets no AP uplink port",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "switch": Batch(attachments=[port(A, "GE1/0/5", "ap-hall", True)]),
+                           "unifi": Batch(), "unifi2": ConnectorFailure("unifi2", "TimeoutError", NOW)},
+     {"controllers": CTRL2},
+     {A: dict(sw_port="", link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall")}, [], []),
+    ("controller role, not the name: a controller called ctl-1",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "ctl-1": Batch()}, {"controllers": frozenset({"ctl-1"})},
+     {A: dict(link="", wifi_ssid="")}, [], []),
 ]
 
 
@@ -154,6 +224,39 @@ class MergeTableTests(unittest.TestCase):
                 self.assertEqual(res.events, events)
                 self.assertEqual([m for m, _ in res.history], history)
                 self.assertEqual(res.new, [m for m, k, _ in events if k == "new"])
+
+    def test_normalise_batch(self):
+        b = Batch(sightings=[Sighting(mac="02:00:00:00:00:0A", source="", kind="arp", presence=True, observed_at=NOW),
+                             Sighting(mac="", source="", kind="arp", presence=True, observed_at=NOW)],
+                  attachments=[Attachment(mac="bogus", source="", observed_at=NOW, link="wired")], stats={"arp": 2})
+        with mock.patch.object(merge_mod, "_mac_warned", set()):
+            with self.assertLogs("leasewatch.merge", "WARNING") as logs:
+                out = normalise_batch("fw2", b)
+            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector fw2: 2 records with invalid MAC dropped"])
+            with self.assertNoLogs("leasewatch.merge", "WARNING"):  # once per instance per process
+                normalise_batch("fw2", b)
+        self.assertEqual([(s.mac, s.source) for s in out.sightings], [("02:00:00:00:00:0a", "fw2")])  # host fills source
+        self.assertEqual((out.attachments, out.stats), ([], {"arp": 2, "dropped": 2}))
+        self.assertEqual(normalise_batch("fw2", out).stats["dropped"], 2)  # applying it again drops nothing more
+        self.assertEqual(len(b.sightings), 2)  # the given batch is left as it is
+
+    def test_unknown_link_logged_once_per_instance_and_value(self):
+        batches = {"fw1": fw1(arp(A), arp(B, "10.0.0.9")),
+                   "switch": Batch(attachments=[att(A, "fiber", "switch"), att(B, "fiber", "switch"), att(B, "", "switch")])}
+        with mock.patch.object(merge_mod, "_link_warned", set()):
+            with self.assertLogs("leasewatch.merge", "WARNING") as logs:
+                self.run_merge([], batches)
+            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector switch: attachments with link 'fiber' ignored (allowed: wired, wifi)",
+                                           "WARNING:leasewatch.merge:connector switch: attachments with link '' ignored (allowed: wired, wifi)"])
+            with self.assertNoLogs("leasewatch.merge", "WARNING"):
+                self.run_merge([], batches)
+
+    def test_identity_is_order_independent_over_all_kinds(self):
+        rows = [S(A, "10.0.0.5", "pc", presence=False), K(A, "10.0.0.7", "client", host="ipad"), K(A, "10.0.0.8", "scan"),
+                arp(A, "10.0.1.9", presence=False, net="Servers")]
+        results = {tuple((r["ip"], r["vlan"], r["hostname"], r["online"]) for r in self.run_merge([], {"x": Batch(sightings=list(p))}).rows.values())
+                   for p in itertools.permutations(rows)}
+        self.assertEqual(results, {(("10.0.0.7", "HomeNet", "pc", 1),)})
 
     def test_stats_and_history_values(self):
         res = self.run_merge([row(A, hostname="pc", lease_type="dynamic")], {"fw1": fw1(S(A, "10.0.0.6", "pc"), arp(A, "10.0.0.6"), arp(B, "10.0.0.9"))})

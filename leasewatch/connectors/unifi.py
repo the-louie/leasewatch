@@ -33,6 +33,7 @@ def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> 
 class UnifiConnector(SettingsMixin):
     INFO = ConnectorInfo(
         type="unifi", version="1.0", api_version=API_VERSION, produces=frozenset({"attachment"}),
+        roles=frozenset({"controller"}),
         settings=(
             Setting("url", required=True, help="https://<controller>"),
             Setting("site", default="default", help="UniFi site id"),
@@ -61,18 +62,22 @@ class UnifiConnector(SettingsMixin):
                 problems.append(f"{key} must be a boolean (1/0, true/false, yes/no, on/off)")
         return problems
 
-    def _clients(self) -> dict[str, WifiInfo]:
+    def check(self) -> None:
         try:
-            return self.client.clients()
-        except RuntimeError as e:
+            self.client.clients()  # login, two reads, logout: the smallest call the classic API offers
+        except ConnectorError:
+            raise
+        except Exception as e:  # the client's messages never contain the URL or the password
             raise ConnectorError(str(e) or type(e).__name__) from e
 
-    def check(self) -> None:
-        self._clients()  # login, two reads, logout: the smallest call the classic API offers
-
     def collect(self) -> Batch:
-        wifi = self._clients()
-        return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
+        try:
+            wifi = self.client.clients()
+            return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
+        except ConnectorError:
+            raise
+        except Exception as e:  # the client's messages never contain the URL or the password
+            raise ConnectorError(str(e) or type(e).__name__) from e
 
     def close(self) -> None:
         pass  # each call logs in and out on its own opener

@@ -68,6 +68,19 @@ class DescribeTests(unittest.TestCase):
         r = repr(OpnsenseConnector("fw1", {**FW1, "secret": "topsecret"}, CTX)) + repr(UnifiConnector("unifi", {**UF, "password": "topsecret"}, CTX))
         self.assertNotIn("topsecret", r)
 
+    def test_repr_hides_secret_looking_keys(self):
+        r = repr(SnmpSwitchConnector("switch", {**SW, "profile_file": "/run/secrets/sw.json", "api_token": "tok-1",
+                                                "Some_Password": "pw-1", "KEYRING": "kr-1", "site": "visible-1"}, CTX))
+        for hidden in ("/run/secrets/sw.json", "tok-1", "pw-1", "kr-1", "a" * 8, "p" * 8):
+            self.assertNotIn(hidden, r)
+        self.assertIn("visible-1", r)
+        self.assertIn("'profile': ''", r)  # an empty value stays visible: nothing to hide
+
+    def test_roles(self):
+        self.assertEqual(UnifiConnector.describe().roles, frozenset({"controller"}))
+        self.assertEqual(OpnsenseConnector.describe().roles, frozenset())
+        self.assertEqual(SnmpSwitchConnector.describe().roles, frozenset())
+
     def test_redactor(self):
         self.assertEqual(make_redactor(["abc", "", "abcdef"])("x abcdef abc"), "x *** ***")
         self.assertEqual(make_redactor([])("abc"), "abc")
@@ -231,6 +244,27 @@ class SwitchConnectorTests(unittest.TestCase):
             SnmpSwitchConnector("switch", SW, CTX, client=Raises(RuntimeError())).collect()
         self.assertEqual(str(cm.exception), "RuntimeError")
 
+    def test_every_exception_becomes_connectorerror(self):
+        own = ConnectorError("snmp: own text")
+        probe = lambda exc: type("P", (), {"probe": lambda self: (_ for _ in ()).throw(exc), "snapshot": lambda self: (_ for _ in ()).throw(exc)})()
+        for exc, text in ((ValueError("bad oid value"), "bad oid value"), (KeyError(), "KeyError"), (OSError(), "OSError"),
+                          (ImportError("No module named 'pysnmp'"), "missing dependency pysnmp"), (own, "snmp: own text")):
+            c = SnmpSwitchConnector("switch", SW, CTX, client=probe(exc))
+            for call in (c.check, c.collect):
+                with self.subTest(exc=type(exc).__name__, call=call.__name__), self.assertRaises(ConnectorError) as cm:
+                    call()
+                self.assertEqual(str(cm.exception), text)
+                if exc is own:
+                    self.assertIs(cm.exception, own)  # passed through, not wrapped
+
+    def test_device_names_failure_becomes_connectorerror(self):
+        ctx = HostContext(now=lambda: 1700000000, device_names=lambda: {}["x"])
+        snap = self.snap()
+        c = SnmpSwitchConnector("switch", SW, ctx, client=type("W", (), {"snapshot": lambda self: snap})())
+        with self.assertRaises(ConnectorError) as cm:
+            c.collect()
+        self.assertEqual(str(cm.exception), "'x'")
+
 
 class UnifiConnectorTests(unittest.TestCase):
     def test_collect_matches_parse_clients(self):
@@ -251,6 +285,24 @@ class UnifiConnectorTests(unittest.TestCase):
             with self.assertRaises(ConnectorError) as cm:
                 call()
             self.assertEqual(str(cm.exception), "unifi: HTTP 403")
+
+    def test_every_exception_becomes_connectorerror(self):
+        own = ConnectorError("unifi: own text")
+        for exc, text in ((ValueError("bad json"), "bad json"), (KeyError(), "KeyError"), (TypeError(), "TypeError"),
+                          (own, "unifi: own text")):
+            c = UnifiConnector("unifi", UF, CTX, client=Raises(exc))
+            for call in (c.check, c.collect):
+                with self.subTest(exc=type(exc).__name__, call=call.__name__), self.assertRaises(ConnectorError) as cm:
+                    call()
+                self.assertEqual(str(cm.exception), text)
+                if exc is own:
+                    self.assertIs(cm.exception, own)
+
+    def test_bad_record_from_the_client_becomes_connectorerror(self):
+        c = UnifiConnector("unifi", UF, CTX, client=type("U", (), {"clients": lambda self: {"02:00:00:00:00:01": None}})())
+        with self.assertRaises(ConnectorError) as cm:
+            c.collect()
+        self.assertEqual(str(cm.exception), "'NoneType' object has no attribute 'wired'")
 
 
 class LegacyTests(unittest.TestCase):

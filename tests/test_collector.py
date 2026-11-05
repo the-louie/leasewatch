@@ -96,7 +96,7 @@ class CollectorRegressionTests(unittest.TestCase):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
         self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700, last_online=last_online-700")
         c.sightings = lambda ignore=(): (_ for _ in ()).throw(RuntimeError("weird"))
-        r = col.run_once(); self.assertFalse(r["ok"]); self.assertIn("weird", self.db.get_meta("last_error"))
+        r = col.run_once(); self.assertFalse(r["ok"]); self.assertEqual(self.db.get_meta("last_error"), "RuntimeError")  # not a ConnectorError: type name only
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 0)
 
 
@@ -263,6 +263,36 @@ class ReviewFixTests(unittest.TestCase):
         state["down"] = True
         col.run_once(); d = self.db.device(mac)
         self.assertEqual((d["sw_port"], d["link"], d["wifi_ssid"]), ("", "wifi", "HomeNet"))
+
+    def test_controllers_come_from_roles_not_the_type(self):
+        from dataclasses import replace
+        from unittest import mock
+        from leasewatch.connectors.snmp_switch import SnmpSwitchConnector
+        from leasewatch.connectors.unifi import UnifiConnector
+        from leasewatch.switch import build_snapshot
+        from leasewatch import collector as collector_mod
+        col = Collector(self.cfg, self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5", src="arp")]))
+        col._unifi = type("U", (), {"clients": lambda self: {}})()
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})()
+        for sw_roles, uf_roles, want in ((frozenset(), frozenset({"controller"}), {"unifi"}),
+                                         (frozenset({"controller"}), frozenset(), {"switch"})):
+            with self.subTest(want=want), \
+                    mock.patch.object(SnmpSwitchConnector, "INFO", replace(SnmpSwitchConnector.INFO, roles=sw_roles)), \
+                    mock.patch.object(UnifiConnector, "INFO", replace(UnifiConnector.INFO, roles=uf_roles)), \
+                    mock.patch.object(collector_mod, "merge_batches", wraps=collector_mod.merge_batches) as m:
+                col.run_once()
+                self.assertEqual(m.call_args.args[4].controllers, frozenset(want))
+
+    def test_batch_stats_are_optional(self):
+        from leasewatch.switch import build_snapshot
+        c = FakeClient([S("02:00:00:00:00:01", "10.0.0.5", src="arp")])
+        c.sightings = lambda ignore=(): ([S("02:00:00:00:00:01", "10.0.0.5", src="arp")], {})
+        col = Collector(self.cfg, self.db, c)
+        col._unifi = type("U", (), {"clients": lambda self: {}})()
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})()
+        self.assertTrue(col.run_once()["ok"])
+        self.assertEqual((self.db.get_meta("last_raw"), self.db.get_meta("switch_macs"), self.db.get_meta("unifi_clients")),
+                         ("0 leases, 0 arp", "0", "0"))
 
     def test_enrich_error_names_a_bare_exception(self):
         col = Collector(self.cfg, self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5")]))

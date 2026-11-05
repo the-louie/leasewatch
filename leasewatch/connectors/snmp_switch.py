@@ -123,20 +123,26 @@ class SnmpSwitchConnector(SettingsMixin):
         self._refuse_if_invalid()
         try:
             self.client.probe()
+        except ConnectorError:
+            raise
         except ImportError as e:
             raise ConnectorError("missing dependency pysnmp") from e
-        except RuntimeError as e:
+        except Exception as e:  # the client's messages never contain the host or the keys
             raise ConnectorError(str(e) or type(e).__name__) from e
 
     def collect(self) -> Batch:
         self._refuse_if_invalid()
         try:
             snap = self.client.snapshot()
-        except RuntimeError as e:
+            name_uplinks(snap, self.ctx.device_names)
+            return Batch(attachments=to_attachments(snap, self.name, self.settings["name"], self.ctx.now()),
+                         stats={"macs": len(snap.by_mac)})
+        except ConnectorError:
+            raise
+        except ImportError as e:
+            raise ConnectorError("missing dependency pysnmp") from e
+        except Exception as e:  # the client's messages never contain the host or the keys
             raise ConnectorError(str(e) or type(e).__name__) from e
-        name_uplinks(snap, self.ctx.device_names)
-        return Batch(attachments=to_attachments(snap, self.name, self.settings["name"], self.ctx.now()),
-                     stats={"macs": len(snap.by_mac)})
 
     def close(self) -> None:
         pass  # each snapshot opens and closes its own SNMP engine

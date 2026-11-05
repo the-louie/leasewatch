@@ -10,8 +10,10 @@ abandoned: its result is dropped (generation counter) and the instance is skippe
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Callable
 
@@ -20,8 +22,8 @@ from .db import Database
 from .connectors import (Batch, ConnectorError, InstanceSpec, build_instance, instance_problems, instances_context,
                          registry)
 from .connectors.legacy import switch_settings, unifi_settings
-from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState, to_fw1,
-                               merge as merge_batches)
+from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState,
+                               normalise_batch, to_fw1, merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
 from .connectors.snmp_switch import SnmpSwitchConnector
 from .connectors.unifi import UnifiConnector
@@ -33,9 +35,10 @@ HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
-# meta aliases the 1.0 UI reads, for the instances the legacy mapping names: (ok, error, count key, Batch.stats key)
-ALIASES = {"switch": ("switch_ok", "switch_error", "switch_macs", "macs"),
-           "unifi": ("unifi_ok", "unifi_error", "unifi_clients", "clients")}
+# meta aliases the 1.0 UI reads, for the instances the legacy mapping names (name and type must both match):
+# (type, ok, error, count key, Batch.stats key)
+ALIASES = {"switch": ("snmp_switch", "switch_ok", "switch_error", "switch_macs", "macs"),
+           "unifi": ("unifi", "unifi_ok", "unifi_error", "unifi_clients", "clients")}
 
 
 @dataclass
@@ -55,6 +58,7 @@ class _Run:
     thread: threading.Thread | None = None
     started: float = 0.0
     gen: int = 0
+    phase: str = ""             # the worker's phase ("check"/"collect"), so a timeout knows which call hung
     result: tuple | None = None
     skip_logged: bool = False
 
@@ -90,7 +94,8 @@ class Collector:
             conn, problems = None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
         if problems:
             run.disabled = run.error = "disabled: " + "; ".join(problems)
-            log.error("connector %s (%s) %s", spec.name, spec.type, run.error)
+            # each problem already starts with "connector <name> (<type>)"
+            log.error("%s (instance disabled)", "; ".join(problems))
             return
         self._connectors[spec.name] = conn
 
@@ -151,14 +156,21 @@ class Collector:
         phase = "check"
         try:
             if check:
+                self._phase(run, gen, phase)
                 conn.check()
             phase = "collect"
+            self._phase(run, gen, phase)
             out: object = conn.collect()
         except BaseException as e:  # everything is reported through the result; a worker never dies silently
             out = e
         with self._lock:
             if run.gen == gen:
                 run.result = (phase, out, int((time.monotonic() - t0) * 1000))
+
+    def _phase(self, run: _Run, gen: int, phase: str) -> None:
+        with self._lock:
+            if run.gen == gen:
+                run.phase = phase
 
     def _outcome(self, run: _Run, error: str, exc: BaseException | None) -> None:
         """Log a change of state once: ok -> failed (WARNING for ConnectorError and timeouts, ERROR with traceback
@@ -167,7 +179,9 @@ class Collector:
             if exc is None or isinstance(exc, ConnectorError):
                 log.warning("connector %s (%s) failed: %s", run.name, run.type, error)
             else:
-                log.error("connector %s (%s) failed: %s", run.name, run.type, error, exc_info=exc)
+                # the traceback as redacted text, not exc_info: its last line is the raw exception text
+                tb = self._ctx.redact("".join(traceback.format_exception(exc)))
+                log.error("connector %s (%s) failed: %s\n%s", run.name, run.type, error, tb.rstrip())
         elif not error and run.failed:
             log.info("connector %s (%s) recovered", run.name, run.type)
         run.failed, run.error = bool(error), error
@@ -194,6 +208,7 @@ class Collector:
             with self._lock:
                 run.gen += 1
                 run.result = None
+                run.phase = ""
             run.thread = threading.Thread(target=self._work, args=(run, run.gen, self._connectors[n], not run.checked),
                                           name=f"connector-{n}", daemon=True)
             run.started = time.monotonic()
@@ -203,16 +218,20 @@ class Collector:
             run.thread.join(max(0.0, run.started + run.timeout - time.monotonic()))
             with self._lock:
                 res = run.result
+                hung_in = run.phase
                 if res is None:
                     run.gen += 1  # abandoned: whatever the thread returns later belongs to no poll
             if res is None:
-                phase, out_obj, ms = "collect", None, run.timeout * 1000
+                # a check() that hangs gets the check backoff, like a check() that fails
+                phase, out_obj, ms = hung_in or "collect", None, run.timeout * 1000
             else:
                 phase, out_obj, ms = res
+            if phase == "collect":
+                run.checked = True  # check() passed (or was not due): a failing collect() does not re-run it
             if isinstance(out_obj, Batch):
-                run.checked = True
                 self._outcome(run, "", None)
-                out[run.name] = out_obj
+                # source filled, MACs normalised before anyone reads it (the uplink names, counts, the merge)
+                out[run.name] = out_obj = normalise_batch(run.name, out_obj)
                 status[f"conn.{run.name}.ms"] = str(ms)
                 status[f"conn.{run.name}.count"] = str(len(out_obj.sightings) + len(out_obj.attachments))
                 continue
@@ -220,8 +239,10 @@ class Collector:
             if res is None:
                 error = f"timed out after {run.timeout} s"
             elif exc is not None:
-                # a bare TimeoutError has no text; a secret the connector echoed anyway is masked
-                error = self._ctx.redact(str(exc) or type(exc).__name__)[:200]
+                # only a ConnectorError's text is meant for the UI (a bare one has none: its type name); any other
+                # exception is shown as its type name, its text goes to the redacted log line only
+                error = (self._ctx.redact(str(exc) or type(exc).__name__)[:200] if isinstance(exc, ConnectorError)
+                         else type(exc).__name__)
             else:
                 error = "collect() did not return a Batch"
             if phase == "check":
@@ -248,8 +269,8 @@ class Collector:
                            f"conn.{n}.ts": ts, f"conn.{n}.enabled": "0" if run.disabled else "1"})
             status.setdefault(f"conn.{n}.ms", "0")
             status.setdefault(f"conn.{n}.count", "0")
-            if n in ALIASES and not run.disabled:
-                k_ok, k_err, k_count, stat = ALIASES[n]
+            if n in ALIASES and run.type == ALIASES[n][0] and not run.disabled:
+                _type, k_ok, k_err, k_count, stat = ALIASES[n]
                 status[k_ok], status[k_err] = ("1" if ok else "0"), error
                 if ok:
                     status[k_count] = str(out[n].stats.get(stat, 0))
@@ -267,7 +288,7 @@ class Collector:
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
         return {"ok": False, "error": msg}
 
-    def _write(self, c, prev: dict[str, dict], res: MergeResult, now: int) -> None:
+    def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int) -> None:
         for mac, row in res.rows.items():
             if mac in prev:
                 c.execute(f"UPDATE devices SET {', '.join(k + '=?' for k in UPDATE_COLUMNS)} WHERE mac=?",
@@ -322,8 +343,10 @@ class Collector:
             log.warning("first poll returned no devices (%s); not taking a baseline", raw_stats)
             return self._fail("first poll returned no devices", enrich_status)
         batches = {n: got[n] for n in self._runs if n in got}
+        # the controller role, not the type: any instance whose describe() says so (getattr: a type without roles)
         state = MergeState(self._no_lease_since, first_run, prev_ok,
-                           frozenset(n for n, conn in self._connectors.items() if conn.describe().type == "unifi"))
+                           frozenset(n for n, conn in self._connectors.items()
+                                     if "controller" in getattr(conn.describe(), "roles", frozenset())))
         with self.db.tx() as c:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             res = merge_batches(prev, batches, self.cfg, now, state)

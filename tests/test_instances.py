@@ -234,7 +234,8 @@ class ValidateTests(Base):
     def test_invalid_instance_is_disabled_at_startup(self):
         with self.assertLogs("leasewatch.collector", "ERROR") as logs:
             col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake", "LW_CONNECTOR__X__PORT": "0"})
-        self.assertIn("connector x (fake) disabled: connector x (fake): PORT must be at least 1", logs.output[0])
+        # the "connector <name> (<type>)" prefix once, then the reason
+        self.assertEqual(logs.output[0], "ERROR:leasewatch.collector:connector x (fake): PORT must be at least 1 (instance disabled)")
         self.assertNotIn("x", col._connectors)
         self.assertTrue(col.run_once()["ok"])
         self.assertEqual((db.get_meta("conn.x.enabled"), db.get_meta("conn.x.ok")), ("0", "0"))
@@ -320,8 +321,58 @@ class ThreadTests(Base):
         x.on_collect = bug
         with self.assertLogs("leasewatch.collector", "ERROR") as logs:
             col.run_once()
-        self.assertTrue(logs.output[0].startswith("ERROR:leasewatch.collector:connector x (fake) failed: bad row"))
-        self.assertIsNotNone(logs.records[0].exc_info)
+        # not a ConnectorError: the status shows the type name, the log the (redacted) traceback text
+        self.assertTrue(logs.output[0].startswith("ERROR:leasewatch.collector:connector x (fake) failed: ValueError\nTraceback"))
+        self.assertIn("ValueError: bad row", logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)
+        self.assertEqual(db.get_meta("conn.x.error"), "ValueError")
+
+    def test_traceback_of_a_non_connectorerror_is_redacted(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake",
+                                  "LW_CONNECTOR__X__TOKEN": "TOPSECRET-t"})
+
+        def bug():
+            raise RuntimeError("bad token TOPSECRET-t")
+        col._connectors["x"].on_collect = bug
+        with self.assertLogs("leasewatch.collector", "ERROR") as logs:
+            col.run_once()
+        out = "\n".join(logs.output)
+        self.assertNotIn("TOPSECRET", out)
+        self.assertIn("RuntimeError: bad token ***", out)
+        self.assertIsNone(logs.records[0].exc_info)  # exc_info would print the raw text past the redactor
+        self.assertEqual(db.get_meta("conn.x.error"), "RuntimeError")
+
+    def test_passed_check_is_not_rerun_after_a_failed_collect(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})
+        x = col._connectors["x"]
+
+        def down():
+            raise ConnectorError("down")
+        x.on_collect = down
+        col.run_once()
+        col.run_once()
+        self.assertEqual((x.checks, x.collects), (1, 2))
+
+    def test_hanging_check_gets_the_check_backoff(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake", "LW_CONNECTOR__X__TIMEOUT": "1"})
+        x, run = col._connectors["x"], col._runs["x"]
+        release = threading.Event()
+        x.on_check = lambda: release.wait(10)
+        try:
+            col.run_once()
+            self.assertEqual(db.get_meta("conn.x.error"), "check failed: timed out after 1 s")
+            self.assertEqual(round(run.retry_at - time.monotonic()), 15)
+            self.assertFalse(run.checked)
+        finally:
+            release.set()
+            run.thread.join(5)
+        self.assertIsNone(run.result)  # the abandoned thread's late outcome belongs to no poll
+
+    def test_alias_keys_need_name_and_type(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "fake"})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.switch.ok"), "1")
+        self.assertEqual(db.get_meta("switch_ok", "unset"), "unset")  # a "switch" that is not an snmp_switch
 
     def test_sighting_producers(self):
         env = {"LW_CONNECTORS": "fw1,fw2", **FW1, "LW_CONNECTOR__FW2__TYPE": "fakefw"}
