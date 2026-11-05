@@ -16,7 +16,13 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
 
 Attachments: link must be "wired" or "wifi" (anything else is ignored, logged once per instance and value). A
 controller (ConnectorInfo.roles has "controller") sends its whole client list: "wifi" places a device on Wi-Fi,
-"wired" means the controller sees it on a cable, so its Wi-Fi details are cleared.
+"wired" means the controller sees it on a cable, so its Wi-Fi details are cleared. Several switches: each instance's
+first wired attachment for a MAC is its candidate; across instances an edge (non-uplink) port beats an uplink port,
+then the newest observed_at, then the instance order (batch order = LW_CONNECTORS). Wi-Fi from a controller still
+beats any switch port. loc_source is the instance whose attachment placed the device.
+
+Per-source freshness (MergeResult.seen): one (mac, instance, now, now if presence else None) per instance that listed
+a known MAC this poll, in a sighting or an attachment.
 """
 from __future__ import annotations
 
@@ -44,11 +50,11 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # device columns the merge owns; user fields (name, note, acked, acked_at) and baseline/first_seen of an existing
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
-                  "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link")
+                  "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
-                "wifi_alias": "", "link": ""}
+                "wifi_alias": "", "link": "", "loc_source": ""}
 
 
 @dataclass
@@ -90,6 +96,9 @@ class MergeResult:
     events: list[tuple[str, str, str]] = field(default_factory=list)  # (mac, kind, detail)
     history: list[tuple[str, dict]] = field(default_factory=list)     # (mac, {ip, hostname, vlan, lease_type})
     stats: dict[str, int] = field(default_factory=dict)       # devices, new, changed
+    # (mac, instance, last_seen, last_present or None): the instance listed the MAC this poll; last_present only when
+    # one of its sightings asserted presence (the writer keeps the stored last_present on None)
+    seen: list[tuple[str, str, int, int | None]] = field(default_factory=list)
 
 
 def to_fw1(s: Sighting) -> Fw1Sighting:
@@ -207,6 +216,14 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                    hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=m.vlan or cur["vlan"],
                    iface=m.iface or cur["iface"], lease_type=lease_type, sources=sources, online=int(online))
     _apply_attachments(rows, merged, batches, ok, state, res)
+    # only MACs with a device row: a switch FDB lists MACs no sighting ever named, which would leave orphan rows
+    for n, b in ok.items():
+        listed: dict[str, bool] = {}
+        for s in b.sightings:
+            listed[s.mac] = listed.get(s.mac, False) or s.presence
+        for a in b.attachments:
+            listed.setdefault(a.mac, False)
+        res.seen += [(mac, n, now, now if present else None) for mac, present in listed.items() if mac in rows]
     for row in rows.values():
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
@@ -225,11 +242,11 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
     controller failed this poll, a Wi-Fi device is "blind" (keeps its last values, gets no switch port). A "wifi"
     attachment from an instance without the controller role is ignored (its list is not complete)."""
     controllers = [n for n in batches if n in state.controllers]
-    # C6: one controller and one switch today; with several, the first instance listing a MAC wins here instead of
-    # the report's "edge port beats Wi-Fi beats uplink, newest observation breaks ties"
     wifi: dict[str, Attachment] = {}
     wired: dict[str, Attachment] = {}
-    for n, b in ok.items():
+    rank: dict[str, tuple] = {}  # mac -> sort key of the wired candidate kept so far (lower wins)
+    for i, (n, b) in enumerate(ok.items()):
+        mine: set[str] = set()  # MACs this instance already put up: its first wired attachment is its candidate
         for a in b.attachments:
             if a.link not in LINKS:
                 value = str(a.link)[:40]  # whatever the connector put there; capped so a log line stays one line
@@ -239,8 +256,13 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 continue
             if n in state.controllers:
                 wifi.setdefault(a.mac, a)
-            elif a.link == "wired":
-                wired.setdefault(a.mac, a)
+            elif a.link == "wired" and a.mac not in mine:
+                mine.add(a.mac)
+                # the edge port is where the device is; an uplink only says which way it lies. Two edge ports (the
+                # FDBs age at different speeds): the newest observation, then the instance order
+                key = (bool(a.uplink), -(a.observed_at or 0), i)
+                if a.mac not in rank or key < rank[a.mac]:
+                    wired[a.mac], rank[a.mac] = a, key
     ctrl_ok = any(n in ok for n in controllers)
     ctrl_failed = any(n not in ok for n in controllers)
     for mac, row in rows.items():
@@ -253,27 +275,33 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         blind = ctrl_failed and cur["link"] == "wifi"
         sw = wired.get(mac)
         # on the wire this poll, not in grace: the FDB ages out slower than ARP, so a departed device would get a stale port
-        # C6: Wi-Fi beats any switch port here, also an edge port (today's rule); the report ranks the edge port first
-        if sw and on_wire and not on_wifi and not blind:
-            if sw.port and (sw.port != cur["sw_port"] or sw.via != cur["sw_via"]):
+        # Wi-Fi beats any switch port, also an edge port: a controller's client list is first-hand, an FDB entry for a
+        # Wi-Fi client can be an AP port that is not marked as an uplink
+        if sw and on_wire and not on_wifi and not blind and sw.port:
+            # only the winner is compared with the row, so a losing candidate that moves writes no event
+            if sw.port != cur["sw_port"] or sw.via != cur["sw_via"]:
                 if cur["sw_port"] and sw.port != cur["sw_port"]:
                     res.events.append((mac, "port", f"{cur['sw_port']} -> {sw.port}{' via ' + sw.via if sw.via else ''}"))
                 upd.update(sw_port=sw.port, sw_via=sw.via)
+            upd["loc_source"] = sw.source
         if on_wifi:
             if w.ssid and (w.ssid != cur["wifi_ssid"] or w.ap != cur["wifi_ap"]):
                 if cur["wifi_ssid"]:
                     res.events.append((mac, "wifi", f"{cur['wifi_ssid']} @ {cur['wifi_ap'] or '?'} -> {w.ssid} @ {w.ap or '?'}"))
-            upd.update(wifi_ssid=w.ssid, wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi")
+            upd.update(wifi_ssid=w.ssid, wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
+                       loc_source=w.source)
             if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale
                 upd.update(sw_port="", sw_via="")
         elif w is not None:  # the controller says wired now: drop the old Wi-Fi details
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
+            upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
         # its last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
         if ctrl_ok and not ctrl_failed and on_wire and cur["wifi_ssid"] and mac not in wifi:
             # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
             # branch above already recorded its port, so a cable is shown in this same poll.
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if sw else "")
+            upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
         if cur["online"] and sw and not on_wifi and cur["link"] != "wifi":
             upd["link"] = "wired"
         row.update(upd)

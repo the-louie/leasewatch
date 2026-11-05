@@ -68,6 +68,8 @@ Each instance collects in its own thread. One that fails, or takes longer than i
 - **History** rows are written only when IP, hostname, network or lease type change (capped at 200 per device). **Events:** new, ip, hostname, vlan, lease_type, port, wifi, back (online again after > 1 day), acked / unacked; kept for a year.
 - Lease type of a device whose lease is gone (`LEASE_TYPE_MODE`): `keep` (default) keeps the last type, so an expiring lease that is still in ARP does not flap between types on every poll; `grace` clears it once the device has been listed without a lease for `ONLINE_GRACE_MINUTES` (timed in memory, so a restart starts the clock again); `immediate` clears it at the first poll without a lease. Clearing writes a `lease_type` event and a history row. `sources` shows what listed it last.
 - A Wi-Fi device that leaves keeps its last SSID/AP for the record; the Wi-Fi details are dropped only when it is on the wire again without UniFi listing it.
+- **Seen by** (device page): one line per connector instance that listed the device, with when it last did; "on the wire" when that instance last saw it present within `ONLINE_GRACE_MINUTES`. A listing without presence (a lease alone, an FDB entry) moves the time but not "on the wire".
+- **Switch port** when several switches see a device: an edge port beats an uplink port (shown "via X"); between two edge ports the newest observation wins, then the order in `LW_CONNECTORS`. A Wi-Fi client listed by the controller stays on Wi-Fi whatever the switches say. The instance that placed the device is stored as `loc_source` (CSV column too). A `port` event is written only when the chosen port changes.
 - Interfaces in `IGNORE_INTERFACES` (default WAN and loopback) are skipped.
 
 ## Backup and reset

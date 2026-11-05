@@ -47,7 +47,15 @@ MIGRATIONS = [
     ("devices", "wifi_ssid", "TEXT NOT NULL DEFAULT ''"), ("devices", "wifi_ap", "TEXT NOT NULL DEFAULT ''"),
     ("devices", "wifi_signal", "INTEGER"), ("devices", "wifi_radio", "TEXT NOT NULL DEFAULT ''"),
     ("devices", "wifi_alias", "TEXT NOT NULL DEFAULT ''"), ("devices", "link", "TEXT NOT NULL DEFAULT ''"),
+    ("devices", "loc_source", "TEXT NOT NULL DEFAULT ''"),
 ]
+# meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
+# key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
+SCHEMA_VERSION = 2
+VERSION_STEPS = {
+    # per-source freshness: when each connector instance last listed a MAC and last saw it on the wire
+    2: "CREATE TABLE IF NOT EXISTS seen (mac TEXT, source TEXT, last_seen INTEGER NOT NULL, last_present INTEGER, PRIMARY KEY(mac, source))",
+}
 
 # strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
 # U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
@@ -67,6 +75,13 @@ class Database:
         for table, col, decl in MIGRATIONS:
             if (table, col) not in have:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        if not self.get_meta("schema_version"):
+            self.set_meta("schema_version", "1")
+        version = int(self.get_meta("schema_version"))
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            with self.tx() as c:  # the step and its version number together, so a crash in between re-runs the step
+                c.execute(VERSION_STEPS[step])
+                self.set_meta("schema_version", str(step), c)
 
     @contextmanager
     def tx(self):
@@ -107,6 +122,9 @@ class Database:
     def device(self, mac: str) -> dict | None:
         r = self.q("SELECT * FROM devices WHERE mac=?", (mac,))
         return dict(r[0]) if r else None
+
+    def seen(self, mac: str) -> list[dict]:
+        return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]
 
     def history(self, mac: str, limit: int = 200) -> list[dict]:
         return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]

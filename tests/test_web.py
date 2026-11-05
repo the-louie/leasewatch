@@ -278,6 +278,18 @@ class ApiReadTests(WebTestCase):
         self.assertEqual(data["history"][0]["ip"], "10.0.0.9")
         self.assertEqual([e["kind"] for e in data["events"]], ["new"])
 
+    def test_device_seen_by_source(self):
+        """C6: the device page lists when each connector instance last listed the device, newest first."""
+        self.db.q("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,?,?)", (MAC2, "sw-<b>", 1, None))
+        data, _ = self.get_json(f"/api/devices/{MAC2}")
+        self.assertEqual(data["seen"][-1], {"source": "sw-<b>", "last_seen": 1, "last_present": None})
+        self.assertGreater(len(data["seen"]), 1)  # the firewall instance listed it at the polls
+        self.assertEqual([x["last_seen"] for x in data["seen"]], sorted((x["last_seen"] for x in data["seen"]), reverse=True))
+        self.assertIsNotNone(data["seen"][0]["last_present"])
+        listed, _ = self.get_json("/api/devices")
+        self.assertIn("loc_source", listed["devices"][0])
+        self.assertEqual(listed["meta"]["grace_minutes"], 10)
+
     def test_device_unknown_mac_is_404(self):
         data, _ = self.get_json(f"/api/devices/{UNKNOWN}", expect=404)
         self.assertEqual(data["error"], "unknown device")
@@ -318,7 +330,7 @@ class ApiReadTests(WebTestCase):
         self.assertTrue(body.startswith(b"\xef\xbb\xbf"), "missing UTF-8 BOM")
         text = body.decode("utf-8-sig")
         lines = text.splitlines()
-        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
+        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,loc_source,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
         self.assertEqual([l.split(",")[0] for l in lines[1:]], [MAC2, MAC3, MAC1])
         self.assertIn("Kök-TV", text)
         self.assertIn("Köksbolaget", text)

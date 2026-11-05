@@ -300,6 +300,9 @@ class Collector:
             c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)", (mac, now, h["ip"], h["hostname"], h["vlan"], h["lease_type"]))
         for mac, kind, detail in res.events:
             c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, kind, detail))
+        # a listing without presence keeps the last time this source vouched for the device
+        c.executemany("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,?,?) ON CONFLICT(mac,source) DO UPDATE "
+                      "SET last_seen=excluded.last_seen, last_present=COALESCE(excluded.last_present, seen.last_present)", res.seen)
         for mac in dict.fromkeys(mac for mac, _ in res.history):
             c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
         c.execute("DELETE FROM events WHERE ts<?", (now - EVENT_DAYS * 86400,))

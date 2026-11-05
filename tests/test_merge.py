@@ -37,6 +37,11 @@ def port(mac, label, via="", uplink=False):
     return Attachment(mac=mac, source="switch", observed_at=NOW, link="wired", device="sw-rack", port=label, via=via, uplink=uplink)
 
 
+def swp(mac, label, source, uplink=False, at=NOW, via=""):
+    """A wired attachment from one of several switch instances (C6)."""
+    return Attachment(mac=mac, source=source, observed_at=at, link="wired", device=source, port=label, via=via, uplink=uplink)
+
+
 def wifi(mac, ssid="HomeNet", ap="ap-hall", alias=""):
     return Attachment(mac=mac, source="unifi", observed_at=NOW, link="wifi", ssid=ssid, ap=ap, signal=-50, radio="5 GHz", alias=alias)
 
@@ -196,6 +201,46 @@ CASES = [
                            "unifi": Batch(), "unifi2": ConnectorFailure("unifi2", "TimeoutError", NOW)},
      {"controllers": CTRL2},
      {A: dict(sw_port="", link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall")}, [], []),
+    # C6, rule 6: several switches see one MAC
+    ("two switches: the edge port beats an uplink from an earlier instance",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/48", "sw1", True, via="sw-2")]),
+                "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2")])}, {},
+     {A: dict(sw_port="GE1/0/7", sw_via="", link="wired", loc_source="sw2")}, [], []),
+    ("two switches, two edge ports: the newest observation wins",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1", at=NOW - 120)]),
+                "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2", at=NOW)])}, {},
+     {A: dict(sw_port="GE1/0/7", loc_source="sw2")}, [], []),
+    ("two switches, two edge ports, same time: instance order",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
+                "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2")])}, {},
+     {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [], []),
+    ("two uplinks: newest, and shown via",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/47", "sw1", True, NOW - 60, "sw-2")]),
+                "sw2": Batch(attachments=[swp(A, "GE1/0/1", "sw2", True, NOW, "sw-1")])}, {},
+     {A: dict(sw_port="GE1/0/1", sw_via="sw-1", loc_source="sw2")}, [], []),
+    ("only the losing uplink moved: no port event, port kept",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2", last_online=NOW, last_seen=NOW, sources="arp,dhcp",
+          hostname="pc", lease_type="dynamic")],
+     {"fw1": fw1(S(A, "10.0.0.5", "pc", presence=False), arp(A)),
+      "sw1": Batch(attachments=[swp(A, "GE1/0/46", "sw1", True, via="sw-2")]),
+      "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2", at=NOW - 30)])}, {},
+     {A: dict(sw_port="GE1/0/7", sw_via="", loc_source="sw2")}, [], []),
+    ("winning switch changes: port event, loc_source follows",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
+      "sw2": Batch(attachments=[swp(A, "GE1/0/48", "sw2", True, via="sw-1")])}, {},
+     {A: dict(sw_port="GE1/0/3", sw_via="", loc_source="sw1")}, [(A, "port", "GE1/0/7 -> GE1/0/3")], []),
+    ("Wi-Fi still beats an edge port; loc_source is the controller",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]), "unifi": Batch(attachments=[wifi(A)])},
+     {"controllers": CTRL},
+     {A: dict(link="wifi", sw_port="", wifi_ssid="HomeNet", loc_source="unifi")}, [], []),
+    ("one instance: its first attachment for a MAC stays its candidate",
+     [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/48", "sw1", True, via="sw-2"),
+                                                              swp(A, "GE1/0/3", "sw1")])}, {},
+     {A: dict(sw_port="GE1/0/48", loc_source="sw1")}, [], []),
+    ("left Wi-Fi, no switch port: loc_source cleared",
+     [row(A, loc_source="unifi", **ON_WIFI)], {"fw1": fw1(arp(A)), "unifi": Batch()}, {"controllers": CTRL},
+     {A: dict(link="", loc_source="")}, [], []),
     ("controller role, not the name: a controller called ctl-1",
      [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "ctl-1": Batch()}, {"controllers": frozenset({"ctl-1"})},
      {A: dict(link="", wifi_ssid="")}, [], []),
@@ -224,6 +269,15 @@ class MergeTableTests(unittest.TestCase):
                 self.assertEqual(res.events, events)
                 self.assertEqual([m for m, _ in res.history], history)
                 self.assertEqual(res.new, [m for m, k, _ in events if k == "new"])
+
+    def test_seen_per_instance(self):
+        """Rule 2: one entry per (known MAC, instance that listed it); last_present only on a presence claim."""
+        unknown = "02:00:00:00:00:0f"  # only in the FDB, never sighted: no device row, so no seen entry
+        res = self.run_merge([row(B)], {"fw1": fw1(S(A, "10.0.0.5", presence=False), arp(A), S(B, "10.0.0.9", presence=False)),
+                                        "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1"), swp(unknown, "GE1/0/4", "sw1")]),
+                                        "unifi": Batch(attachments=[wifi(B)]), "sw2": ConnectorFailure("sw2", "x", NOW)},
+                             controllers=CTRL)
+        self.assertEqual(sorted(res.seen), [(A, "fw1", NOW, NOW), (A, "sw1", NOW, None), (B, "fw1", NOW, None), (B, "unifi", NOW, None)])
 
     def test_normalise_batch(self):
         b = Batch(sightings=[Sighting(mac="02:00:00:00:00:0A", source="", kind="arp", presence=True, observed_at=NOW),

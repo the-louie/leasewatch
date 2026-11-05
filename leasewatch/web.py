@@ -85,6 +85,7 @@ def make_handler(cfg: Config, db: Database, version: str):
                 "last_poll_ok": m.get("last_poll_ok") == "1", "last_error": m.get("last_error", ""),
                 "last_error_ts": int(m.get("last_error_ts") or 0) or None, "last_raw": m.get("last_raw", ""),
                 "baseline_ts": int(m.get("baseline_ts") or 0) or None, "poll_seconds": cfg.poll_seconds,
+                "grace_minutes": cfg.online_grace_minutes,  # the drawer's "on the wire" per source uses the same window
                 "new_days": cfg.new_days, "site_name": cfg.site_name, "version": version, "mail": cfg.mail_enabled,
                 "stale": (now - last) > cfg.poll_seconds * 3 if last else True,
                 "switch": {"enabled": cfg.snmp_enabled, "name": cfg.snmp_name, "ok": m.get("switch_ok") == "1", "error": m.get("switch_error", ""), "macs": int(m.get("switch_macs") or 0)},
@@ -143,7 +144,7 @@ def make_handler(cfg: Config, db: Database, version: str):
                     d = db.device(m.group(1))
                     if not d:
                         return self._error(404, "unknown device")
-                    return self._json({"device": d, "history": db.history(d["mac"]), "events": db.events(d["mac"])})
+                    return self._json({"device": d, "history": db.history(d["mac"]), "events": db.events(d["mac"]), "seen": db.seen(d["mac"])})
                 return self._error(404, "not found")
             except (BrokenPipeError, ConnectionResetError):
                 return
@@ -210,10 +211,10 @@ def make_handler(cfg: Config, db: Database, version: str):
                 return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
             def ts(t: int | None) -> str:
                 return time.strftime("%Y-%m-%dT%H:%M%z", time.localtime(t)) if t else ""  # ISO 8601 with the server's UTC offset
-            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "note"])
+            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "note"])
             for d in db.devices():
                 w.writerow([d["mac"], d["ip"], cell(d["name"]), cell(d["hostname"]), cell(d["vendor"]), d["vlan"], d["lease_type"], d["sources"], d["online"],
-                            d["link"], d["sw_port"], cell(d["sw_via"]), cell(d["wifi_ssid"]), cell(d["wifi_ap"]), d["wifi_signal"] if d["wifi_signal"] is not None else "",
+                            d["link"], d["sw_port"], cell(d["sw_via"]), cell(d["loc_source"]), cell(d["wifi_ssid"]), cell(d["wifi_ap"]), d["wifi_signal"] if d["wifi_signal"] is not None else "",
                             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(d["note"])])
             self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="leasewatch-devices.csv"'})
 

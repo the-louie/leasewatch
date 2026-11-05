@@ -429,5 +429,112 @@ class LeaseTypeModeTests(unittest.TestCase):
         self.assertEqual(self.db.device(self.MAC)["lease_type"], "static")
 
 
+
+# the SCHEMA string of leasewatch/db.py at v1.0.0, copied so the test keeps working when db.py moves on
+SCHEMA_1_0 = """
+CREATE TABLE IF NOT EXISTS devices (
+    mac         TEXT PRIMARY KEY,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    last_online INTEGER,
+    ip          TEXT NOT NULL DEFAULT '',
+    hostname    TEXT NOT NULL DEFAULT '',
+    vendor      TEXT NOT NULL DEFAULT '',
+    vlan        TEXT NOT NULL DEFAULT '',
+    iface       TEXT NOT NULL DEFAULT '',
+    lease_type  TEXT NOT NULL DEFAULT '',
+    sources     TEXT NOT NULL DEFAULT '',
+    online      INTEGER NOT NULL DEFAULT 0,
+    baseline    INTEGER NOT NULL DEFAULT 0,
+    acked       INTEGER NOT NULL DEFAULT 0,
+    acked_at    INTEGER,
+    name        TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT NOT NULL, ts INTEGER NOT NULL,
+    ip TEXT NOT NULL, hostname TEXT NOT NULL, vlan TEXT NOT NULL, lease_type TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS history_mac ON history(mac, ts);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL, mac TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS events_mac ON events(mac, ts);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+class SchemaVersionTests(unittest.TestCase):
+    """C6: meta.schema_version, the seen table and the loc_source column, and the per-source upsert."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "t.db")
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_fresh_db_is_version_2(self):
+        db = Database(self.path)
+        try:
+            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(db.seen("02:00:00:00:00:01"), [])
+            self.assertEqual(db.q("SELECT loc_source FROM devices"), [])
+        finally:
+            db._conn.close()
+
+    def test_1_0_db_opens_and_migrates(self):
+        import sqlite3
+        conn = sqlite3.connect(self.path)
+        conn.executescript(SCHEMA_1_0)
+        conn.execute("INSERT INTO devices(mac,first_seen,last_seen,ip) VALUES('02:00:00:00:00:01',1,1,'10.0.0.5')")
+        conn.execute("INSERT INTO meta(key,value) VALUES('first_run_done','1')")
+        conn.commit(); conn.close()
+        versions = []
+        orig = Database.set_meta
+        def spy(db, key, value, conn=None):
+            if key == "schema_version": versions.append(value)
+            return orig(db, key, value, conn)
+        with unittest.mock.patch.object(Database, "set_meta", spy):
+            db = Database(self.path)
+        try:
+            self.assertEqual(versions, ["1", "2"])  # an unversioned DB is recorded as 1 first, then stepped up
+            self.assertEqual(db.get_meta("schema_version"), "2")
+            d = db.device("02:00:00:00:00:01")
+            self.assertEqual((d["ip"], d["loc_source"], d["sw_port"], d["link"]), ("10.0.0.5", "", "", ""))
+            self.assertEqual(db.seen("02:00:00:00:00:01"), [])
+        finally:
+            db._conn.close()
+        db = Database(self.path)  # opening again changes nothing
+        try:
+            self.assertEqual(db.get_meta("schema_version"), "2")
+        finally:
+            db._conn.close()
+
+    def test_seen_upsert_keeps_last_present_on_a_listing_without_presence(self):
+        env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        try:
+            cfg = Config(); db = Database(cfg.db_path)
+            try:
+                mac = "02:00:00:00:00:01"
+                c = FakeClient([S(mac, "10.0.0.5", "pc", online=False), S(mac, "10.0.0.5", src="arp")])
+                col = Collector(cfg, db, c)
+                col.run_once()
+                (first,) = db.seen(mac)
+                self.assertEqual(first["last_present"], first["last_seen"])
+                db._conn.execute("UPDATE seen SET last_seen=last_seen-100, last_present=last_present-100")
+                c.sightings_data = [S(mac, "10.0.0.5", "pc", online=False)]  # lease only: listed, not vouched for
+                col.run_once()
+                (second,) = db.seen(mac)
+                self.assertEqual(second["source"], first["source"])
+                self.assertGreaterEqual(second["last_seen"], first["last_seen"])
+                self.assertEqual(second["last_present"], first["last_present"] - 100)
+            finally:
+                db._conn.close()
+        finally:
+            restore(env)
+
+
 if __name__ == "__main__":
     unittest.main()

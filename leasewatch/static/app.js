@@ -231,6 +231,15 @@
     back.focus?.();
   }
 
+  // one line per connector instance that listed the device, newest first; "on the wire" when that instance saw it
+  // present within the grace window (an older server sends no seen list: no row)
+  function seenHtml(seen) {
+    if (!seen || !seen.length) return "";
+    const grace = (state.meta?.grace_minutes ?? 10) * 60, now = Date.now() / 1000;
+    const line = s => `${esc(s.source)} · ${esc(rel(s.last_seen))}${s.last_present && now - s.last_present <= grace ? ' · <span class="muted">on the wire</span>' : ""}`;
+    return `<dt>Seen by</dt><dd>${seen.map(line).join("<br>")}</dd>`;
+  }
+
   async function refreshDrawer(mac, focus) {
     let r; try { r = await api(`/api/devices/${mac}`); } catch (e) { if (state.open === mac && (focus || !$("#fName", $("#dBody")))) $("#dBody").innerHTML = `<p>${esc(e.message)}</p>`; return; } // a background refresh failing must not wipe an edit in progress
     if (state.open !== mac) return; // another device was opened while this one loaded
@@ -251,6 +260,7 @@
         ${whereHtml(d, true) ? `<dt>Connected via</dt><dd>${whereHtml(d, true)}</dd>` : ""}${d.wifi_alias ? `<dt>UniFi name</dt><dd>${esc(d.wifi_alias)}</dd>` : ""}
         <dt>First seen</dt><dd>${d.baseline ? `since the start (${esc(abs(state.meta.baseline_ts))})` : esc(abs(d.first_seen))}${isNew(d) ? ' <span class="badge new">NEW</span>' : ""}</dd>
         <dt>Last online</dt><dd>${d.last_online ? esc(abs(d.last_online)) : "never"} <span class="muted">· last listed by fw1 ${esc(abs(d.last_seen))}</span></dd>
+        ${seenHtml(r.seen)}
         <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : "not yet"}</dd>
       </dl>
       <div class="form">
