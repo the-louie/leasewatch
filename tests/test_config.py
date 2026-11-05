@@ -1,0 +1,111 @@
+import os, sys, unittest
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from leasewatch.config import Config
+
+BASE = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s"}
+TOUCHED = list(BASE) + ["PUBLIC_URL", "UNIFI_URL", "UNIFI_USER", "UNIFI_PASSWORD", "LISTEN_PORT", "MAILGUN_KEY",
+                        "SNMP_AUTH_KEY", "SNMP_PRIV_KEY", "MAILGUN_API_BASE", "ALLOWED_HOSTS", "POLL_SECONDS",
+                        "ONLINE_GRACE_MINUTES", "NEW_DAYS"]
+
+
+class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in TOUCHED}
+        for k in TOUCHED:
+            os.environ.pop(k, None)
+        os.environ.update(BASE)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def problems(self, **env):
+        os.environ.update(env)
+        return Config().validate()
+
+    def test_base_is_valid(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_public_url_without_host(self):
+        self.assertIn("PUBLIC_URL is not a valid URL", self.problems(PUBLIC_URL="https://:8080"))
+
+    def test_public_url_bad_ipv6(self):
+        self.assertIn("PUBLIC_URL is not a valid URL", self.problems(PUBLIC_URL="https://[fe80::1"))
+
+    def test_unifi_url_scheme(self):
+        p = self.problems(UNIFI_URL="unifi.example.lan:8443", UNIFI_USER="ro", UNIFI_PASSWORD="pw")
+        self.assertIn("UNIFI_URL must be a URL (https://<controller>)", p)
+
+    def test_credentials_in_urls_rejected(self):
+        p = self.problems(FW1_URL="https://u:p@fw1.example.lan", UNIFI_URL="https://u:p@unifi.example.lan",
+                          UNIFI_USER="ro", UNIFI_PASSWORD="pw", PUBLIC_URL="https://u@leases.example.lan")
+        for name in ("FW1_URL", "UNIFI_URL", "PUBLIC_URL"):
+            self.assertIn(f"{name} must not contain credentials", p)
+
+    def test_listen_port_range(self):
+        self.assertIn("LISTEN_PORT must be 1-65535", self.problems(LISTEN_PORT="0"))
+        self.assertIn("LISTEN_PORT must be 1-65535", self.problems(LISTEN_PORT="70000"))
+        self.assertEqual(self.problems(LISTEN_PORT="8089"), [])
+
+    def test_public_url_with_trailing_dot_allows_host(self):
+        os.environ["PUBLIC_URL"] = "https://leases.example.lan."
+        c = Config()
+        self.assertTrue(c.host_allowed("leases.example.lan"))
+        self.assertTrue(c.host_allowed("leases.example.lan.:8080"))
+        self.assertFalse(c.host_allowed("evil.example.com"))
+
+    def test_secrets_not_in_repr(self):
+        secrets = {"FW1_KEY": "sekret-fw1key", "FW1_SECRET": "sekret-fw1secret", "MAILGUN_KEY": "sekret-mg",
+                   "SNMP_AUTH_KEY": "sekret-auth", "SNMP_PRIV_KEY": "sekret-priv", "UNIFI_PASSWORD": "sekret-unifi"}
+        os.environ.update(secrets)
+        r = repr(Config())
+        for v in secrets.values():
+            self.assertNotIn(v, r)
+
+    def test_mailgun_api_base(self):
+        self.assertEqual(Config().mailgun_api_base, "https://api.mailgun.net")
+        os.environ["MAILGUN_API_BASE"] = "https://api.eu.mailgun.net/"
+        self.assertEqual(Config().mailgun_api_base, "https://api.eu.mailgun.net")
+
+    def test_mailgun_api_base_scheme(self):
+        self.assertIn("MAILGUN_API_BASE must be a URL (https://api.mailgun.net or https://api.eu.mailgun.net)",
+                      self.problems(MAILGUN_API_BASE="api.eu.mailgun.net"))
+        self.assertEqual(self.problems(MAILGUN_API_BASE="https://api.eu.mailgun.net"), [])
+
+    def test_fw1_url_bad_ipv6(self):
+        self.assertIn("FW1_URL is not a valid URL", self.problems(FW1_URL="https://[fe80::1"))
+
+    def test_fw1_url_without_host(self):
+        self.assertIn("FW1_URL is not a valid URL", self.problems(FW1_URL="https://:443"))
+
+    def test_unifi_url_bad_ipv6(self):
+        p = self.problems(UNIFI_URL="https://[fe80::1", UNIFI_USER="ro", UNIFI_PASSWORD="pw")
+        self.assertIn("UNIFI_URL is not a valid URL", p)
+
+    def test_mailgun_api_base_credentials(self):
+        p = self.problems(MAILGUN_API_BASE="https://user:pw@api.mailgun.net")
+        self.assertIn("MAILGUN_API_BASE must not contain credentials", p)
+
+    def test_upper_bounds(self):
+        self.assertIn("POLL_SECONDS must be at most 86400", self.problems(POLL_SECONDS="86401"))
+        self.assertIn("ONLINE_GRACE_MINUTES must be at most 10080", self.problems(ONLINE_GRACE_MINUTES="10081"))
+        self.assertIn("NEW_DAYS must be at most 3650", self.problems(NEW_DAYS="3651"))
+
+    def test_upper_bounds_inclusive(self):
+        self.assertEqual(self.problems(POLL_SECONDS="86400", ONLINE_GRACE_MINUTES="10080", NEW_DAYS="3650"), [])
+
+    def test_allowed_hosts_with_port(self):
+        os.environ["ALLOWED_HOSTS"] = "leases.example.lan:8443, Other.example.lan., [fd00::1]:8443"
+        c = Config()
+        self.assertTrue(c.host_allowed("leases.example.lan:8443"))
+        self.assertTrue(c.host_allowed("leases.example.lan"))
+        self.assertTrue(c.host_allowed("other.example.lan"))
+        self.assertIn("fd00::1", c.allowed_hosts)
+        self.assertFalse(c.host_allowed("evil.example.com:8443"))
+
+
+if __name__ == "__main__":
+    unittest.main()

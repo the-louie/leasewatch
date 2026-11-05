@@ -43,6 +43,81 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(s.describe("aa:bb:cc:dd:ee:02"), ("", ""))
         self.assertNotIn(0, s.ports)
 
+    def test_one_mac_in_many_vlans_is_one_device(self):
+        fdb = [(f"{v}.2.0.0.0.0.1", 9) for v in range(1, 7)]
+        s = build_snapshot(fdb, [("9", 9)], [("9", " GigabitEthernet1/0/9 ")], [])
+        self.assertEqual((s.ports[9].macs, s.ports[9].uplink), (1, False))
+        self.assertEqual(s.describe("02:00:00:00:00:01"), ("GE1/0/9", ""))  # ifName whitespace stripped
+
+    def test_bad_baseport_and_ifname_rows_are_skipped(self):
+        s = build_snapshot([("1.2.0.0.0.0.1", 5)], [("x", 7), ("5", 14)], [("14", "GigabitEthernet1/0/14"), ("y", "junk")], [])
+        self.assertEqual(s.describe("02:00:00:00:00:01"), ("GE1/0/14", ""))
+        with self.assertLogs("leasewatch.switch", "WARNING"):
+            build_snapshot([("1.2.0.0.0.0.1", 5)], [], [], [])
+
+
+class WalkTests(unittest.TestCase):
+    BASE = "1.3.6.1.2.1.31.1.1.1.1"
+    MODS = ("pysnmp", "pysnmp.hlapi", "pysnmp.hlapi.v3arch", "pysnmp.hlapi.v3arch.asyncio")
+
+    def setUp(self):
+        import types
+        self._saved = {k: sys.modules.get(k) for k in self.MODS}
+        for k in self.MODS:
+            sys.modules[k] = types.ModuleType(k)
+        fake = sys.modules["pysnmp.hlapi.v3arch.asyncio"]
+        fake.ContextData = lambda: None
+        fake.ObjectIdentity = lambda oid: oid
+        fake.ObjectType = lambda ident: ident
+        self.fake = fake
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def walk(self, replies):
+        """replies: (oid, value, err_stat) per call; more calls than replies means the walk never ended."""
+        import asyncio
+        from leasewatch.switch import SwitchClient
+        calls = []
+
+        async def next_cmd(eng, user, tgt, ctx, cur):
+            calls.append(cur)
+            if len(calls) > len(replies):
+                raise AssertionError("walk did not terminate")
+            oid, val, stat = replies[len(calls) - 1]
+            return None, stat, 0, [(oid, val)]
+        self.fake.next_cmd = next_cmd
+        return asyncio.run(SwitchClient(None)._walk(None, None, None, self.BASE)), calls
+
+    def test_stops_when_the_oid_does_not_advance(self):
+        b = self.BASE
+        out, calls = self.walk([(b + ".9", "a", 0), (b + ".10", "b", 0), (b + ".10", "b", 0)])
+        self.assertEqual(out, [("9", "a"), ("10", "b")])  # numeric order: .10 is after .9
+        self.assertEqual(calls, [b, b + ".9", b + ".10"])
+
+    def test_stops_at_end_of_mib_view(self):
+        EndOfMibView = type("EndOfMibView", (), {})
+        out, _ = self.walk([(self.BASE + ".1", EndOfMibView(), 0)])
+        self.assertEqual(out, [])
+
+    def test_error_status_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "status 2"):
+            self.walk([(self.BASE + ".1", "a", 2)])
+
+    def test_snapshot_timeout_has_a_message(self):
+        from leasewatch.switch import SwitchClient
+        c = SwitchClient(None)
+
+        async def slow():
+            raise TimeoutError()
+        c._snapshot_async = slow
+        with self.assertRaisesRegex(RuntimeError, "timeout after 60 s"):
+            c.snapshot()
+
 
 class Fw1Tests(unittest.TestCase):
     ARP = [{"mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.5", "intf": "igc1", "intf_description": "LAN", "manufacturer": "Acme"}]

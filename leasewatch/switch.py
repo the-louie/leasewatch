@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import Counter
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -60,8 +59,20 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
     lldpRemSysName is indexed by lldpLocPortNum, which is only the ifIndex on some vendors (Comware). `locports`
     (lldpLocPortId / lldpLocPortDesc rows: lldpLocPortNum -> text) maps a port number to the interface whose ifName
     matches; a number without a match is taken as an ifIndex."""
-    bp2if = {int(k): int(v) for k, v in baseport}
-    names = {int(k): str(v) for k, v in ifname}
+    bp2if: dict[int, int] = {}
+    for k, v in baseport:
+        try:
+            bp2if[int(k)] = int(v)
+        except ValueError:  # one odd row must not lose the whole snapshot
+            continue
+    names: dict[int, str] = {}
+    for k, v in ifname:
+        try:
+            names[int(k)] = str(v).strip()
+        except ValueError:
+            continue
+    if fdb and not bp2if:
+        log.warning("no dot1dBasePortIfIndex rows: bridge ports used as ifIndex")
     by_name = {v: k for k, v in names.items()}
     by_name.update({short_ifname(v): k for k, v in names.items()})
     loc2if: dict[int, int] = {}
@@ -84,7 +95,7 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
     snap = SwitchSnapshot()
     for ifindex, name in names.items():
         snap.ports[ifindex] = PortInfo(ifindex=ifindex, name=name, neighbor=neighbors.get(ifindex, ""))
-    counts: Counter = Counter()
+    macs_on: dict[int, set] = {}  # distinct MACs: one MAC learned in several VLANs is still one device
     for idx, port in fdb:
         parts = idx.split(".")
         if len(parts) != 7:
@@ -98,10 +109,10 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
         except ValueError:
             continue
         snap.by_mac[mac] = (ifindex, vlan)
-        counts[ifindex] += 1
-    for ifindex, n in counts.items():
+        macs_on.setdefault(ifindex, set()).add(mac)
+    for ifindex, macs in macs_on.items():
         p = snap.ports.setdefault(ifindex, PortInfo(ifindex=ifindex, name=f"port {ifindex}"))
-        p.macs = n
+        p.macs = len(macs)
     for p in snap.ports.values():
         if p.neighbor:
             p.uplink = True
@@ -117,19 +128,24 @@ class SwitchClient:
     async def _walk(self, eng, tgt, user, base: str) -> list[tuple[str, object]]:
         from pysnmp.hlapi.v3arch.asyncio import ContextData, ObjectIdentity, ObjectType, next_cmd
         out = []
-        cur = ObjectType(ObjectIdentity(base))
+        cur_oid = base
         while True:
-            err_ind, err_stat, _, vbs = await next_cmd(eng, user, tgt, ContextData(), cur, lexicographicMode=False)
+            err_ind, err_stat, _, vbs = await next_cmd(eng, user, tgt, ContextData(), ObjectType(ObjectIdentity(cur_oid)))
             if err_ind:
                 raise RuntimeError(f"snmp walk {base}: {err_ind}")
-            if err_stat or not vbs:
+            if err_stat:  # a partial table would silently drop ports; fail the poll instead
+                raise RuntimeError(f"snmp walk {base}: status {err_stat}")
+            if not vbs:
                 break
             oid, val = vbs[0][0], vbs[0][1]
             s = str(oid)
-            if not s.startswith(base + "."):
+            if not s.startswith(base + ".") or type(val).__name__ in ("EndOfMibView", "NoSuchObject", "NoSuchInstance"):
+                break
+            # an agent that does not advance (same or lower OID) would make this loop forever
+            if tuple(int(x) for x in s.split(".")) <= tuple(int(x) for x in cur_oid.split(".")):
                 break
             out.append((s[len(base) + 1:], val))
-            cur = ObjectType(ObjectIdentity(s))
+            cur_oid = s
         return out
 
     async def _snapshot_async(self) -> SwitchSnapshot:
@@ -151,4 +167,7 @@ class SwitchClient:
 
     def snapshot(self) -> SwitchSnapshot:
         """Blocking; runs its own event loop (called from the collector thread). Raises on failure."""
-        return asyncio.run(asyncio.wait_for(self._snapshot_async(), timeout=60))
+        try:
+            return asyncio.run(asyncio.wait_for(self._snapshot_async(), timeout=60))
+        except (asyncio.TimeoutError, TimeoutError) as e:  # str() of these is empty
+            raise RuntimeError("snmp: timeout after 60 s") from e

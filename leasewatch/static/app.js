@@ -6,7 +6,8 @@
 
   const state = {
     devices: [], meta: null, stats: null, events: [],
-    q: "", status: "all", vlan: "", sort: "first_desc", open: null, returnTo: null, apiDown: false,
+    q: "", status: "all", vlan: null, sort: "first_desc", open: null, returnTo: null, apiDown: false,
+    renderError: null, // kept so the 15 s status refresh does not hide a page error while the table is still broken
   };
   const VLAN_COLORS = ["--vlan1", "--vlan2", "--vlan3", "--vlan4", "--vlan5", "--vlan6", "--vlan7", "--vlan8"];
   // stable colour per network: alphabetical position, so colours do not shift when counts change
@@ -42,7 +43,7 @@
     if (d.sw_port) return `<span class="w">${esc(d.sw_port)}</span>${d.sw_via ? ` <span class="muted">→ ${esc(d.sw_via)}</span>` : ""}`;
     return "";
   };
-  const whereText = d => d.wifi_ssid ? `${d.wifi_ssid} @ ${d.wifi_ap}` : d.sw_port ? `${d.sw_port} ${d.sw_via}` : "";
+  const whereText = d => d.wifi_ssid ? `${d.wifi_ssid} @ ${d.wifi_ap || ""}` : d.sw_port ? `${d.sw_port} ${d.sw_via || ""}` : "";
 
   async function api(path, opts) {
     const r = await fetch(path, { cache: "no-store", ...opts });
@@ -55,8 +56,9 @@
     try {
       const [d, s, e] = await Promise.all([api("/api/devices"), api("/api/stats"), api("/api/events")]);
       state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; state.events = e.events;
-      renderStatus(); renderCards(); renderVlans(); renderTable(); renderEvents();
-      if (state.open) refreshDrawer(state.open, false);
+      state.renderError = null;
+      try { renderStatus(); renderCards(); renderVlans(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
+      catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
     } catch (err) {
       state.apiDown = true; showBanner(`Cannot reach the leasewatch API: ${err.message}`); $("#statusDot").className = "dot bad";
     }
@@ -78,6 +80,7 @@
     $("#status").title = m.last_error ? `Last error: ${m.last_error}` : `Polls every ${m.poll_seconds}s`;
     if (!m.last_poll_ok && m.last_error) showBanner(`Collector cannot read fw1: ${m.last_error} (last good data ${rel(m.last_poll_ts)})`);
     else if (stale) showBanner(`Data is stale: last successful poll ${rel(m.last_poll_ts)}.`);
+    else if (state.renderError) showBanner(`Page error: ${state.renderError}`);
     else showBanner("");
     $("#newDays").textContent = m.new_days;
   }
@@ -103,7 +106,7 @@
       c.setAttribute("aria-pressed", state.vlan === v.vlan);
       c.innerHTML = `<span class="sw" style="background:${vlanColor(v.vlan)}"></span>${esc(v.vlan || "?")} <span class="n">${v.online}/${v.n}</span>`;
       c.title = `${v.online} online of ${v.n} devices`;
-      c.onclick = () => { state.vlan = state.vlan === v.vlan ? "" : v.vlan; renderVlans(); renderTable(); syncUrl(); };
+      c.onclick = () => { state.vlan = state.vlan === v.vlan ? null : v.vlan; renderVlans(); renderTable(); syncUrl(); };
       box.appendChild(c);
     }
   }
@@ -111,7 +114,7 @@
   function filtered() {
     const q = state.q.trim().toLowerCase();
     const list = state.devices.filter(d => {
-      if (state.vlan && d.vlan !== state.vlan) return false;
+      if (state.vlan !== null && d.vlan !== state.vlan) return false; // null = no filter; "" is the unnamed network
       switch (state.status) {
         case "new": if (!isNew(d)) return false; break;
         case "unacked": if (d.acked || d.baseline) return false; break;
@@ -137,7 +140,7 @@
       name: (a, b) => label(a).localeCompare(label(b), undefined, { sensitivity: "base" }) || byVlanIp(a, b),
       ip: (a, b) => ipKey(a.ip).localeCompare(ipKey(b.ip)),
       vlan: byVlanIp,
-      vendor: (a, b) => (a.vendor || "~").localeCompare(b.vendor || "~") || label(a).localeCompare(label(b)),
+      vendor: (a, b) => (a.vendor ? 0 : 1) - (b.vendor ? 0 : 1) || (a.vendor || "").localeCompare(b.vendor || "") || label(a).localeCompare(label(b)),
     }[state.sort] || byVlanIp;
     return list.sort(cmp);
   }
@@ -180,18 +183,18 @@
       if (d.acked || d.baseline) ack.remove();
       else ack.onclick = ev => { ev.stopPropagation(); setFields(d.mac, { acked: true }); };
       tr.onclick = () => openDrawer(d.mac);
-      tr.onkeydown = ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(d.mac); } };
+      tr.onkeydown = ev => { if (ev.target !== tr) return; /* keys on the row's buttons are theirs */ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(d.mac); } };
       mac.onclick = ev => {
         ev.stopPropagation();
-        navigator.clipboard?.writeText(d.mac).then(() => { mac.classList.add("copied"); mac.title = "copied"; setTimeout(() => { mac.classList.remove("copied"); mac.title = "click to copy"; }, 900); });
+        navigator.clipboard?.writeText(d.mac).then(() => { mac.classList.add("copied"); mac.title = "copied"; setTimeout(() => { mac.classList.remove("copied"); mac.title = "click to copy"; }, 900); }).catch(() => {});
       };
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
     $("#count").textContent = `${list.length} of ${state.devices.length}`;
     $("#empty").classList.toggle("hidden", list.length > 0);
-    $("#emptyText").textContent = state.q || state.vlan ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
-    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan || state.status !== "all"));
+    $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
+    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.status !== "all"));
   }
 
   function renderEvents() {
@@ -212,17 +215,20 @@
   // ---------- drawer ----------
   async function openDrawer(mac) {
     state.open = mac; state.returnTo = document.activeElement;
-    $("#drawer").classList.add("open"); $("#scrim").classList.add("show"); $("#drawer").setAttribute("aria-hidden", "false");
+    $("#drawer").classList.add("open"); $("#scrim").classList.add("show"); $("#drawer").setAttribute("aria-hidden", "false"); $("#drawer").inert = false;
     await refreshDrawer(mac, true);
   }
   function closeDrawer() {
     if (!state.open) return;
-    state.open = null; $("#drawer").classList.remove("open"); $("#scrim").classList.remove("show"); $("#drawer").setAttribute("aria-hidden", "true");
-    state.returnTo?.focus?.();
+    const mac = state.open;
+    state.open = null; $("#drawer").classList.remove("open"); $("#scrim").classList.remove("show"); $("#drawer").setAttribute("aria-hidden", "true"); $("#drawer").inert = true;
+    // the row that opened the drawer may have been re-rendered by a poll: fall back to its replacement, then the search box
+    const back = state.returnTo?.isConnected ? state.returnTo : ($$("#rows tr").find(tr => tr.dataset.mac === mac) || $("#q"));
+    back.focus?.();
   }
 
   async function refreshDrawer(mac, focus) {
-    let r; try { r = await api(`/api/devices/${mac}`); } catch (e) { if (state.open === mac) $("#dBody").innerHTML = `<p>${esc(e.message)}</p>`; return; }
+    let r; try { r = await api(`/api/devices/${mac}`); } catch (e) { if (state.open === mac && (focus || !$("#fName", $("#dBody")))) $("#dBody").innerHTML = `<p>${esc(e.message)}</p>`; return; } // a background refresh failing must not wipe an edit in progress
     if (state.open !== mac) return; // another device was opened while this one loaded
     const d = r.device;
     $("#dTitle").textContent = label(d);
@@ -272,17 +278,17 @@
   // ---------- url state ----------
   function syncUrl() {
     const p = new URLSearchParams();
-    if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
+    if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan !== null) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
     history.replaceState(null, "", p.toString() ? `?${p}` : location.pathname);
   }
   function readUrl() {
     const p = new URLSearchParams(location.search);
-    state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan") || ""; state.sort = p.get("sort") || "first_desc";
+    state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan"); state.sort = p.get("sort") || "first_desc";
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
     if (!$("#fStatus").value) { state.status = "all"; $("#fStatus").value = "all"; }
     if (!$("#sort").value) { state.sort = "first_desc"; $("#sort").value = "first_desc"; }
   }
-  function clearFilters() { state.q = ""; state.vlan = ""; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderTable(); syncUrl(); }
+  function clearFilters() { state.q = ""; state.vlan = null; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderTable(); syncUrl(); }
 
   // ---------- wiring ----------
   $("#q").addEventListener("input", e => { state.q = e.target.value; renderTable(); syncUrl(); });

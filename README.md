@@ -16,7 +16,7 @@
 cp .env.example .env && chmod 600 .env      # set FW1_URL, FW1_KEY, FW1_SECRET (and the optional sources)
 install -d -o 100 -g 101 data               # the container runs as uid 100 (alpine "app")
 docker compose up -d --build                # without nginx-proxy: publish port 8080 instead, see docker-compose.yml
-docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/healthz
+docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/api/stats   # the meta block shows the last poll; /healthz is for monitors (503 + reason on failure, which busybox wget does not print)
 ```
 Local development: `DATA_DIR=./data LISTEN_PORT=8089 FW1_URL=… FW1_KEY=… FW1_SECRET=… python3 -m leasewatch`.
 
@@ -26,8 +26,9 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 
 ### Optional sources
 
-- **Switch port (SNMPv3):** a read-only v3 user on the switch with a view that includes `1.3.6.1.2.1` (mib-2) and `1.0.8802.1.1.2` (LLDP), authentication SHA or SHA-256, privacy AES-128. Set `SNMP_HOST`, `SNMP_USER`, `SNMP_AUTH`, `SNMP_AUTH_KEY`, `SNMP_PRIV_KEY`. Ports with an LLDP neighbour or ≥ 6 MACs are shown as `port → what hangs there`.
+- **Switch port (SNMPv3):** a read-only v3 user on the switch with a view that includes `1.3.6.1.2.1` (mib-2) and `1.0.8802.1.1.2` (LLDP), authentication SHA or SHA-256, privacy AES-128. Set `SNMP_HOST` (a host name or IP without a port; UDP 161 is used), `SNMP_USER`, `SNMP_AUTH`, `SNMP_AUTH_KEY`, `SNMP_PRIV_KEY`. Ports with an LLDP neighbour or ≥ 6 MACs are shown as `port → what hangs there`.
 - **Wi-Fi (UniFi Network):** a read-only admin on the controller; set `UNIFI_URL`, `UNIFI_USER`, `UNIFI_PASSWORD` (classic session API: `/api/login`, `/api/s/<site>/stat/sta`). The controller's device alias becomes the display name when no name or hostname exists.
+- **Mail (Mailgun):** set `MAILGUN_KEY`, `MAILGUN_DOMAIN`, `MAIL_TO`; for an EU-region domain also `MAILGUN_API_BASE=https://api.eu.mailgun.net`.
 - Either source failing only greys its dot in the status pill; the last values stay.
 
 ## API
@@ -48,6 +49,8 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 - **New** = first seen within `NEW_DAYS` and not baseline. **Not yet known** = not marked known and not baseline.
 - **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device that leaves the ARP table (or is no longer listed) stays online for `ONLINE_GRACE_MINUTES` after it was last seen on the wire, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed, so the UI shows *last online*.
 - **History** rows are written only when IP, hostname, network or lease type change (capped at 200 per device). **Events:** new, ip, hostname, vlan, lease_type, port, wifi, back (online again after > 1 day), acked / unacked; kept for a year.
+- A device keeps its last lease type after the lease is gone (a device seen only in ARP stays "DHCP" if it once had a lease); otherwise an expiring lease that is still in ARP would flap between types on every poll. `sources` shows what listed it last.
+- A Wi-Fi device that leaves keeps its last SSID/AP for the record; the Wi-Fi details are dropped only when it is on the wire again without UniFi listing it.
 - Interfaces in `IGNORE_INTERFACES` (default WAN and loopback) are skipped.
 
 ## Backup and reset

@@ -49,11 +49,9 @@ MIGRATIONS = [
     ("devices", "wifi_alias", "TEXT NOT NULL DEFAULT ''"), ("devices", "link", "TEXT NOT NULL DEFAULT ''"),
 ]
 
-# strip NUL/control and bidi-override characters from user text (keeps tab/newline for notes)
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2066-\u2069]")
-
-DEVICE_COLS = ("mac", "first_seen", "last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface",
-               "lease_type", "sources", "online", "baseline", "acked", "acked_at", "name", "note")
+# strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
+# U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
 
 
 class Database:
@@ -79,8 +77,11 @@ class Database:
             try:
                 yield self._conn
                 self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
+            except BaseException:  # also KeyboardInterrupt/GeneratorExit: never leave the transaction open
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:  # e.g. already rolled back; the original exception is the one that matters
+                    pass
                 raise
 
     def q(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -108,13 +109,13 @@ class Database:
         return dict(r[0]) if r else None
 
     def history(self, mac: str, limit: int = 200) -> list[dict]:
-        return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC LIMIT ?", (mac, limit))]
+        return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]
 
     def events(self, mac: str | None = None, limit: int = 200) -> list[dict]:
         if mac:
-            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail FROM events e WHERE mac=? ORDER BY ts DESC LIMIT ?", (mac, limit))
+            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail FROM events e WHERE mac=? ORDER BY e.ts DESC, e.id DESC LIMIT ?", (mac, limit))
         else:
-            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac) ORDER BY ts DESC LIMIT ?", (limit,))
+            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac) ORDER BY e.ts DESC, e.id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None) -> dict | None:
@@ -125,9 +126,10 @@ class Database:
             sets, params = [], []
             if acked is not None:
                 sets.append("acked=?"); params.append(1 if acked else 0)
-                sets.append("acked_at=?"); params.append(int(time.time()) if acked else None)
+                if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
+                    sets.append("acked_at=?"); params.append(int(time.time()) if acked else None)
             if name is not None:
-                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80])
+                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ")[:80].strip())
             if note is not None:
                 sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000])
             if sets:
@@ -139,9 +141,10 @@ class Database:
 
     def stats(self, new_days: int) -> dict:
         now = int(time.time())
-        rows = self.q("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices GROUP BY vlan ORDER BY n DESC")
-        recent = self.q("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,))
-        tot = self.q("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices", (now - new_days * 86400,))[0]
+        with self._lock:  # one lock hold: the three counts must not straddle a collector write
+            rows = self._conn.execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices GROUP BY vlan ORDER BY n DESC").fetchall()
+            recent = self._conn.execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
+            tot = self._conn.execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices", (now - new_days * 86400,)).fetchone()
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],

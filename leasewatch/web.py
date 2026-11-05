@@ -10,7 +10,6 @@ import mimetypes
 import os
 import re
 import time
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -50,6 +49,14 @@ def make_handler(cfg: Config, db: Database, version: str):
         def _error(self, status: int, msg: str):
             self._json({"error": msg}, status)
 
+        def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+            # stdlib errors (501 TRACE, 414, 431) would otherwise bypass the JSON body and security headers; a bad request
+            # line is still answered HTTP/0.9-style (body only), as the stdlib does
+            self.log_error("code %d, message %s", code, message)
+            self.close_connection = True
+            self._send(code, json.dumps({"error": message or self.responses.get(code, ("error",))[0].lower()}).encode(),
+                       "application/json; charset=utf-8", {"Allow": "GET, HEAD, POST"} if code == 405 else None)
+
         def _static(self, name: str):
             path = os.path.normpath(os.path.join(STATIC_DIR, name))
             if (name == "index.html" and self.path != "/" and not self.path.startswith("/?")) or not path.startswith(STATIC_DIR + os.sep) or not os.path.isfile(path):
@@ -60,7 +67,7 @@ def make_handler(cfg: Config, db: Database, version: str):
             with open(path, "rb") as f:
                 body = f.read()
             if name == "index.html":
-                body = body.replace(b"{{SITE_NAME}}", html.escape(cfg.site_name).encode()).replace(b"{{VERSION}}", html.escape(version).encode())
+                body = body.replace(b"{{VERSION}}", html.escape(version).encode()).replace(b"{{SITE_NAME}}", html.escape(cfg.site_name).encode())  # VERSION first: a site name containing "{{VERSION}}" stays literal
             self._send(200, body, ctype, {"Cache-Control": "no-cache"})
 
         def _meta(self) -> dict:
@@ -155,7 +162,7 @@ def make_handler(cfg: Config, db: Database, version: str):
                 body = json.loads(self.rfile.read(length).decode())
                 if not isinstance(body, dict):
                     raise ValueError
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):  # RecursionError: deeply nested arrays like "[[[[..."
                 return self._error(400, "bad json")
             acked = body.get("acked")
             name = body.get("name")
@@ -166,6 +173,12 @@ def make_handler(cfg: Config, db: Database, version: str):
                 return self._error(400, "name must be a string")
             if note is not None and not isinstance(note, str):
                 return self._error(400, "note must be a string")
+            for s in (name, note):
+                try:
+                    if s is not None:
+                        s.encode("utf-8")
+                except UnicodeEncodeError:  # lone surrogate ("\ud800") from JSON escapes: SQLite and the response encoder would fail on it
+                    return self._error(400, "bad json")
             try:
                 d = db.update_user_fields(mac, acked, name, note)
             except Exception:
@@ -178,10 +191,10 @@ def make_handler(cfg: Config, db: Database, version: str):
         def _csv(self):
             buf = io.StringIO()
             w = csv.writer(buf)
-            def cell(v):  # neutralise spreadsheet formula injection (hostnames come from untrusted DHCP clients)
+            def cell(v: object) -> str:  # neutralise spreadsheet formula injection (hostnames come from untrusted DHCP clients)
                 s = str(v)
                 return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
-            def ts(t):
+            def ts(t: int | None) -> str:
                 return time.strftime("%Y-%m-%dT%H:%M%z", time.localtime(t)) if t else ""  # ISO 8601 with the server's UTC offset
             w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "note"])
             for d in db.devices():

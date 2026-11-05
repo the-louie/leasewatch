@@ -18,11 +18,23 @@ from typing import Any
 
 log = logging.getLogger("leasewatch.fw1")
 LEASE_ROWS = 5000
+MAX_BODY = 32 * 1024 * 1024  # a lease/ARP list is a few MB at most; anything larger is not a sane answer
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 
 class Fw1Error(Exception):
     pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a 3xx: a redirect would resend the Basic auth header (and the POST) to wherever it points."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _s(v: Any) -> str:
+    """API fields are meant to be strings, but a null or a number must not crash the poll."""
+    return "" if v is None else str(v).strip()
 
 
 @dataclass
@@ -49,25 +61,26 @@ def isc_leases(rows: list[dict]) -> list[dict]:
     mac, address, hostname, man, if, if_descr, type ("dynamic"/"static"), status ("online"/...)."""
     out = []
     for l in rows:
-        if l.get("state") not in (None, "", "active"):
+        if not isinstance(l, dict) or l.get("state") not in (None, "", "active"):
             continue
-        out.append({**l, "hostname": l.get("hostname") or l.get("client-hostname") or ""})
+        out.append({**l, "hostname": _s(l.get("hostname")) or _s(l.get("client-hostname"))})
     return out
 
 
 def kea_leases(rows: list[dict]) -> list[dict]:
     """Kea DHCPv4 rows (/api/kea/leases4/search) in the common shape. Kea names the MAC "hwaddr", the lease state is
     numeric (0 = default/active, 1 = declined, 2 = expired-reclaimed), hostnames may be FQDNs with a trailing dot,
-    and reservations are flagged "is_reserved". Kea has no online status: ARP decides."""
+    and reservations are flagged "is_reserved". Kea has no online status: ARP decides.
+    Kea always sends "state" as an int; a row with "state": null is malformed and is treated as not active."""
     out = []
     for l in rows:
-        if str(l.get("state", "0")).strip() not in ("", "0"):
+        if not isinstance(l, dict) or str(l.get("state", "0")).strip() not in ("", "0"):
             continue
-        reserved = str(l.get("is_reserved") or "").strip().lower() not in ("", "0", "false", "no")
+        reserved = _s(l.get("is_reserved")).lower() not in ("", "0", "false", "no")
         out.append({
-            "mac": l.get("hwaddr") or l.get("mac") or "", "address": l.get("address") or "",
-            "hostname": (l.get("hostname") or "").strip().rstrip("."), "man": l.get("man") or l.get("mac_info") or "",
-            "if": l.get("if") or "", "if_descr": l.get("if_descr") or "",
+            "mac": _s(l.get("hwaddr")) or _s(l.get("mac")), "address": _s(l.get("address")),
+            "hostname": _s(l.get("hostname")).rstrip("."), "man": _s(l.get("man")) or _s(l.get("mac_info")),
+            "if": _s(l.get("if")), "if_descr": _s(l.get("if_descr")),
             "type": "static" if reserved else "dynamic", "status": "",
         })
     return out
@@ -84,21 +97,32 @@ class Fw1Client:
         if not verify_tls:
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
+        # build_opener uses _NoRedirect in place of the default redirect handler
+        self._opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=self._ctx))
 
     def _call(self, path: str, body: dict | None = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.url + path, data=data, method="POST" if data is not None else "GET")
+        try:
+            req = urllib.request.Request(self.url + path, data=data, method="POST" if data is not None else "GET")
+        except ValueError as e:  # e.g. an unclosed "[" in FW1_URL; the message would only repeat the URL
+            raise Fw1Error(f"fw1 {path}: bad FW1_URL") from e
         req.add_header("Authorization", self._auth)
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as resp:
-                return json.loads(resp.read().decode())
+            with self._opener.open(req, timeout=self.timeout) as resp:
+                raw = resp.read(MAX_BODY + 1)
+            if len(raw) > MAX_BODY:
+                raise Fw1Error(f"fw1 {path}: response too large")
+            return json.loads(raw.decode())
         except urllib.error.HTTPError as e:
+            e.close()  # the error carries the open response; release its socket
             raise Fw1Error(f"fw1 {path}: HTTP {e.code}") from e
-        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ssl.SSLError, json.JSONDecodeError, OSError) as e:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ssl.SSLError, OSError) as e:
             raise Fw1Error(f"fw1 {path}: {e}") from e
+        except (ValueError, RecursionError) as e:  # ValueError covers UnicodeDecodeError and JSONDecodeError
+            raise Fw1Error(f"fw1 {path}: invalid JSON ({type(e).__name__})") from e
 
     # --- raw ---------------------------------------------------------------
     def leases_raw(self) -> list[dict]:
@@ -128,35 +152,46 @@ class Fw1Client:
 
         ignore_interfaces matches (case-insensitively) the OPNsense identifier (opt3), the device (vlan0110, igc4)
         or the description (Klienter, WAN), because leases and ARP rows name interfaces differently."""
-        ign = {x.strip().lower() for x in ignore_interfaces if x.strip()}
-        skip = lambda *names: any((n or "").lower() in ign for n in names)
+        ign = {_s(x).lower() for x in ignore_interfaces if _s(x)}
+        skip = lambda *names: any(_s(n).lower() in ign for n in names)
         leases = self.leases_raw()
         arp = self.arp_raw()
+        try:
+            return self._sightings(leases, arp, skip)
+        except (TypeError, AttributeError, KeyError) as e:
+            raise Fw1Error("fw1: unexpected field type in leases/arp") from e
+
+    def _sightings(self, leases: list, arp: list, skip) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
         lease_rows = kea_leases(leases) if self.dhcp_backend == "kea" else isc_leases(leases)
         for l in lease_rows:
-            mac = norm_mac(l.get("mac", ""))
+            mac = norm_mac(_s(l.get("mac")))
             if not mac or skip(l.get("if"), l.get("if_descr")):
                 continue
+            lease_type = _s(l.get("type")).lower() or "dynamic"
+            if lease_type not in ("dynamic", "static"):
+                lease_type = "dynamic"  # the UI filters know only those two
             out.append(Sighting(
-                mac=mac, ip=l.get("address") or "",
-                hostname=(l.get("hostname") or "").strip(),
-                vendor=(l.get("man") or "").strip(),
-                vlan=(l.get("if_descr") or l.get("if") or "").strip(), iface=l.get("if") or "",
-                source="dhcp", lease_type=l.get("type") or "dynamic",
+                mac=mac, ip=_s(l.get("address")),
+                hostname=_s(l.get("hostname")),
+                vendor=_s(l.get("man")),
+                vlan=_s(l.get("if_descr")) or _s(l.get("if")), iface=_s(l.get("if")),
+                source="dhcp", lease_type=lease_type,
                 online=l.get("status") == "online",
             ))
         for a in arp:
-            mac = norm_mac(a.get("mac", ""))
+            if not isinstance(a, dict):
+                continue
+            mac = norm_mac(_s(a.get("mac")))
             if not mac or a.get("permanent") or a.get("expired"):
                 continue
-            iface = a.get("intf") or ""
+            iface = _s(a.get("intf"))
             if skip(iface, a.get("intf_description")):
                 continue
             out.append(Sighting(
-                mac=mac, ip=a.get("ip") or "", hostname=(a.get("hostname") or "").strip(),
-                vendor=(a.get("manufacturer") or "").strip(),
-                vlan=(a.get("intf_description") or iface).strip(), iface=iface,
+                mac=mac, ip=_s(a.get("ip")), hostname=_s(a.get("hostname")),
+                vendor=_s(a.get("manufacturer")),
+                vlan=_s(a.get("intf_description")) or iface, iface=iface,
                 source="arp", lease_type="", online=True,
             ))
         return out, {"leases": len(leases), "arp": len(arp)}

@@ -41,8 +41,12 @@ def merge(sightings: list[Sighting]) -> dict[str, Merged]:
         by_mac.setdefault(s.mac, []).append(s)
     out: dict[str, Merged] = {}
     for mac, ss in by_mac.items():
-        dhcp = sorted((s for s in ss if s.source == "dhcp"), key=lambda s: (s.vlan, s.ip))
-        arp = sorted((s for s in ss if s.source == "arp"), key=lambda s: (s.vlan, s.ip))
+        # a total order over the rows, so ties (same vlan/ip, several hostnames) never depend on fw1's row order
+        ss = sorted(ss, key=lambda s: (s.source != "dhcp", s.vlan == "", s.vlan, s.ip == "", s.ip, s.lease_type != "static", s.hostname))
+        # an empty IP sorts last (it cannot be where the device is), a static lease before a dynamic one
+        pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname)
+        dhcp = sorted((s for s in ss if s.source == "dhcp"), key=pick)
+        arp = sorted((s for s in ss if s.source == "arp"), key=pick)
         arp_ips = {s.ip for s in arp if s.ip}
         lease = next((s for s in dhcp if s.ip in arp_ips), dhcp[0] if dhcp else None)
         wire = next((s for s in arp if lease and s.ip == lease.ip), arp[0] if arp else None)
@@ -81,14 +85,14 @@ class Collector:
                 status["switch_ok"] = "1"; status["switch_error"] = ""; status["switch_macs"] = str(len(snap.by_mac))
             except Exception as e:
                 log.warning("switch poll failed: %s", e)
-                status["switch_ok"] = "0"; status["switch_error"] = str(e)[:200]
+                status["switch_ok"] = "0"; status["switch_error"] = (str(e) or type(e).__name__)[:200]  # a bare TimeoutError has no text
         if self._unifi:
             try:
                 wifi = self._unifi.clients()
                 status["unifi_ok"] = "1"; status["unifi_error"] = ""; status["unifi_clients"] = str(len(wifi))
             except Exception as e:
                 log.warning("unifi poll failed: %s", e)
-                status["unifi_ok"] = "0"; status["unifi_error"] = str(e)[:200]
+                status["unifi_ok"] = "0"; status["unifi_error"] = (str(e) or type(e).__name__)[:200]
         return snap, wifi, status
 
     def _fail(self, msg: str) -> dict:
@@ -131,7 +135,7 @@ class Collector:
                         (mac, now, now, now if m.online else None, m.ip, m.hostname, m.vendor, m.vlan, m.iface, m.lease_type, sources, int(m.online), int(first_run)))
                     c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)", (mac, now, m.ip, m.hostname, m.vlan, m.lease_type))
                     if not first_run:
-                        c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "new", f"{m.ip} {m.hostname} {m.vendor} ({m.vlan})".strip()))
+                        c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
                         new_devices.append({"mac": mac, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor, "vlan": m.vlan, "lease_type": m.lease_type})
                     continue
                 ev = []
@@ -143,8 +147,10 @@ class Collector:
                     ev.append(("vlan", f"{cur['vlan'] or '-'} -> {m.vlan}"))
                 if m.lease_type and m.lease_type != cur["lease_type"]:
                     ev.append(("lease_type", f"{cur['lease_type'] or 'no DHCP'} -> {m.lease_type}"))
+                # prev_ok: after a failed poll every device looks "away" for the outage, so "back" would be a false positive
                 if m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and prev_ok:
-                    ev.append(("back", f"back after {(now - cur['last_online']) // 86400} days"))
+                    days = (now - cur["last_online"]) // 86400
+                    ev.append(("back", f"back after {days} day{'' if days == 1 else 's'}"))
                 for kind, detail in ev:
                     c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, kind, detail))
                 if any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
@@ -159,7 +165,8 @@ class Collector:
                     (now, now if m.online else None, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vendor or cur["vendor"],
                      m.vlan or cur["vlan"], m.iface or cur["iface"], m.lease_type or cur["lease_type"], sources, int(online), mac))
             # --- optional enrichers: switch port and Wi-Fi ---
-            if snap is not None or wifi:
+            unifi_ok = enrich_status.get("unifi_ok") == "1"
+            if snap is not None or wifi or unifi_ok:
                 rows = {r["mac"]: dict(r) for r in c.execute("SELECT mac, sw_port, sw_via, wifi_ssid, wifi_ap, link, online, hostname, name FROM devices").fetchall()}
                 if snap is not None:
                     # an uplink port without an LLDP name: if an infrastructure device (AP, switch) sits on it, name the port after it
@@ -172,7 +179,10 @@ class Collector:
                 for mac, cur in rows.items():
                     sets, params = [], []
                     w0 = wifi.get(mac) if wifi else None
-                    if snap is not None and cur["online"] and not (w0 and not w0.wired):
+                    # UniFi down this poll: a Wi-Fi device would get the AP's uplink port from the FDB; keep its last values
+                    unifi_blind = self._unifi is not None and not unifi_ok and cur["link"] == "wifi"
+                    # on the wire this poll, not in grace: the FDB ages out slower than ARP, so a departed device would get a stale port
+                    if snap is not None and merged.get(mac) and merged[mac].online and not (w0 and not w0.wired) and not unifi_blind:
                         port, via = snap.describe(mac)
                         if port and (port != cur["sw_port"] or via != cur["sw_via"]):
                             if cur["sw_port"] and port != cur["sw_port"]:
@@ -191,6 +201,13 @@ class Collector:
                         elif w and w.wired:  # UniFi says wired now: drop the old Wi-Fi details
                             sets += ["wifi_ssid=?", "wifi_ap=?", "wifi_signal=?", "wifi_radio=?", "wifi_alias=?", "link=?"]
                             params += ["", "", None, "", w.alias, "wired"]
+                    # on the wire this poll, not just in grace: a phone walking out drops off ARP and UniFi together, and its
+                    # last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
+                    if unifi_ok and merged.get(mac) and merged[mac].online and cur["wifi_ssid"] and mac not in wifi:
+                        # UniFi answered but no longer lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
+                        # branch above already recorded its port (w0 is None), so a cable is shown in this same poll.
+                        sets += ["wifi_ssid=?", "wifi_ap=?", "wifi_signal=?", "wifi_radio=?", "link=?"]
+                        params += ["", "", None, "", "wired" if snap is not None and mac in snap.by_mac else ""]
                     if snap is not None and cur["online"] and mac in snap.by_mac and not (wifi.get(mac) and not wifi[mac].wired) and cur["link"] != "wifi":
                         sets += ["link=?"]; params += ["wired"]
                     if sets:
@@ -218,8 +235,10 @@ class Collector:
                     notify.new_devices(self.cfg, pending)
                     self._unmailed = []
                 except Exception as e:  # never let mail break the collector; keep the batch for the next poll
-                    log.warning("mail failed (%d device(s) queued): %s", len(pending), e)
                     self._unmailed = pending[-50:]
+                    log.warning("mail failed (%d device(s) queued): %s", len(self._unmailed), e)
+                    if len(pending) > len(self._unmailed):
+                        log.warning("mail retry queue full: %d device(s) dropped without a mail", len(pending) - len(self._unmailed))
         log.info("poll ok: %d devices, %d new, %d changed, %d ms", len(merged), len(new_devices), changes, int((time.time() - t0) * 1000))
         return {"ok": True, "devices": len(merged), "new": len(new_devices), "changed": changes, "first_run": first_run}
 

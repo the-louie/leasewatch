@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import threading
 
@@ -27,13 +28,21 @@ def main() -> int:
         for p in problems:
             log.error("config: %s", p)
         return 2
-    os.makedirs(cfg.data_dir, exist_ok=True)
-    db = Database(cfg.db_path)
+    try:
+        os.makedirs(cfg.data_dir, exist_ok=True)
+        db = Database(cfg.db_path)
+    except (OSError, sqlite3.Error) as e:
+        log.error("cannot open %s: %s", cfg.db_path, e)
+        return 2
     stop = threading.Event()
     collector = Collector(cfg, db)
     t = threading.Thread(target=collector.loop, args=(stop,), name="collector", daemon=True)
-    t.start()
-    srv = serve(cfg, db, __version__)
+    try:
+        srv = serve(cfg, db, __version__)
+    except OSError as e:
+        log.error("cannot listen on %s:%d: %s", cfg.listen_host, cfg.listen_port, e)
+        return 2
+    t.start()  # only once the port is ours: a failed bind must not leave a poller running (and mailing) without a UI
 
     def shutdown(*_):
         log.info("shutting down")
@@ -44,6 +53,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, shutdown)
     log.info("leasewatch %s, polling %s every %ss, mail %s", __version__, cfg.fw1_url, cfg.poll_seconds, "on" if cfg.mail_enabled else "off")
     srv.serve_forever()
+    srv.server_close()
     t.join(10)  # let a poll in flight commit before the interpreter goes away
     return 0
 

@@ -778,5 +778,39 @@ class ReleaseReviewTests(WebTestCase):
         st, _, _ = self.req("GET", "/?filter=new"); self.assertEqual(st, 200)
 
 
+
+class QaFixTests(WebTestCase):
+    def test_deeply_nested_json_is_400(self):
+        status, data, _ = self.post(MAC1, None, raw=b"[" * 16000)
+        self.assertEqual(status, 400); self.assertEqual(data["error"], "bad json")
+
+    def test_lone_surrogate_name_is_400(self):
+        for field in ("name", "note"):
+            status, data, _ = self.post(MAC1, None, raw=('{"%s": "\\ud800"}' % field).encode())
+            self.assertEqual(status, 400, field); self.assertEqual(data["error"], "bad json", field)
+        self.assertEqual(self.db.device(MAC1)["name"], "")
+
+    def test_stdlib_errors_are_json_with_security_headers(self):
+        raw = self.raw_request(b"TRACE / HTTP/1.0\r\n\r\n")
+        head, _, body = raw.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.0 501"), head)
+        self.assertIn(b"X-Content-Type-Options: nosniff", head); self.assertIn(b"X-Frame-Options: DENY", head)
+        self.assertIn(b"Content-Type: application/json", head)
+        self.assertIn("error", json.loads(body))
+
+    def test_site_name_with_version_placeholder_stays_literal(self):
+        self.cfg.site_name = "A{{VERSION}}B"
+        st, _, body = self.req("GET", "/")
+        self.assertEqual(st, 200); self.assertIn(b"A{{VERSION}}B", body)
+
+    def test_port_in_use_exits_2_without_traceback(self):
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0)); busy.listen(1)
+            env = dict(os.environ, LISTEN_PORT=str(busy.getsockname()[1]), FW1_URL="http://127.0.0.1:9", DATA_DIR=self.tmp.name,
+                       PYTHONPATH=REPO)
+            out = subprocess.run([sys.executable, "-m", "leasewatch"], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("cannot listen", out.stderr); self.assertNotIn("Traceback", out.stderr)
+
 if __name__ == "__main__":
     unittest.main()

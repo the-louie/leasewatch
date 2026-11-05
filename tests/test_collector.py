@@ -175,14 +175,17 @@ class FixRegressionTests(unittest.TestCase):
 
     def test_mail_text(self):
         from leasewatch import notify
+        from unittest import mock
         sent = []
-        notify._send = lambda cfg, subject, text: sent.append((subject, text))
-        devs = [{"mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.5", "hostname": "pc", "vendor": "Acme", "vlan": "LAN", "lease_type": "dynamic"}]
-        notify.new_devices(self.cfg, devs)
-        self.assertEqual(sent[-1][0], "New device: pc (10.0.0.5, LAN)"); self.assertNotIn("acknowledge", sent[-1][1])  # no PUBLIC_URL: no link
-        os.environ["PUBLIC_URL"] = "https://leases.example.lan"
-        notify.new_devices(Config(), devs + devs)
-        self.assertEqual(sent[-1][0], "2 new devices on the network"); self.assertIn("https://leases.example.lan/?filter=unacked", sent[-1][1])
+        # patched only inside this block, so later tests get the real _send back
+        with mock.patch.object(notify, "_send", lambda cfg, subject, text: sent.append((subject, text))):
+            devs = [{"mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.5", "hostname": "pc", "vendor": "Acme", "vlan": "LAN", "lease_type": "dynamic"}]
+            notify.new_devices(self.cfg, devs)
+            self.assertEqual(sent[-1][0], "New device: pc (10.0.0.5, LAN)"); self.assertNotIn("acknowledge", sent[-1][1])  # no PUBLIC_URL: no link
+            os.environ["PUBLIC_URL"] = "https://leases.example.lan"
+            notify.new_devices(Config(), devs + devs)
+            self.assertEqual(sent[-1][0], "2 new devices on the network"); self.assertIn("https://leases.example.lan/?filter=unacked", sent[-1][1])
+        self.assertEqual(notify._send.__name__, "_send")
 
     def test_dhcp_backend_is_validated(self):
         os.environ["DHCP_BACKEND"] = "dnsmasq"
@@ -190,6 +193,157 @@ class FixRegressionTests(unittest.TestCase):
             self.assertIn("DHCP_BACKEND must be isc or kea", Config().validate())
         finally:
             del os.environ["DHCP_BACKEND"]
+
+
+class ReviewFixTests(unittest.TestCase):
+    def setUp(self):
+        self._env = dict(os.environ)
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self.cfg = Config(); self.db = Database(self.cfg.db_path)
+
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
+
+    def _same_over_permutations(self, rows):
+        import itertools
+        mac = rows[0].mac
+        first = merge(rows)[mac]
+        for p in itertools.permutations(rows):
+            self.assertEqual(merge(list(p))[mac], first, p)
+        return first
+
+    def test_merge_ties_do_not_depend_on_row_order(self):
+        mac = "02:00:00:00:00:01"
+        m = self._same_over_permutations([S(mac, "10.0.0.5", "pc-a", src="arp"), S(mac, "10.0.0.5", "pc-b", src="arp")])
+        self.assertEqual(m.hostname, "pc-a")
+        m = self._same_over_permutations([S(mac, "10.0.0.5", "pc-d", lt="dynamic"), S(mac, "10.0.0.5", "pc-s", lt="static")])
+        self.assertEqual((m.lease_type, m.hostname), ("static", "pc-s"))
+        m = self._same_over_permutations([S(mac, "", "ghost"), S(mac, "10.0.0.7", "pc")])
+        self.assertEqual((m.ip, m.hostname), ("10.0.0.7", "pc"))  # the empty-IP lease loses
+
+    def test_wifi_device_no_longer_listed_by_unifi_falls_back_to_switch(self):
+        from leasewatch.unifi import WifiInfo
+        from leasewatch.switch import build_snapshot
+        mac = "02:00:00:00:00:01"
+        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        wifi = {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz", alias="laptop")}
+        col._unifi = type("U", (), {"clients": lambda self: wifi})()
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        col.run_once(); d = self.db.device(mac)
+        self.assertEqual((d["link"], d["wifi_ssid"], d["sw_port"]), ("wifi", "HomeNet", ""))
+        wifi.clear()  # UniFi answers, but no longer lists the device
+        col.run_once(); d = self.db.device(mac)
+        self.assertEqual((d["link"], d["wifi_ssid"], d["wifi_ap"], d["wifi_signal"], d["wifi_radio"], d["wifi_alias"], d["sw_port"]),
+                         ("wired", "", "", None, "", "laptop", "GE1/0/5"))
+
+    def test_departing_wifi_device_keeps_its_last_ssid(self):
+        from leasewatch.unifi import WifiInfo
+        from leasewatch.switch import build_snapshot
+        mac = "02:00:00:00:00:01"
+        c = FakeClient([S(mac, "10.0.0.5", src="arp"), S("02:00:00:00:00:09", "10.0.0.9", src="arp")])
+        col = Collector(self.cfg, self.db, c)
+        wifi = {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz")}
+        col._unifi = type("U", (), {"clients": lambda self: wifi})()
+        # the FDB keeps the phone on port 5, the AP uplink, after it has left
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        col.run_once()
+        wifi.clear(); c.sightings_data = [S("02:00:00:00:00:09", "10.0.0.9", src="arp")]  # gone from ARP and UniFi
+        col.run_once(); d = self.db.device(mac)
+        self.assertEqual((d["online"], d["link"], d["wifi_ssid"], d["wifi_ap"], d["sw_port"]), (1, "wifi", "HomeNet", "ap-hall", ""))
+
+    def test_unifi_failure_does_not_write_ap_port_on_wifi_devices(self):
+        from leasewatch.unifi import WifiInfo
+        from leasewatch.switch import build_snapshot
+        mac = "02:00:00:00:00:01"
+        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        state = {"down": False}
+        def clients(_self):
+            if state["down"]:
+                raise TimeoutError()
+            return {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz")}
+        col._unifi = type("U", (), {"clients": clients})()
+        # port 5 is the AP uplink: the FDB lists the Wi-Fi device there
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        col.run_once()
+        state["down"] = True
+        col.run_once(); d = self.db.device(mac)
+        self.assertEqual((d["sw_port"], d["link"], d["wifi_ssid"]), ("", "wifi", "HomeNet"))
+
+    def test_enrich_error_names_a_bare_exception(self):
+        col = Collector(self.cfg, self.db, FakeClient([]))
+        col._switch = type("W", (), {"snapshot": lambda self: (_ for _ in ()).throw(TimeoutError())})()
+        self.assertEqual(col._enrich()[2]["switch_error"], "TimeoutError")
+
+    def test_new_and_back_event_text(self):
+        mac = "02:00:00:00:00:01"
+        c = FakeClient([S("02:00:00:00:00:09", "10.0.0.9")]); col = Collector(self.cfg, self.db, c); col.run_once()
+        c.sightings_data = [S(mac, "10.0.0.5", host="", vlan="IOT")]; col.run_once()
+        self.assertEqual(self.db.events(mac)[0]["detail"], "10.0.0.5 Acme (IOT)")
+        c.sightings_data = [S(mac, "10.0.0.6", host="", vlan="", vendor="")]; self.db.q("DELETE FROM devices WHERE mac=?", (mac,)); col.run_once()
+        self.assertEqual(self.db.events(mac)[0]["detail"], "10.0.0.6")
+        self.db.q("UPDATE devices SET online=0, last_online=? WHERE mac=?", (int(time.time()) - 86400 - 60, mac)); col.run_once()
+        self.assertEqual(self.db.events(mac)[0]["detail"], "back after 1 day")
+
+    def test_mail_failure_logs_kept_and_dropped(self):
+        from leasewatch import notify
+        os.environ.update({"MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example", "MAIL_TO": "a@example.lan"})
+        c = FakeClient([S("02:00:00:00:00:09", "10.0.0.9")]); col = Collector(Config(), self.db, c); col.run_once()
+        col._unmailed = [{"mac": f"02:00:00:00:01:{i:02x}"} for i in range(60)]
+        c.sightings_data.append(S("02:00:00:00:00:01", "10.0.0.5"))
+        orig = notify.new_devices
+        notify.new_devices = lambda cfg, devs: (_ for _ in ()).throw(RuntimeError("mailgun down"))
+        try:
+            with self.assertLogs("leasewatch.collector", "WARNING") as logs:
+                col.run_once()
+        finally:
+            notify.new_devices = orig
+        self.assertEqual(len(col._unmailed), 50)
+        self.assertTrue(any("50 device(s) queued" in m for m in logs.output), logs.output)
+        self.assertTrue(any("11 device(s) dropped" in m for m in logs.output), logs.output)
+
+
+class DatabaseFixTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(os.path.join(self.tmp.name, "t.db"))
+        self.mac = "02:00:00:00:00:01"
+        self.db.q("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,?,?)", (self.mac, 1, 1))
+
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup()
+
+    def test_ctrl_keeps_zwj_and_strips_c1_and_bom(self):
+        family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"
+        d = self.db.update_user_fields(self.mac, None, f"{family} TV\x85\ufeff\u2060\u061c", None)
+        self.assertEqual(d["name"], f"{family} TV")
+
+    def test_reack_keeps_acked_at_and_name_has_no_trailing_space(self):
+        self.db.update_user_fields(self.mac, True, None, None)
+        self.db.q("UPDATE devices SET acked_at=1 WHERE mac=?", (self.mac,))
+        d = self.db.update_user_fields(self.mac, True, "x" * 79 + " y", None)
+        self.assertEqual((d["acked_at"], d["name"]), (1, "x" * 79))
+        self.assertIsNone(self.db.update_user_fields(self.mac, False, None, None)["acked_at"])
+
+    def test_same_second_rows_newest_first(self):
+        for k in ("a", "b", "c"):
+            self.db.q("INSERT INTO events(ts,mac,kind,detail) VALUES(5,?,?,'')", (self.mac, k))
+            self.db.q("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,5,?,'','','')", (self.mac, k))
+        self.assertEqual([e["kind"] for e in self.db.events(self.mac)], ["c", "b", "a"])
+        self.assertEqual([e["kind"] for e in self.db.events()], ["c", "b", "a"])
+        self.assertEqual([h["ip"] for h in self.db.history(self.mac)], ["c", "b", "a"])
+
+    def test_tx_rolls_back_and_keeps_the_original_exception(self):
+        class Stop(BaseException): pass
+        with self.assertRaises(KeyError):
+            with self.db.tx() as c:
+                c.execute("ROLLBACK")  # the later ROLLBACK in tx() now fails
+                raise KeyError("original")
+        self.assertFalse(self.db._conn.in_transaction)
+        with self.assertRaises(Stop):
+            with self.db.tx() as c:
+                c.execute("UPDATE devices SET name='x'")
+                raise Stop()
+        self.assertFalse(self.db._conn.in_transaction)
+        self.assertEqual(self.db.device(self.mac)["name"], "")
 
 
 if __name__ == "__main__":
