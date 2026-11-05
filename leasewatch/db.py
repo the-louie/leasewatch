@@ -86,8 +86,20 @@ class Database:
         except ValueError:  # a hand-edited or damaged value: the steps are idempotent, so re-running them is safe
             log.warning("database schema_version %r is not a number; treated as 1", raw[:40])
             version = 1
+        if version < 1:  # "0" or "-1" would ask for a step 1 that does not exist; same damage as a non-number
+            log.warning("database schema_version %r is not a number; treated as 1", raw[:40])
+            version = 1
         if version > SCHEMA_VERSION:  # written by a newer leasewatch: never step it down or touch its tables
             log.warning("database schema %d is newer than this version (%d); no migration", version, SCHEMA_VERSION)
+            # a hand-edited version can skip a step whose table this code needs: create only what is missing
+            # (IF NOT EXISTS leaves a newer leasewatch's tables alone) and keep the version as it is
+            have_tables = {r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for step in range(2, SCHEMA_VERSION + 1):
+                table = re.match(r"CREATE TABLE IF NOT EXISTS (\w+)", VERSION_STEPS[step]).group(1)
+                if table not in have_tables:
+                    log.warning("database schema %d lacks table %s; creating it", version, table)
+                    with self.tx() as c:
+                        c.execute(VERSION_STEPS[step])
         for step in range(version + 1, SCHEMA_VERSION + 1):
             with self.tx() as c:  # the step and its version number together, so a crash in between re-runs the step
                 c.execute(VERSION_STEPS[step])

@@ -524,6 +524,35 @@ class SchemaVersionTests(unittest.TestCase):
         finally:
             db._conn.close()
 
+    def test_zero_or_negative_schema_version_is_treated_as_1(self):
+        for raw in ("0", "-1"):
+            with self.subTest(raw=raw):
+                db = Database(self.path)
+                db.set_meta("schema_version", raw); db._conn.execute("DROP TABLE seen"); db._conn.close()
+                with self.assertLogs("leasewatch.db", "WARNING") as logs:
+                    db = Database(self.path)  # crashed with KeyError: VERSION_STEPS has no step 1 or 0
+                try:
+                    self.assertIn("not a number; treated as 1", logs.output[0])
+                    self.assertEqual(db.get_meta("schema_version"), "2")
+                    self.assertEqual(db.seen("02:00:00:00:00:01"), [])
+                finally:
+                    db._conn.close()
+
+    def test_newer_schema_version_without_seen_table_creates_it(self):
+        import sqlite3
+        conn = sqlite3.connect(self.path)
+        conn.executescript(SCHEMA_1_0)
+        conn.execute("INSERT INTO meta(key,value) VALUES('schema_version','99')")
+        conn.commit(); conn.close()
+        with self.assertLogs("leasewatch.db", "WARNING") as logs:
+            db = Database(self.path)
+        try:
+            self.assertIn("WARNING:leasewatch.db:database schema 99 lacks table seen; creating it", logs.output)
+            self.assertEqual(db.get_meta("schema_version"), "99")  # left as is
+            self.assertEqual(db.seen("02:00:00:00:00:01"), [])
+        finally:
+            db._conn.close()
+
     def test_newer_schema_version_warns_and_is_left_alone(self):
         db = Database(self.path)
         db.set_meta("schema_version", "9"); db._conn.close()
@@ -543,11 +572,16 @@ class SchemaVersionTests(unittest.TestCase):
                 mac = "02:00:00:00:00:01"
                 db._conn.executemany("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,1,1)",
                                      [(mac, "fw1"), (mac, "sw-old"), (mac, "unifi-old")])
+                db._conn.executemany("INSERT INTO devices(mac,first_seen,last_seen,loc_source) VALUES(?,1,1,?)",
+                                     [(mac, "sw-old"), ("02:00:00:00:00:02", "fw1"), ("02:00:00:00:00:03", "")])
                 with self.assertLogs("leasewatch.collector", "INFO") as logs:
                     Collector(cfg, db, FakeClient([]))
                 self.assertEqual([r["source"] for r in db.seen(mac)], ["fw1"])
+                self.assertEqual([r["loc_source"] for r in db.q("SELECT loc_source FROM devices ORDER BY mac")],
+                                 ["", "fw1", ""])
                 self.assertEqual([m for m in logs.output if "seen rows" in m],
-                                 ["INFO:leasewatch.collector:removed 2 seen rows of instances that are no longer configured"])
+                                 ["INFO:leasewatch.collector:removed 2 seen rows and 1 location sources of instances "
+                                  "that are no longer configured"])
                 with self.assertNoLogs("leasewatch.collector", "INFO"):
                     Collector(cfg, db, FakeClient([]))  # nothing left to prune: no log line
             finally:
