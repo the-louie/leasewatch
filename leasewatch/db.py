@@ -1,0 +1,148 @@
+"""SQLite storage: devices (one row per MAC), change history, events, meta."""
+from __future__ import annotations
+
+import re
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS devices (
+    mac         TEXT PRIMARY KEY,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    last_online INTEGER,
+    ip          TEXT NOT NULL DEFAULT '',
+    hostname    TEXT NOT NULL DEFAULT '',
+    vendor      TEXT NOT NULL DEFAULT '',
+    vlan        TEXT NOT NULL DEFAULT '',
+    iface       TEXT NOT NULL DEFAULT '',
+    lease_type  TEXT NOT NULL DEFAULT '',
+    sources     TEXT NOT NULL DEFAULT '',
+    online      INTEGER NOT NULL DEFAULT 0,
+    baseline    INTEGER NOT NULL DEFAULT 0,
+    acked       INTEGER NOT NULL DEFAULT 0,
+    acked_at    INTEGER,
+    name        TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT NOT NULL, ts INTEGER NOT NULL,
+    ip TEXT NOT NULL, hostname TEXT NOT NULL, vlan TEXT NOT NULL, lease_type TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS history_mac ON history(mac, ts);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL, mac TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS events_mac ON events(mac, ts);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+# columns added after 1.0.0 (ALTER TABLE ... ADD COLUMN is applied when missing)
+MIGRATIONS = [
+    ("devices", "sw_port", "TEXT NOT NULL DEFAULT ''"), ("devices", "sw_via", "TEXT NOT NULL DEFAULT ''"),
+    ("devices", "wifi_ssid", "TEXT NOT NULL DEFAULT ''"), ("devices", "wifi_ap", "TEXT NOT NULL DEFAULT ''"),
+    ("devices", "wifi_signal", "INTEGER"), ("devices", "wifi_radio", "TEXT NOT NULL DEFAULT ''"),
+    ("devices", "wifi_alias", "TEXT NOT NULL DEFAULT ''"), ("devices", "link", "TEXT NOT NULL DEFAULT ''"),
+]
+
+# strip NUL/control and bidi-override characters from user text (keeps tab/newline for notes)
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2066-\u2069]")
+
+DEVICE_COLS = ("mac", "first_seen", "last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface",
+               "lease_type", "sources", "online", "baseline", "acked", "acked_at", "name", "note")
+
+
+class Database:
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.executescript(SCHEMA)  # executescript commits by itself; keep it outside tx()
+        have = {(t, r[1]) for t in ("devices",) for r in self._conn.execute(f"PRAGMA table_info({t})")}
+        for table, col, decl in MIGRATIONS:
+            if (table, col) not in have:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+    @contextmanager
+    def tx(self):
+        with self._lock:
+            if self._conn.in_transaction:  # a failed COMMIT+ROLLBACK must not wedge every later transaction
+                self._conn.execute("ROLLBACK")
+            self._conn.execute("BEGIN")
+            try:
+                yield self._conn
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def q(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    # --- meta ---------------------------------------------------------------
+    def get_meta(self, key: str, default: str = "") -> str:
+        r = self.q("SELECT value FROM meta WHERE key=?", (key,))
+        return r[0]["value"] if r else default
+
+    def set_meta(self, key: str, value: str, conn=None) -> None:
+        (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+    def all_meta(self) -> dict:
+        return {r["key"]: r["value"] for r in self.q("SELECT key, value FROM meta")}
+
+    # --- devices ------------------------------------------------------------
+    def devices(self) -> list[dict]:
+        return [dict(r) for r in self.q("SELECT * FROM devices ORDER BY first_seen DESC, mac")]
+
+    def device(self, mac: str) -> dict | None:
+        r = self.q("SELECT * FROM devices WHERE mac=?", (mac,))
+        return dict(r[0]) if r else None
+
+    def history(self, mac: str, limit: int = 200) -> list[dict]:
+        return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC LIMIT ?", (mac, limit))]
+
+    def events(self, mac: str | None = None, limit: int = 200) -> list[dict]:
+        if mac:
+            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail FROM events e WHERE mac=? ORDER BY ts DESC LIMIT ?", (mac, limit))
+        else:
+            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac) ORDER BY ts DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None) -> dict | None:
+        with self.tx() as c:
+            cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
+            if not cur:
+                return None
+            sets, params = [], []
+            if acked is not None:
+                sets.append("acked=?"); params.append(1 if acked else 0)
+                sets.append("acked_at=?"); params.append(int(time.time()) if acked else None)
+            if name is not None:
+                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80])
+            if note is not None:
+                sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000])
+            if sets:
+                params.append(mac)
+                c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
+                if acked is not None and bool(cur["acked"]) != bool(acked):
+                    c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), mac, "acked" if acked else "unacked", ""))
+            return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone())
+
+    def stats(self, new_days: int) -> dict:
+        now = int(time.time())
+        rows = self.q("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices GROUP BY vlan ORDER BY n DESC")
+        per_day = self.q("SELECT date(first_seen,'unixepoch','localtime') d, COUNT(*) n FROM devices WHERE baseline=0 AND first_seen>=? GROUP BY d", (now - 30 * 86400,))
+        tot = self.q("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices", (now - new_days * 86400,))[0]
+        return {
+            "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
+            "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],
+            "new_per_day": {r["d"]: r["n"] for r in per_day},
+        }

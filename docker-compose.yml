@@ -1,0 +1,30 @@
+# leasewatch -- who is on the network (DHCP leases + ARP from an OPNsense firewall), behind nginx-proxy.
+# Secrets live in .env (FW1_KEY/FW1_SECRET = a read-only OPNsense API user; MAILGUN_KEY, SNMP_*, UNIFI_* optional).
+# Without nginx-proxy: drop the VIRTUAL_* variables and the network, and publish the port instead (ports: ["8080:8080"]).
+services:
+  leasewatch:
+    build: .
+    image: leasewatch:local
+    container_name: leasewatch
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      VIRTUAL_HOST: leases.example.lan
+      VIRTUAL_PORT: "8080"
+      TZ: UTC
+    volumes:
+      - ./data:/data
+    networks:
+      - nginx-proxy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+networks:
+  nginx-proxy:
+    external: true

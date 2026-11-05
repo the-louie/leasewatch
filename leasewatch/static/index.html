@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{SITE_NAME}}</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 1 18 0 9 9 0 0 1-18 0Zm9-5v5l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div>
+      <h1>{{SITE_NAME}}</h1>
+      <p class="sub">Who is on the network, newest first</p>
+    </div>
+  </div>
+  <div class="status" id="status" title="Collector status">
+    <span class="dot" id="statusDot"></span><span id="statusText">loading…</span>
+  </div>
+  <button class="icon-btn" id="themeBtn" title="Toggle light/dark" aria-label="Toggle theme">◐</button>
+</header>
+
+<div class="banner hidden" id="banner" role="alert"></div>
+
+<main>
+  <section class="cards" id="cards" aria-label="Summary">
+    <button class="card" data-filter="all" aria-pressed="false"><span class="num" id="cTotal">–</span><span class="lbl">devices</span></button>
+    <button class="card" data-filter="online" aria-pressed="false"><span class="num" id="cOnline">–</span><span class="lbl">online now</span></button>
+    <button class="card accent" data-filter="new" aria-pressed="false"><span class="num" id="cNew">–</span><span class="lbl">new (<span id="newDays">7</span> d)</span></button>
+    <button class="card warn" data-filter="unacked" aria-pressed="false"><span class="num" id="cUnacked">–</span><span class="lbl">not yet known</span></button>
+    <div class="card chart" role="img" aria-label="New devices per day, last 30 days">
+      <div class="chart-title"><span>new devices · 30 days</span><span class="chart-sum" id="barsSum"></span></div>
+      <div class="bars" id="bars"></div>
+      <div class="chart-axis"><span>30 d ago</span><span>today</span></div>
+    </div>
+  </section>
+
+  <section class="vlans" id="vlans" aria-label="Networks"></section>
+
+  <section class="toolbar">
+    <div class="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="q" type="search" aria-label="Search devices" placeholder="Search name, hostname, IP, MAC, vendor…" autocomplete="off">
+      <kbd class="key" aria-hidden="true">/</kbd>
+    </div>
+    <select id="fStatus" aria-label="Status filter">
+      <option value="all">All devices</option>
+      <option value="new">New</option>
+      <option value="unacked">Not yet known</option>
+      <option value="online">Online</option>
+      <option value="offline">Offline</option>
+      <option value="dynamic">DHCP dynamic</option>
+      <option value="static">DHCP static</option>
+      <option value="arp">Not via DHCP</option>
+      <option value="wifi">Wi-Fi</option>
+      <option value="wired">Wired</option>
+    </select>
+    <select id="sort" aria-label="Sort">
+      <option value="first_desc">Newest first</option>
+      <option value="last_desc">Last online</option>
+      <option value="name">Name</option>
+      <option value="ip">IP address</option>
+      <option value="vlan">Network</option>
+      <option value="vendor">Vendor</option>
+    </select>
+    <span class="count" id="count"></span>
+    <a class="btn ghost" href="/api/devices.csv" download>Export CSV</a>
+  </section>
+
+  <section class="table-wrap">
+    <table id="tbl">
+      <thead><tr>
+        <th class="c-dot" scope="col"><span class="sr">online</span></th>
+        <th class="c-dev" scope="col">Device</th>
+        <th class="c-ip" scope="col">IP</th>
+        <th class="c-mac" scope="col">MAC</th>
+        <th class="c-vlan" scope="col">Network</th>
+        <th class="c-type" scope="col">Type</th>
+        <th class="c-where" scope="col">Connected via</th>
+        <th class="c-first" scope="col">First seen</th>
+        <th class="c-last" scope="col">Last online</th>
+        <th class="c-act" scope="col"><span class="sr">actions</span></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty hidden" id="empty"><p id="emptyText">Nothing matches.</p><button class="btn" id="emptyClear">Clear filters</button></div>
+  </section>
+
+  <section class="events">
+    <h2>Recent events</h2>
+    <ul id="events" class="event-list"></ul>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 id="dTitle">Device</h2>
+    <button class="icon-btn" id="dClose" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body" id="dBody"></div>
+</aside>
+<div class="scrim" id="scrim"></div>
+
+<footer>
+  <span>{{SITE_NAME}} {{VERSION}} · refreshes every minute</span>
+</footer>
+
+<template id="rowTpl">
+  <tr class="row" tabindex="0">
+    <td class="c-dot"><span class="online-dot"></span></td>
+    <td class="c-dev"><div class="dev-name"><span class="nm"></span></div><div class="dev-sub"></div><div class="dev-meta"><span class="mono ip"></span><span class="badge vlan"></span><span class="muted where"></span><span class="muted last"></span></div></td>
+    <td class="c-ip mono"></td>
+    <td class="c-mac mono" title="click to copy"></td>
+    <td class="c-vlan"><span class="badge vlan"></span></td>
+    <td class="c-type"></td>
+    <td class="c-where"></td>
+    <td class="c-first"></td>
+    <td class="c-last"></td>
+    <td class="c-act"><button class="btn small ack" title="Acknowledge: I know this device" aria-label="Acknowledge">Mark known</button></td>
+  </tr>
+</template>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>
