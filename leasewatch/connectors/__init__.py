@@ -12,7 +12,7 @@ import ssl
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Callable, ClassVar, Iterable, Mapping, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from ..fw1 import _NoRedirect, norm_mac
@@ -96,13 +96,10 @@ class Attachment:
 
 @dataclass
 class Batch:
-    """The result of one collect(). stats: raw counts for status (e.g. leases/arp). extra: source-specific objects
-    the host still reads directly while the merge is being moved over (the switch snapshot, the UniFi client map);
-    not part of the stable contract."""
+    """The result of one collect(). stats: raw counts for status (e.g. leases/arp)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class ConnectorError(Exception):
@@ -148,6 +145,9 @@ class HostContext:
     norm_mac: Callable[[str], str] = field(default=norm_mac)
     redact: Callable[[str], str] = field(default=_redact_nothing)
     opener_factory: Callable[..., urllib.request.OpenerDirector] = field(default=build_opener)
+    # mac -> the device's name, else its hostname, as the host knows it (read-only); lets a switch name an unnamed
+    # uplink port after the AP or switch behind it
+    device_names: Callable[[], dict[str, str]] = field(default=lambda: {})
 
 
 @runtime_checkable

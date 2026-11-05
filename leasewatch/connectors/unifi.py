@@ -72,8 +72,7 @@ class UnifiConnector(SettingsMixin):
 
     def collect(self) -> Batch:
         wifi = self._clients()
-        return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)},
-                     extra={"wifi": wifi})
+        return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
 
     def close(self) -> None:
         pass  # each call logs in and out on its own opener

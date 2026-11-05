@@ -4,12 +4,14 @@ A thin wrapper around switch.SwitchClient. pysnmp stays a lazy import inside the
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Callable, Mapping
 
 from ..switch import SwitchClient, SwitchSnapshot
 from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin
 
+INFRA_RE = re.compile(r"^(ap|apu|sw|switch|xgs|gs|usw|uap)[-_0-9]", re.I)  # hostnames that mean "another AP/switch hangs on this port"
 
 @dataclass
 class _SnmpCfg:
@@ -19,6 +21,20 @@ class _SnmpCfg:
     snmp_auth: str
     snmp_auth_key: str = field(repr=False)
     snmp_priv_key: str = field(repr=False)
+
+
+def name_uplinks(snap: SwitchSnapshot, device_names: Callable[[], dict[str, str]]) -> None:
+    """An uplink port without an LLDP name: if an infrastructure device (AP, switch) sits on it, name the port after
+    it. Sets PortInfo.neighbor in the snapshot (in place), so the via text of every attachment is final."""
+    unnamed = [p for p in snap.ports.values() if p.uplink and not p.neighbor]
+    if not unnamed:
+        return
+    names = device_names()  # the host's device names: reads its database, so only when a port needs one
+    for p in unnamed:
+        infra = sorted(n for mac, (ifi, _vlan) in snap.by_mac.items() if ifi == p.ifindex
+                       for n in (names.get(mac),) if n and INFRA_RE.match(n))
+        if infra:
+            p.neighbor = infra[0]
 
 
 def to_attachments(snap: SwitchSnapshot, source: str, device: str, observed_at: int) -> list[Attachment]:
@@ -67,8 +83,9 @@ class SnmpSwitchConnector(SettingsMixin):
             snap = self.client.snapshot()
         except RuntimeError as e:
             raise ConnectorError(str(e) or type(e).__name__) from e
+        name_uplinks(snap, self.ctx.device_names)
         return Batch(attachments=to_attachments(snap, self.name, self.settings["name"], self.ctx.now()),
-                     stats={"macs": len(snap.by_mac)}, extra={"snapshot": snap})
+                     stats={"macs": len(snap.by_mac)})
 
     def close(self) -> None:
         pass  # each snapshot opens and closes its own SNMP engine

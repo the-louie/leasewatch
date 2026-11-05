@@ -139,7 +139,6 @@ class SwitchConnectorTests(unittest.TestCase):
         snap = self.snap()
         c = SnmpSwitchConnector("switch", SW, CTX, client=type("W", (), {"snapshot": lambda self: snap})())
         b = c.collect()
-        self.assertIs(b.extra["snapshot"], snap)
         self.assertEqual(b.stats, {"macs": len(snap.by_mac)})
         self.assertEqual({a.mac for a in b.attachments}, set(snap.by_mac))
         for a in b.attachments:
@@ -167,7 +166,6 @@ class UnifiConnectorTests(unittest.TestCase):
                              [{"mac": "02:11:22:33:44:66", "name": "ap-hall"}])
         c = UnifiConnector("unifi", UF, CTX, client=type("U", (), {"clients": lambda self: wifi})())
         b = c.collect()
-        self.assertIs(b.extra["wifi"], wifi)
         self.assertEqual(b.stats, {"clients": 2})
         by = {a.mac: a for a in b.attachments}
         self.assertEqual(by["aa:bb:cc:dd:ee:01"], Attachment(mac="aa:bb:cc:dd:ee:01", source="unifi", observed_at=1700000000, link="wifi",
