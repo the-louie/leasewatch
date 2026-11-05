@@ -4,6 +4,7 @@ A thin wrapper around switch.SwitchClient. pysnmp stays a lazy import inside the
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -14,6 +15,35 @@ from ..switch import SwitchClient, SwitchSnapshot
 from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin
 
 INFRA_RE = re.compile(r"^(ap|apu|sw|switch|xgs|gs|usw|uap)[-_0-9]", re.I)  # hostnames that mean "another AP/switch hangs on this port"
+# a host or user name shorter than this is not masked: replacing "1" or "sw" would garble every number and word in the
+# message while hiding nothing (such a name is no secret anyway)
+MIN_REDACT = 3
+
+
+def _forms(value: str) -> set[str]:
+    """Spellings of a host or user name as it may appear in pysnmp's text: as given, lower-cased, without the trailing
+    dot of an FQDN, and an IPv6 address both compressed and exploded."""
+    v = value.strip()
+    out = {v, v.lower(), v.rstrip("."), v.lower().rstrip(".")}
+    try:
+        ip = ipaddress.ip_address(v.strip("[]"))
+    except ValueError:
+        pass
+    else:
+        out |= {ip.compressed, ip.exploded, str(ip)}
+    return {f for f in out if len(f) >= MIN_REDACT}
+
+
+def _bounded(forms: set[str]) -> list[re.Pattern]:
+    """Case-insensitive patterns for whole occurrences only: "10.0.0.2" must not hit "10.0.0.25", "sw" not "switch"."""
+    out = []
+    # not inside a name/number on either side; a trailing "." is allowed (end of sentence, FQDN root) unless more follows.
+    # An IPv6 form must also not touch another ":" group ("fe80::2" is not "fe80::2:5"); for the others ":" is the port.
+    for group, colon in (([f for f in forms if ":" not in f], ""), ([f for f in forms if ":" in f], ":")):
+        if group:
+            alts = "|".join(re.escape(f) for f in sorted(group, key=len, reverse=True))
+            out.append(re.compile(rf"(?<![\w.{colon}-])(?:{alts})(?![\w{colon}-]|\.\w)", re.I))
+    return out
 
 @dataclass
 class _SnmpCfg:
@@ -125,17 +155,28 @@ class SnmpSwitchConnector(SettingsMixin):
         if self.profile_problems or self._bad_profile_name:
             raise ConnectorError("invalid profile settings (see the configuration check)")
 
+    def redact(self, text: str) -> str:
+        """`text` with the secret settings (as given and as repr() escapes them), the host and the USM user name masked.
+        Host and user match whole occurrences only and not when shorter than MIN_REDACT (see there)."""
+        for setting in self.INFO.settings:
+            v = self.settings.get(setting.key, "")
+            if setting.secret and v:
+                for form in sorted({v, repr(v)[1:-1]}, key=len, reverse=True):
+                    text = text.replace(form, "<secret>")
+        for key, mask in (("host", "<host>"), ("user", "<user>")):
+            for rx in _bounded(_forms(self.settings.get(key, ""))):
+                text = rx.sub(mask, text)
+        return text
+
     def _error(self, e: Exception) -> ConnectorError:
         """The one exception type for every failure. The client's own messages never contain the host or the keys,
-        but pysnmp's do (PySnmpError: "Bad IPv4/UDP transport address <host>@161"), so the host is taken out of all
-        of them; the keys are redacted by the host."""
+        but pysnmp's do (PySnmpError: "Bad IPv4/UDP transport address <host>@161"), so every text goes through
+        redact()."""
         if isinstance(e, ConnectorError):
             return e
         if isinstance(e, ImportError):
             return ConnectorError("missing dependency pysnmp")
-        text = str(e) or type(e).__name__
-        host = self.settings["host"].strip()
-        return ConnectorError(text.replace(host, "<host>") if host else text)
+        return ConnectorError(self.redact(str(e) or type(e).__name__))
 
     def check(self) -> None:
         """One GET of sysObjectID and sysDescr: reachability and credentials, without a walk."""

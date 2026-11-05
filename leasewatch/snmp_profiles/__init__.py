@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import functools
 import json
+import math
 import re
 import string
 from pathlib import Path
@@ -42,10 +43,26 @@ class ProfileError(ValueError):
     """A profile that cannot be used: unknown name, unreadable file, bad JSON, wrong api_version or bad value."""
 
 
+class _DuplicateKey(Exception):
+    pass
+
+
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+    # json keeps the last of two equal keys without a word; in a profile that hides a typo or a merge mistake
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise _DuplicateKey(k)
+        seen.add(k)
+    return dict(pairs)
+
+
 def _read(path: Path) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f, object_pairs_hook=_no_duplicates)
+    except _DuplicateKey as e:
+        raise ProfileError(f"snmp profile {path.name}: duplicate key {e.args[0]!r}") from None
     except (OSError, ValueError, RecursionError) as e:  # ValueError: JSONDecodeError, bad encodings; RecursionError: deep nesting
         raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
     if not isinstance(data, dict):
@@ -78,8 +95,11 @@ def _resolve(raw: dict, seen: tuple[str, ...]) -> dict:
     parent = raw.get("extends")
     if parent is None:
         return copy.deepcopy(raw)
-    if not isinstance(parent, str) or parent in seen:
-        raise ProfileError(f"snmp profile {raw.get('profile')!r}: bad or circular extends {parent!r}")
+    if not isinstance(parent, str) or not _NAME_RE.match(parent):
+        # a path or an object is not quoted back: only built-in names are valid here
+        raise ProfileError(f"snmp profile {raw.get('profile')!r}: extends must be a built-in profile name")
+    if parent in seen:
+        raise ProfileError(f"snmp profile {raw.get('profile')!r}: circular extends {parent!r}")
     return _merge(_resolve(_builtin_raw(parent), seen + (parent,)), raw)
 
 
@@ -133,7 +153,7 @@ def _validate(p: dict) -> dict:
     if not problems:
         try:
             _value_problems(p, problems)
-        except (KeyError, TypeError, AttributeError, ValueError):  # a shape the checks above did not foresee
+        except Exception:  # a shape the checks did not foresee (incl. OverflowError, RecursionError); never Python's text
             problems.append("malformed value (compare with standard.json)")
     if problems:
         raise ProfileError(f"snmp profile {name!r}: " + "; ".join(problems))
@@ -186,7 +206,9 @@ def _value_problems(p: dict, problems: list[str]) -> None:
         problems.append("uplink.lldp_neighbor must be true or false")
     if not _is_int(snmp["max_repetitions"]) or not 1 <= snmp["max_repetitions"] <= 128:
         problems.append("snmp.max_repetitions must be 1..128")  # 128: the Zabbix hard cap
-    if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or snmp["timeout"] <= 0
+    # isfinite: JSON as Python reads it accepts NaN and Infinity, and NaN <= 0 is False
+    if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or not math.isfinite(snmp["timeout"])
+            or snmp["timeout"] <= 0
             or not _is_int(snmp["retries"]) or snmp["retries"] < 0):
         problems.append("snmp.timeout must be a number > 0 and snmp.retries an integer >= 0")
     for key in ("sysobjectid_prefix", "sysdescr_regex"):
@@ -195,7 +217,7 @@ def _value_problems(p: dict, problems: list[str]) -> None:
     for i, rx in enumerate(match.get("sysdescr_regex", []) if _is_str_list(match.get("sysdescr_regex", [])) else []):
         try:
             re.compile(rx)
-        except re.error:  # its text quotes the pattern; the entry number is enough to find it
+        except (re.error, OverflowError, RecursionError):  # huge repeat counts, deep nesting; the text is not quoted
             problems.append(f"match.sysdescr_regex entry {i + 1} is not a valid regular expression")
     if fdb["strategy"] == "cisco_per_vlan" and not (isinstance(fdb["vlan_source"], str) and fdb["vlan_source"] in p["oids"]):
         problems.append(f"fdb.vlan_source {fdb['vlan_source']!r} is not a key in oids")

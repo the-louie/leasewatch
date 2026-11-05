@@ -363,6 +363,34 @@ class LoaderTests(unittest.TestCase):
         self.assertIn("match.sysdescr_regex entry 2 is not a valid regular expression", str(cm.exception))
         self.assertNotIn("unterminated", str(cm.exception))  # re.error's own text
 
+    def test_regex_overflow_and_deep_nesting_are_named_problems(self):
+        for rx in ("a{99999999999}", "(" * 2000 + ")" * 2000):
+            with self.subTest(rx=rx[:20]), self.assertRaises(ProfileError) as cm:
+                snmp_profiles.load_file(self.user_file({"profile": "x", "api_version": 1, "extends": "standard",
+                                                        "match": {"sysdescr_regex": ["ok", rx]}}))
+            self.assertIn("match.sysdescr_regex entry 2 is not a valid regular expression", str(cm.exception))
+
+    def test_snmp_numbers_must_be_finite_and_integers_where_required(self):
+        for snmp in ({"timeout": "NaN"}, {"timeout": "Infinity"}, {"timeout": "-Infinity"}, {"retries": 1.5},
+                     {"retries": "Infinity"}, {"max_repetitions": 10.0}, {"max_repetitions": "NaN"}):
+            # NaN/Infinity are what Python's json reads from a file; written raw so json.dumps does not quote them
+            body = ", ".join(f'"{k}": {v}' for k, v in snmp.items())
+            data = '{"profile": "x", "api_version": 1, "extends": "standard", "snmp": {' + body + '}}'
+            with self.subTest(snmp=snmp), self.assertRaisesRegex(ProfileError, "snmp\\.(timeout|max_repetitions)"):
+                snmp_profiles.load_file(self.user_file(data))
+
+    def test_extends_that_is_not_a_name_names_the_key(self):
+        for parent in ({"profile": "standard"}, "../standard", "/etc/standard.json", 5):
+            with self.subTest(parent=parent), self.assertRaises(ProfileError) as cm:
+                snmp_profiles.load_file(self.user_file({"profile": "x", "api_version": 1, "extends": parent}))
+            self.assertIn("extends must be a built-in profile name", str(cm.exception))
+            self.assertNotIn("/etc", str(cm.exception))
+
+    def test_duplicate_keys_are_reported(self):
+        data = '{"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"strategy": "bridge", "strategy": "qbridge"}}'
+        with self.assertRaisesRegex(ProfileError, "duplicate key 'strategy'"):
+            snmp_profiles.load_file(self.user_file(data))
+
     def test_standard_source_names_every_partial_short_name_hit(self):
         p = snmp_profiles.load("standard")
         for cisco in ("TwoGigabitEthernet", "FiveGigabitEthernet", "TenGigabitEthernet", "FortyGigabitEthernet", "AppGigabitEthernet"):
@@ -708,6 +736,37 @@ class CliTests(unittest.TestCase):
             sys.modules["pysnmp.hlapi.v3arch.asyncio"].UdpTransportTarget = UdpTransportTarget
             rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_AK", "--priv-key-env", "TEST_PK")
         self.assertEqual((rc, out.strip()), (1, "snmp error: Bad IPv4/UDP transport address <host>@161: no such host"))
+
+    def test_snmp_detect_masks_host_user_and_keys_in_every_error_line(self):
+        os.environ.update({"TEST_AK": "auth-K3y'x", "TEST_PK": "priv\\K3y"})  # repr() escapes these two differently
+        PySnmpError = type("PySnmpError", (Exception,), {})
+        leak = "10.0.0.2 user netmon keys auth-K3y'x priv\\K3y " + repr("auth-K3y'x priv\\K3y")
+        flags = ("--host", "10.0.0.2", "--user", "netmon", "--auth-key-env", "TEST_AK", "--priv-key-env", "TEST_PK")
+        with FakePysnmp(FakeWalker("comware")):
+            m = sys.modules["pysnmp.hlapi.v3arch.asyncio"]
+            inner = m.next_cmd
+
+            async def next_cmd(eng, user, tgt, ctx, oid):  # every walk fails with an indication naming everything
+                return PySnmpError(leak), 0, 0, []
+            m.next_cmd = m.bulk_cmd = next_cmd
+            rc1, out1 = cli("snmp-detect", *flags)
+            m.next_cmd = inner
+
+            class UdpTransportTarget:
+                @staticmethod
+                async def create(addr, timeout, retries):
+                    raise PySnmpError(leak)
+            m.UdpTransportTarget = UdpTransportTarget
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc2, out2 = cli("snmp-detect", *flags)
+        self.assertEqual((rc1, rc2), (0, 1), out1 + out2)
+        self.assertIn("  error: snmp walk", out1)
+        self.assertTrue(out2.startswith("snmp error: "), out2)
+        for out in (out1, out2, err.getvalue()):
+            for secret in ("10.0.0.2", "netmon", "auth-K3y", "priv", "K3y"):
+                self.assertNotIn(secret, out)
+        self.assertIn("<host> user <user> keys <secret> <secret>", out2)
 
     def test_snmp_detect_missing_key_env_is_a_config_problem(self):
         with FakePysnmp(FakeWalker("comware")):

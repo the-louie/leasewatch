@@ -114,7 +114,8 @@ def snmp_detect_cmd(argv: list[str]) -> int:
     try:
         r = conn.client.detect_report(max(1, args.rows))
     except Exception as e:  # every failure is one line, never a traceback; pysnmp's own errors are not RuntimeError
-        _out(f"snmp error: {conn._error(e)}")
+        # redact() masks host, user and both keys: in --host mode they are the flags and the key variables
+        _out(f"snmp error: {conn.redact(str(conn._error(e)))}")
         return 1
     _out(f"sysObjectID: {r['sysobjectid'] or '-'}")
     _out(f"sysDescr:    {r['sysdescr'] or '-'}")
@@ -124,7 +125,7 @@ def snmp_detect_cmd(argv: list[str]) -> int:
         _out()
         _out(f"walk {label}:")
         if isinstance(rows, str):
-            _out(f"  error: {rows}")
+            _out(f"  error: {conn.redact(rows)}")  # pysnmp's error indication may name the host
         elif not rows:
             _out("  (no rows)")
         for k, v in rows if not isinstance(rows, str) else []:

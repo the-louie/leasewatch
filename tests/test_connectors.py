@@ -282,6 +282,22 @@ class SwitchConnectorTests(unittest.TestCase):
             self.assertEqual(str(cm.exception), "Bad IPv4/UDP transport address <host>@161: [Errno -2] Name or service not known")
             self.assertIs(cm.exception.__cause__, exc)
 
+    def test_error_masks_every_spelling_of_host_and_user_but_only_whole_names(self):
+        def err(settings, text):
+            c = SnmpSwitchConnector("switch", {**SW, **settings}, CTX, client=Raises(RuntimeError(text)))
+            with self.assertRaises(ConnectorError) as cm:
+                c.collect()
+            return str(cm.exception)
+        # a host under 3 characters is not masked: "1" would garble every number
+        self.assertEqual(err({"host": "1"}, "port 1 at 10.0.0.1"), "port 1 at 10.0.0.1")
+        self.assertEqual(err({}, "Bad address 10.0.0.2@161, not 10.0.0.25 or 110.0.0.2"), "Bad address <host>@161, not 10.0.0.25 or 110.0.0.2")
+        self.assertEqual(err({"host": "FE80::0002"}, "Bad address fe80::2@161 (fe80:0000:0000:0000:0000:0000:0000:0002), not fe80::2:5"),
+                         "Bad address <host>@161 (<host>), not fe80::2:5")
+        self.assertEqual(err({"host": "SW-HALL.example.lan."}, "no such host sw-hall.example.lan@161 nor SW-HALL.example.lan."),
+                         "no such host <host>@161 nor <host>")  # the FQDN root dot is part of the name
+        self.assertEqual(err({"user": "netmon"}, "unknown user name netmon (usmStatsUnknownUserNames), not netmonitor"),
+                         "unknown user name <user> (usmStatsUnknownUserNames), not netmonitor")
+
     def test_device_names_failure_becomes_connectorerror(self):
         ctx = HostContext(now=lambda: 1700000000, device_names=lambda: {}["x"])
         snap = self.snap()
