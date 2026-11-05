@@ -1,26 +1,18 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _env import clean_env, restore
 from leasewatch.config import Config
 
 BASE = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s"}
-TOUCHED = list(BASE) + ["PUBLIC_URL", "UNIFI_URL", "UNIFI_USER", "UNIFI_PASSWORD", "LISTEN_PORT", "MAILGUN_KEY",
-                        "SNMP_AUTH_KEY", "SNMP_PRIV_KEY", "MAILGUN_API_BASE", "ALLOWED_HOSTS", "POLL_SECONDS",
-                        "ONLINE_GRACE_MINUTES", "NEW_DAYS"]
 
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
-        self._saved = {k: os.environ.get(k) for k in TOUCHED}
-        for k in TOUCHED:
-            os.environ.pop(k, None)
-        os.environ.update(BASE)
+        self._saved = clean_env(BASE)
 
     def tearDown(self):
-        for k, v in self._saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        restore(self._saved)
 
     def problems(self, **env):
         os.environ.update(env)

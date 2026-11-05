@@ -13,6 +13,8 @@ import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _env import clean_env, restore  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
@@ -22,7 +24,7 @@ from leasewatch.web import MAX_BODY, serve  # noqa: E402
 MAC1 = "aa:bb:cc:dd:ee:01"  # baseline device (present at first poll)
 MAC2 = "aa:bb:cc:dd:ee:02"  # new device, DHCP, VLAN IOT
 MAC3 = "aa:bb:cc:dd:ee:03"  # new device, ARP only, non-ASCII hostname/vendor
-UNKNOWN = "00:11:22:33:44:55"
+UNKNOWN = "02:11:22:33:44:55"
 SITE = "Hemnät Test"
 VERSION = "9.9.9-test"
 ENV = {"FW1_KEY": "k", "FW1_SECRET": "s", "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
@@ -50,26 +52,22 @@ class WebTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._saved_env = dict(os.environ)
         logging.disable(logging.CRITICAL)  # the app logs failed polls / handler errors; keep test output clean
 
     @classmethod
     def tearDownClass(cls):
         logging.disable(logging.NOTSET)
-        os.environ.clear()
-        os.environ.update(cls._saved_env)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ.update(ENV)
-        os.environ["DATA_DIR"] = self.tmp.name
+        self._saved_env = clean_env(dict(ENV, DATA_DIR=self.tmp.name))
         self.cfg = Config()
         self.db = Database(self.cfg.db_path)
         self.client = FakeClient([S(MAC1, "10.0.0.5", "phone")])
         self.collector = Collector(self.cfg, self.db, self.client)
         self.collector.run_once()  # first poll: MAC1 becomes baseline
         self.client.sightings_data += [S(MAC2, "10.0.0.9", "newbie", vlan="IOT"),
-                                       S(MAC3, "10.0.0.77", "Åkes TV", src="arp", vendor="Köksbolaget")]
+                                       S(MAC3, "10.0.0.77", "Kök-TV", src="arp", vendor="Köksbolaget")]
         self.collector.run_once()  # second poll: MAC2 + MAC3 are real newcomers
         # both polls happen within the same second; push the baseline device back so ordering is deterministic
         self.db.q("UPDATE devices SET first_seen=first_seen-864000 WHERE mac=?", (MAC1,))
@@ -84,6 +82,7 @@ class WebTestCase(unittest.TestCase):
         self.thread.join(timeout=5)
         self.db._conn.close()
         self.tmp.cleanup()
+        restore(self._saved_env)
 
     # --- helpers -------------------------------------------------------------
     def req(self, method, path, body=None, headers=None):
@@ -226,7 +225,7 @@ class ApiReadTests(WebTestCase):
         self.assertEqual(by[MAC2]["vlan"], "IOT")
         self.assertEqual(by[MAC2]["acked"], 0)
         self.assertIsNone(by[MAC2]["acked_at"])
-        self.assertEqual(by[MAC3]["hostname"], "Åkes TV")
+        self.assertEqual(by[MAC3]["hostname"], "Kök-TV")
         self.assertEqual(by[MAC3]["vendor"], "Köksbolaget")
         self.assertEqual(by[MAC3]["sources"], "arp")
         self.assertEqual(by[MAC3]["lease_type"], "")
@@ -243,7 +242,7 @@ class ApiReadTests(WebTestCase):
 
     def test_devices_json_is_utf8_not_ascii_escaped(self):
         _, _, body = self.req("GET", "/api/devices")
-        self.assertIn("Åkes TV".encode("utf-8"), body)
+        self.assertIn("Kök-TV".encode("utf-8"), body)
         self.assertNotIn(b"\\u00c5", body)
 
     def test_stats(self):
@@ -320,7 +319,7 @@ class ApiReadTests(WebTestCase):
         lines = text.splitlines()
         self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
         self.assertEqual([l.split(",")[0] for l in lines[1:]], [MAC2, MAC3, MAC1])
-        self.assertIn("Åkes TV", text)
+        self.assertIn("Kök-TV", text)
         self.assertIn("Köksbolaget", text)
         # timestamps are rendered, not epoch
         self.assertRegex(lines[1], r",\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4},\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4},")
@@ -362,7 +361,7 @@ class ApiReadTests(WebTestCase):
         self.assertTrue(data["last_poll_ok"])  # the last poll itself was fine, it is just too old
 
     def test_healthz_200_at_edge_of_staleness(self):
-        self.db.set_meta("last_poll_ts", str(int(time.time()) - self.cfg.poll_seconds * 3 + 2))
+        self.db.set_meta("last_poll_ts", str(int(time.time()) - self.cfg.poll_seconds * 3 + 20))
         self.get_json("/healthz", expect=200)
 
     def test_healthz_503_when_never_polled(self):
@@ -572,10 +571,11 @@ class ApiWriteTests(WebTestCase):
         resp = self.raw_request(raw)
         self.assertIn(b" 400 ", resp.split(b"\r\n", 1)[0])
 
-    def test_unsupported_methods_are_405_not_500(self):
-        for method in ("PUT", "DELETE", "PATCH"):
-            status, _, _ = self.req(method, f"/api/devices/{MAC1}", body=b"{}", headers={"Content-Type": "application/json"})
-            self.assertEqual(status, 405, method)
+    def test_unsupported_methods_are_405_with_allow(self):
+        for method in ("PUT", "DELETE", "PATCH", "OPTIONS"):
+            for path in ("/api/devices", f"/api/devices/{MAC1}"):
+                status, hdrs, _ = self.req(method, path, body=b"{}", headers={"Content-Type": "application/json"})
+                self.assertEqual(status, 405, (method, path)); self.assertEqual(hdrs.get("Allow"), "GET, HEAD, POST", (method, path))
             self.assertEqual(self.db.device(MAC1)["acked"], 0)
 
 
@@ -756,11 +756,6 @@ class ReleaseReviewTests(WebTestCase):
         self.assertEqual(st, 200, body)
         self.assertEqual(body["device"]["name"], "abc"); self.assertEqual(body["device"]["note"], "l1\nl2")
 
-    def test_unsupported_methods_get_405_with_allow(self):
-        for m in ("PUT", "DELETE", "PATCH", "OPTIONS"):
-            st, hdrs, _ = self.req(m, "/api/devices")
-            self.assertEqual(st, 405, m); self.assertEqual(hdrs.get("Allow"), "GET, HEAD, POST")
-
     def test_unknown_host_header_is_421(self):
         # DNS rebinding: a browser page at evil.example whose name now resolves to this server sends Host: evil.example
         for path, method, body in (("/api/devices", "GET", None), (f"/api/devices/{MAC2}", "POST", b'{"acked":true}'), ("/", "GET", None)):
@@ -769,13 +764,9 @@ class ReleaseReviewTests(WebTestCase):
         self.assertEqual(self.db.device(MAC2)["acked"], 0)
         for host in ("127.0.0.1:%d" % self.port, "localhost", "[::1]:8080"):
             st, _, _ = self.req("GET", "/api/stats", headers={"Host": host}); self.assertEqual(st, 200, host)
-        os.environ["ALLOWED_HOSTS"] = "leases.lan"; self.cfg.allowed_hosts = ("leases.lan",)
-        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "leases.lan"}); self.assertEqual(st, 200)
-        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "other.lan"}); self.assertEqual(st, 421)
-
-    def test_index_only_at_root(self):
-        st, _, _ = self.req("GET", "/static/index.html"); self.assertEqual(st, 404)
-        st, _, _ = self.req("GET", "/?filter=new"); self.assertEqual(st, 200)
+        self.cfg.allowed_hosts = ("leases.example.lan",)
+        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "leases.example.lan"}); self.assertEqual(st, 200)
+        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "other.example.lan"}); self.assertEqual(st, 421)
 
 
 

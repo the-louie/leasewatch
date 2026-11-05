@@ -2,6 +2,8 @@ import json, os, socket, sys, threading, unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _env import clean_env, restore
 from leasewatch import fw1, notify, unifi
 from leasewatch.config import Config
 from leasewatch.fw1 import Fw1Client, Fw1Error, kea_leases
@@ -54,10 +56,13 @@ def js(o):
 class StubCase(unittest.TestCase):
     def setUp(self):
         self.stubs = []
+        # Config(...) still reads every field not passed explicitly from the environment
+        self._env = clean_env()
 
     def tearDown(self):
         for s in self.stubs:
             s.close()
+        restore(self._env)
 
     def stub(self, routes=None):
         s = Stub(routes)

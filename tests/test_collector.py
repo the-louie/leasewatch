@@ -1,5 +1,7 @@
 import os, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _env import clean_env, restore
 from leasewatch.collector import Collector, merge
 from leasewatch.config import Config
 from leasewatch.db import Database
@@ -19,12 +21,11 @@ def S(mac, ip, host="", src="dhcp", vlan="Clients", lt="dynamic", online=True, v
 
 class CollectorTests(unittest.TestCase):
     def setUp(self):
-        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
 
     def test_merge_prefers_dhcp_hostname_and_arp_online(self):
         m = merge([S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="phone", online=False), S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="", src="arp")])
@@ -64,12 +65,11 @@ class CollectorTests(unittest.TestCase):
 
 class CollectorRegressionTests(unittest.TestCase):
     def setUp(self):
-        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
+        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
 
     def test_grace_period_keeps_device_online_when_missing_from_one_poll(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
@@ -102,12 +102,11 @@ class CollectorRegressionTests(unittest.TestCase):
 
 class FixRegressionTests(unittest.TestCase):
     def setUp(self):
-        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
 
     def test_wifi_device_seen_wired_later_drops_wifi_details(self):
         from leasewatch.unifi import WifiInfo
@@ -168,8 +167,8 @@ class FixRegressionTests(unittest.TestCase):
             self.assertTrue(cfg.host_allowed(h), h)
         for h in ("evil.example", "evil.example:8080", "leases.example.lan.evil.example"):
             self.assertFalse(cfg.host_allowed(h), h)
-        os.environ["ALLOWED_HOSTS"] = "a.lan, b.lan"
-        self.assertTrue(Config().host_allowed("b.lan")); self.assertFalse(Config().host_allowed("leases.example.lan"))
+        os.environ["ALLOWED_HOSTS"] = "a.example.lan, b.example.lan"
+        self.assertTrue(Config().host_allowed("b.example.lan")); self.assertFalse(Config().host_allowed("leases.example.lan"))
         os.environ["ALLOWED_HOSTS"] = "*"
         self.assertTrue(Config().host_allowed("evil.example"))
 
@@ -189,20 +188,16 @@ class FixRegressionTests(unittest.TestCase):
 
     def test_dhcp_backend_is_validated(self):
         os.environ["DHCP_BACKEND"] = "dnsmasq"
-        try:
-            self.assertIn("DHCP_BACKEND must be isc or kea", Config().validate())
-        finally:
-            del os.environ["DHCP_BACKEND"]
+        self.assertIn("DHCP_BACKEND must be isc or kea", Config().validate())
 
 
 class ReviewFixTests(unittest.TestCase):
     def setUp(self):
-        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
 
     def _same_over_permutations(self, rows):
         import itertools
