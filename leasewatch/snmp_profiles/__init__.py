@@ -102,77 +102,106 @@ def _template_ok(t: object) -> bool:
     return bool(fields) and all(f == "port" and not spec and conv is None for f, spec, conv in fields)
 
 
-def _validate(p: dict) -> dict:
-    name = p.get("profile")
-    try:
-        fdb, bpm, snmp = p["fdb"], p["bridge_port_map"], p["snmp"]
-        problems = []
-        # typo guard: a key standard.json does not know would be silently ignored
-        std = _builtin_raw("standard")
-        for key in p:
-            if key not in std and key not in ("extends",) and not key.startswith("_"):
-                problems.append(f"unknown key {key!r}")
-        for sec in ("match", "fdb", "bridge_port_map", "lldp", "port_name", "uplink", "snmp"):
-            if not isinstance(p[sec], dict):
-                problems.append(f"{sec} must be an object")
-                continue
+SECTIONS = ("match", "fdb", "bridge_port_map", "lldp", "port_name", "uplink", "snmp")
+
+
+def _structure_problems(p: dict, std: dict) -> list[str]:
+    """Unknown, missing and non-object keys against standard.json. A profile without `extends` must carry every key
+    itself (oids included); the value checks below index these keys, so they run only when this list is empty."""
+    problems = []
+    # typo guard: a key standard.json does not know would be silently ignored
+    problems += [f"unknown key {key!r}" for key in p if key not in std and key != "extends" and not key.startswith("_")]
+    problems += [f"missing key {key!r}" for key in std if key not in p and not key.startswith("_")]
+    for sec in SECTIONS + ("oids",):
+        if sec not in p:
+            continue
+        if not isinstance(p[sec], dict):
+            problems.append(f"{sec} must be an object")
+            continue
+        if sec != "oids":  # oids may add names (private tables)
             problems += [f"unknown key {sec}.{k}" for k in p[sec] if k not in std[sec]]
-        if not _is_int(p.get("api_version")):
-            problems.append("api_version must be an integer")
-        if not isinstance(p["oids"], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in p["oids"].items()):
-            problems.append("oids must map names to OID strings")
-        if not all(isinstance(v, str) for v in p["port_name"]["short"].values()):
-            problems.append("port_name.short values must be strings")
-        if not isinstance(snmp["bulk"], bool):
-            problems.append("snmp.bulk must be true or false")
-        if not _is_str_list(snmp["no_bulk"]) or not _is_str_list(snmp["allow_unordered"]):
-            problems.append("snmp.no_bulk/allow_unordered must be string lists")
-        if fdb["index_fix"] == "row_number" and fdb["strategy"] != "bridge":
-            problems.append("fdb.index_fix row_number needs fdb.strategy bridge (only it walks dot1dTpFdbAddress)")
-        if not isinstance(name, str) or not name:
-            problems.append("profile name missing")
-        if fdb["strategy"] not in STRATEGIES:
-            problems.append(f"fdb.strategy {fdb['strategy']!r}")
-        if fdb["index_fix"] not in INDEX_FIXES:
-            problems.append(f"fdb.index_fix {fdb['index_fix']!r}")
-        if bpm["strategy"] not in BRIDGE_PORT_STRATEGIES:
-            problems.append(f"bridge_port_map.strategy {bpm['strategy']!r}")
-        if bpm["fallback"] not in ("identity", "drop"):
-            problems.append(f"bridge_port_map.fallback {bpm['fallback']!r}")
-        nm = bpm["name_match"]
-        if nm is not False and not (isinstance(nm, list) and all(_template_ok(t) for t in nm)):
-            problems.append("bridge_port_map.name_match must be false or a list of templates with only {port}")
-        if p["lldp"]["local_port"] not in LLDP_LOCAL_PORT:
-            problems.append(f"lldp.local_port {p['lldp']['local_port']!r}")
-        if not isinstance(p["port_name"]["short"], dict):
-            problems.append("port_name.short must be an object")
-        for key in ("offset",):
-            if not _is_int(bpm[key]):
-                problems.append(f"bridge_port_map.{key} must be an integer")
-        if not _is_int(p["uplink"]["min_macs"]) or p["uplink"]["min_macs"] < 1:
-            problems.append("uplink.min_macs must be an integer >= 1")
-        if not _is_int(snmp["max_repetitions"]) or not 1 <= snmp["max_repetitions"] <= 128:
-            problems.append("snmp.max_repetitions must be 1..128")  # 128: the Zabbix hard cap
-        if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or snmp["timeout"] <= 0
-                or not _is_int(snmp["retries"]) or snmp["retries"] < 0):
-            problems.append("snmp.timeout must be a number > 0 and snmp.retries an integer >= 0")
-        for key in ("sysobjectid_prefix", "sysdescr_regex"):
-            if not isinstance(p["match"].get(key, []), list):
-                problems.append(f"match.{key} must be a list")
-        for rx in p["match"].get("sysdescr_regex", []):
-            re.compile(rx)
-        if fdb["strategy"] == "cisco_per_vlan" and fdb["vlan_source"] not in p["oids"]:
-            problems.append(f"fdb.vlan_source {fdb['vlan_source']!r} is not a key in oids")
-        if (not isinstance(fdb["keep_status"], list) or not all(_is_int(v) for v in fdb["keep_status"])
-                or not isinstance(fdb["skip_vlans"], list) or not all(_is_int(v) for v in fdb["skip_vlans"])):
-            problems.append("fdb.keep_status/skip_vlans must be integer lists")
-    except (KeyError, TypeError, AttributeError) as e:
-        raise ProfileError(f"snmp profile {name!r}: missing or malformed key {e}") from None
-    except re.error as e:
-        raise ProfileError(f"snmp profile {name!r}: bad sysdescr_regex: {e}") from None
+        if sec != "match":  # an empty match is "never detected"
+            problems += [f"missing key {sec}.{k}" for k in std[sec] if k not in p[sec]]
+    return problems
+
+
+def _validate(p: dict) -> dict:
+    """Every problem of a resolved profile in one ProfileError. Messages name the key and quote only the profile's own
+    values, never Python's error text."""
+    name = p.get("profile")
+    problems = _structure_problems(p, _builtin_raw("standard"))
+    if not problems:
+        try:
+            _value_problems(p, problems)
+        except (KeyError, TypeError, AttributeError, ValueError):  # a shape the checks above did not foresee
+            problems.append("malformed value (compare with standard.json)")
     if problems:
         raise ProfileError(f"snmp profile {name!r}: " + "; ".join(problems))
     return p
+
+
+def _value_problems(p: dict, problems: list[str]) -> None:
+    """Appends to `problems` (so the ones found before an unexpected shape are kept)."""
+    name = p.get("profile")
+    fdb, bpm, snmp, match = p["fdb"], p["bridge_port_map"], p["snmp"], p["match"]
+    if not _is_int(p.get("api_version")):
+        problems.append("api_version must be an integer")
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in p["oids"].items()):
+        problems.append("oids must map names to OID strings")
+    short = p["port_name"]["short"]
+    if not isinstance(short, dict):
+        problems.append("port_name.short must be an object")
+    elif not all(isinstance(v, str) for v in short.values()):
+        problems.append("port_name.short values must be strings")
+    if not isinstance(snmp["bulk"], bool):
+        problems.append("snmp.bulk must be true or false")
+    if not _is_str_list(snmp["no_bulk"]) or not _is_str_list(snmp["allow_unordered"]):
+        problems.append("snmp.no_bulk/allow_unordered must be string lists")
+    if fdb["index_fix"] == "row_number" and fdb["strategy"] != "bridge":
+        problems.append("fdb.index_fix row_number needs fdb.strategy bridge (only it walks dot1dTpFdbAddress)")
+    if not isinstance(name, str) or not name:
+        problems.append("profile name missing")
+    if fdb["strategy"] not in STRATEGIES:
+        problems.append(f"fdb.strategy {fdb['strategy']!r}")
+    if fdb["index_fix"] not in INDEX_FIXES:
+        problems.append(f"fdb.index_fix {fdb['index_fix']!r}")
+    if not isinstance(fdb["context_prefix"], str):
+        problems.append("fdb.context_prefix must be a string")
+    if not _is_str_list(fdb["private_oids"]):
+        problems.append("fdb.private_oids must be a string list")
+    if bpm["strategy"] not in BRIDGE_PORT_STRATEGIES:
+        problems.append(f"bridge_port_map.strategy {bpm['strategy']!r}")
+    if bpm["fallback"] not in ("identity", "drop"):
+        problems.append(f"bridge_port_map.fallback {bpm['fallback']!r}")
+    nm = bpm["name_match"]
+    if nm is not False and not (isinstance(nm, list) and all(_template_ok(t) for t in nm)):
+        problems.append("bridge_port_map.name_match must be false or a list of templates with only {port}")
+    if p["lldp"]["local_port"] not in LLDP_LOCAL_PORT:
+        problems.append(f"lldp.local_port {p['lldp']['local_port']!r}")
+    if not _is_int(bpm["offset"]):
+        problems.append("bridge_port_map.offset must be an integer")
+    if not _is_int(p["uplink"]["min_macs"]) or p["uplink"]["min_macs"] < 1:
+        problems.append("uplink.min_macs must be an integer >= 1")
+    if not isinstance(p["uplink"]["lldp_neighbor"], bool):
+        problems.append("uplink.lldp_neighbor must be true or false")
+    if not _is_int(snmp["max_repetitions"]) or not 1 <= snmp["max_repetitions"] <= 128:
+        problems.append("snmp.max_repetitions must be 1..128")  # 128: the Zabbix hard cap
+    if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or snmp["timeout"] <= 0
+            or not _is_int(snmp["retries"]) or snmp["retries"] < 0):
+        problems.append("snmp.timeout must be a number > 0 and snmp.retries an integer >= 0")
+    for key in ("sysobjectid_prefix", "sysdescr_regex"):
+        if not _is_str_list(match.get(key, [])):
+            problems.append(f"match.{key} must be a string list")
+    for i, rx in enumerate(match.get("sysdescr_regex", []) if _is_str_list(match.get("sysdescr_regex", [])) else []):
+        try:
+            re.compile(rx)
+        except re.error:  # its text quotes the pattern; the entry number is enough to find it
+            problems.append(f"match.sysdescr_regex entry {i + 1} is not a valid regular expression")
+    if fdb["strategy"] == "cisco_per_vlan" and not (isinstance(fdb["vlan_source"], str) and fdb["vlan_source"] in p["oids"]):
+        problems.append(f"fdb.vlan_source {fdb['vlan_source']!r} is not a key in oids")
+    if (not isinstance(fdb["keep_status"], list) or not all(_is_int(v) for v in fdb["keep_status"])
+            or not isinstance(fdb["skip_vlans"], list) or not all(_is_int(v) for v in fdb["skip_vlans"])):
+        problems.append("fdb.keep_status/skip_vlans must be integer lists")
 
 
 def load(name: str) -> dict:

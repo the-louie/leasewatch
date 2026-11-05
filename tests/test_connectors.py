@@ -180,6 +180,20 @@ class SwitchProfileSettingTests(unittest.TestCase):
             self.assertEqual(SnmpSwitchConnector("switch", {**SW, "min_macs": v}, CTX).validate(),
                              ["connector switch (snmp_switch): MIN_MACS must be an integer >= 1"], v)
 
+    def test_values_are_stripped_before_the_choices_check(self):
+        c = SnmpSwitchConnector("switch", {**SW, "profile": " comware ", "auth": " sha256 ", "min_macs": " 3 "}, CTX)
+        self.assertEqual(c.validate(), [])
+        self.assertEqual((c.client.profile_name, c.settings["auth"], c.client.min_macs), ("comware", "SHA256", 3))
+
+    def test_min_macs_unicode_digits(self):
+        # "²" passes str.isdigit() but int() rejects it: a config problem, not a crash while building the connector
+        self.assertEqual(SnmpSwitchConnector("switch", {**SW, "min_macs": "²"}, CTX).validate(),
+                         ["connector switch (snmp_switch): MIN_MACS must be an integer >= 1"])
+        self.assertEqual(SnmpSwitchConnector("switch", {**SW, "min_macs": "٣"}, CTX).client.min_macs, 3)
+
+    def test_the_client_carries_the_instance_name_for_its_log_lines(self):
+        self.assertEqual(SnmpSwitchConnector("core-sw", SW, CTX).client.name, "core-sw")
+
     def test_invalid_profile_settings_refuse_check_and_collect(self):
         snap = build_snapshot([], [], [], [])
         fake = type("W", (), {"snapshot": lambda self: snap, "probe": lambda self: ("", "")})
@@ -225,7 +239,7 @@ class SwitchConnectorTests(unittest.TestCase):
         snap = self.snap()
         c = SnmpSwitchConnector("switch", SW, CTX, client=type("W", (), {"snapshot": lambda self: snap})())
         b = c.collect()
-        self.assertEqual(b.stats, {"macs": len(snap.by_mac)})
+        self.assertEqual(b.stats, {"macs": len(snap.by_mac), "strategy": "qbridge"})  # strategy for conn.<name>.* meta
         self.assertEqual({a.mac for a in b.attachments}, set(snap.by_mac))
         for a in b.attachments:
             self.assertIsInstance(a, Attachment)
@@ -256,6 +270,17 @@ class SwitchConnectorTests(unittest.TestCase):
                 self.assertEqual(str(cm.exception), text)
                 if exc is own:
                     self.assertIs(cm.exception, own)  # passed through, not wrapped
+
+    def test_pysnmp_errors_lose_the_host(self):
+        PySnmpError = type("PySnmpError", (Exception,), {})
+        exc = PySnmpError("Bad IPv4/UDP transport address 10.0.0.2@161: [Errno -2] Name or service not known")
+        c = SnmpSwitchConnector("switch", SW, CTX, client=type("P", (), {"probe": lambda self: (_ for _ in ()).throw(exc),
+                                                                         "snapshot": lambda self: (_ for _ in ()).throw(exc)})())
+        for call in (c.check, c.collect):
+            with self.subTest(call=call.__name__), self.assertRaises(ConnectorError) as cm:
+                call()
+            self.assertEqual(str(cm.exception), "Bad IPv4/UDP transport address <host>@161: [Errno -2] Name or service not known")
+            self.assertIs(cm.exception.__cause__, exc)
 
     def test_device_names_failure_becomes_connectorerror(self):
         ctx = HostContext(now=lambda: 1700000000, device_names=lambda: {}["x"])

@@ -67,18 +67,12 @@ def _detect_connector(args: object) -> tuple[object | None, str]:
         return SnmpSwitchConnector(args.instance or "switch", settings), ""
     if not args.instance:
         return None, "give an instance name or --host"
-    cfg = Config()
-    if callable(getattr(cfg, "instances", None)):  # LW_CONNECTORS (or the legacy variables) as the app reads them
-        from .connectors import build_instance, instances_context
-        specs = [s for s in cfg.instances() if s.type == "snmp_switch"]
-        spec = next((s for s in specs if s.name == args.instance), None)
-        conn = build_instance(spec, instances_context([spec])) if spec else None
-        names = [s.name for s in specs]
-    else:
-        from .connectors.legacy import legacy_instances
-        conns = legacy_instances(cfg)
-        conn = conns.get(args.instance)
-        names = [n for n, c in conns.items() if isinstance(c, SnmpSwitchConnector)]
+    from .connectors import build_instance, instances_context
+    # Config.instances is a property: LW_CONNECTORS, or the legacy SNMP_* variables as instance "switch"
+    specs = [s for s in Config().instances if s.type == "snmp_switch"]
+    spec = next((s for s in specs if s.name == args.instance), None)
+    conn = build_instance(spec, instances_context([spec])) if spec else None
+    names = [s.name for s in specs]
     if not isinstance(conn, SnmpSwitchConnector):
         return None, f"no snmp_switch instance {args.instance!r} configured (configured: {', '.join(names) or 'none'})"
     return conn, ""
@@ -119,8 +113,8 @@ def snmp_detect_cmd(argv: list[str]) -> int:
         return 2
     try:
         r = conn.client.detect_report(max(1, args.rows))
-    except RuntimeError as e:
-        _out(f"snmp error: {e}")
+    except Exception as e:  # every failure is one line, never a traceback; pysnmp's own errors are not RuntimeError
+        _out(f"snmp error: {conn._error(e)}")
         return 1
     _out(f"sysObjectID: {r['sysobjectid'] or '-'}")
     _out(f"sysDescr:    {r['sysdescr'] or '-'}")

@@ -26,6 +26,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(line, "leasewatch 1.1.0.dev0, connectors fw1 (opnsense), switch (snmp_switch), unifi (unifi); poll 120 s; mail off")
         self.assertNotIn("fw1.example.lan", line)
 
+    def test_snmp_detect_finds_an_lw_connectors_instance(self):
+        # Config.instances is a property; snmp-detect once tested callable() on it and only ever saw the legacy SNMP_*
+        import contextlib, io, logging
+        from leasewatch.__main__ import main
+        from test_switch_profiles import FakePysnmp, FakeWalker
+        root = logging.getLogger()  # main() calls basicConfig; keep the test run's handlers as they were
+        self.addCleanup(setattr, root, "handlers", list(root.handlers))
+        self.addCleanup(root.setLevel, root.level)
+        os.environ.update({"LW_CONNECTORS": "fw1,core-sw", "LW_CONNECTOR__FW1__TYPE": "opnsense",
+                           "LW_CONNECTOR__FW1__URL": "https://fw1.example.lan", "LW_CONNECTOR__FW1__KEY": "k",
+                           "LW_CONNECTOR__FW1__SECRET": "s", "LW_CONNECTOR__CORE-SW__TYPE": "snmp_switch",
+                           "LW_CONNECTOR__CORE-SW__HOST": "10.0.0.4", "LW_CONNECTOR__CORE-SW__AUTH_KEY": "a" * 8,
+                           "LW_CONNECTOR__CORE-SW__PRIV_KEY": "p" * 8, "LW_CONNECTOR__CORE-SW__PROFILE": "comware"})
+        buf = io.StringIO()
+        with FakePysnmp(FakeWalker("comware")) as fake, contextlib.redirect_stdout(buf):
+            rc = main(["snmp-detect", "core-sw"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertEqual(fake.targets[0][0], ("10.0.0.4", 161))
+        self.assertIn("profile:     comware (set by profile/profile_file)", buf.getvalue())
+
     def test_base_is_valid(self):
         self.assertEqual(self.problems(), [])
 

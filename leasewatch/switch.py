@@ -200,18 +200,16 @@ def _oid_tuple(s: str) -> tuple[int, ...]:
     return tuple(int(x) for x in s.split("."))
 
 
-# module global, set once: the per-VLAN fallback warning is logged once per process, not at every poll
-_per_vlan_warned = False
-
-
 class SwitchClient:
-    def __init__(self, cfg: Config, profile: dict | None = None, min_macs: int | None = None):
+    def __init__(self, cfg: Config, profile: dict | None = None, min_macs: int | None = None, name: str = "") -> None:
         self.cfg = cfg
+        self.name = name or "switch"  # the connector instance, named in this client's log lines
         # None: detected from sysObjectID/sysDescr at the first snapshot and cached here (see _snapshot_async)
         self.profile = profile
         self.profile_name = profile["profile"] if profile else ""
         self.min_macs = min_macs  # per-instance override of the profile's uplink.min_macs; None = the profile's
         self._detect_warned = False
+        self._per_vlan_warned = False  # the per-VLAN fallback warning, once per client (= instance), not every poll
         self._auto = profile is None  # detect at the next snapshot (again after a failed detection GET)
 
     @staticmethod
@@ -343,7 +341,7 @@ class SwitchClient:
                 # vtpVlanState operational(1); the same VLAN in two VTP domains is walked once
                 if state == 1 and vlan not in f["skip_vlans"] and vlan not in vlans:
                     vlans.append(vlan)
-            failed: list[RuntimeError] = []
+            failed: list[tuple[int, RuntimeError]] = []
             for vlan in vlans:
                 ctx = f"{f['context_prefix']}{vlan}"
                 try:  # a context missing from the SNMPv3 view fails its walk (unknown context or no response)
@@ -352,19 +350,19 @@ class SwitchClient:
                     # a bridge port maps to the same ifIndex in every VLAN, so the per-VLAN maps are merged
                     c_bp = await rows("baseport_ifindex", "", ctx) if use_bp else []
                 except RuntimeError as e:
-                    failed.append(e)
+                    failed.append((vlan, e))
                     continue
                 fdb, status, bp = fdb + c_fdb, status + c_status, bp + c_bp
             if fdb:
                 if failed:  # some VLANs answered, some did not: a partial table would silently drop ports
-                    raise failed[0]
+                    vlan, e = failed[0]  # the context names the VLAN to fix in the switch's SNMPv3 view
+                    raise RuntimeError(f"snmp context {f['context_prefix']}{vlan}: {e}") from e
                 return fdb, bp, status, addr, "cisco_per_vlan"
             # no context gave a row (none configured on the switch, or no VLAN listed because the VTP table is outside
             # the view or absent, as on NX-OS): 0 MACs would look like success, so this poll reads Q-BRIDGE
-            global _per_vlan_warned
-            if not _per_vlan_warned:
-                _per_vlan_warned = True
-                log.warning("snmp profile %s: per-VLAN contexts unavailable, using Q-BRIDGE", self.profile_name)
+            if not self._per_vlan_warned:
+                self._per_vlan_warned = True
+                log.warning("%s: snmp profile %s: per-VLAN contexts unavailable, using Q-BRIDGE", self.name, self.profile_name)
             bp, status = [], []
             fdb = await rows("fdb_port", "")
             if f["keep_status"]:

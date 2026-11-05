@@ -68,6 +68,9 @@ class SnmpSwitchConnector(SettingsMixin):
 
     def __init__(self, name: str, settings: Mapping[str, str], ctx: HostContext | None = None, client: object | None = None) -> None:
         self._init_settings(name, settings, ctx)
+        # stripped before validate()'s choices check, which compares the value as given
+        for k in ("auth", "profile", "profile_file", "min_macs"):
+            self.settings[k] = self.settings[k].strip()
         self.settings["auth"] = self.settings["auth"].upper().replace("-", "")
         s = self.settings
         # problems with profile/profile_file/min_macs, reported by validate(); collect()/check() refuse to run with one,
@@ -78,7 +81,7 @@ class SnmpSwitchConnector(SettingsMixin):
         min_macs = self._min_macs()
         # read at call time: the host (and tests) may swap the client object
         self.client = client or SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]),  # type: ignore[arg-type]
-                                             profile=profile, min_macs=min_macs)
+                                             profile=profile, min_macs=min_macs, name=name)
 
     def _profile(self) -> dict | None:
         """profile_file > profile > None (detection). Reads the file (a local config file, not the device)."""
@@ -106,8 +109,12 @@ class SnmpSwitchConnector(SettingsMixin):
         v = self.settings["min_macs"].strip()
         if not v:
             return None
-        if v.isdigit() and int(v) >= 1:
-            return int(v)
+        try:  # int(), not isdigit(): "²" is a digit to isdigit() but int() rejects it
+            n = int(v)
+        except ValueError:
+            n = 0
+        if n >= 1:
+            return n
         self.profile_problems.append(f"connector {self.name} ({self.INFO.type}): MIN_MACS must be an integer >= 1")
         return None
 
@@ -118,31 +125,43 @@ class SnmpSwitchConnector(SettingsMixin):
         if self.profile_problems or self._bad_profile_name:
             raise ConnectorError("invalid profile settings (see the configuration check)")
 
+    def _error(self, e: Exception) -> ConnectorError:
+        """The one exception type for every failure. The client's own messages never contain the host or the keys,
+        but pysnmp's do (PySnmpError: "Bad IPv4/UDP transport address <host>@161"), so the host is taken out of all
+        of them; the keys are redacted by the host."""
+        if isinstance(e, ConnectorError):
+            return e
+        if isinstance(e, ImportError):
+            return ConnectorError("missing dependency pysnmp")
+        text = str(e) or type(e).__name__
+        host = self.settings["host"].strip()
+        return ConnectorError(text.replace(host, "<host>") if host else text)
+
     def check(self) -> None:
         """One GET of sysObjectID and sysDescr: reachability and credentials, without a walk."""
         self._refuse_if_invalid()
         try:
             self.client.probe()
-        except ConnectorError:
-            raise
-        except ImportError as e:
-            raise ConnectorError("missing dependency pysnmp") from e
-        except Exception as e:  # the client's messages never contain the host or the keys
-            raise ConnectorError(str(e) or type(e).__name__) from e
+        except Exception as e:
+            err = self._error(e)
+            if err is e:
+                raise
+            raise err from e
 
     def collect(self) -> Batch:
         self._refuse_if_invalid()
         try:
             snap = self.client.snapshot()
             name_uplinks(snap, self.ctx.device_names)
+            # "strategy" is a string (the FDB strategy that produced the rows; cisco_per_vlan may fall back to qbridge):
+            # stats may carry strings besides the counts. The host sums stats of sighting producers only, not this one.
             return Batch(attachments=to_attachments(snap, self.name, self.settings["name"], self.ctx.now()),
-                         stats={"macs": len(snap.by_mac)})
-        except ConnectorError:
-            raise
-        except ImportError as e:
-            raise ConnectorError("missing dependency pysnmp") from e
-        except Exception as e:  # the client's messages never contain the host or the keys
-            raise ConnectorError(str(e) or type(e).__name__) from e
+                         stats={"macs": len(snap.by_mac), "strategy": snap.strategy})  # type: ignore[dict-item]
+        except Exception as e:
+            err = self._error(e)
+            if err is e:
+                raise
+            raise err from e
 
     def close(self) -> None:
         pass  # each snapshot opens and closes its own SNMP engine
