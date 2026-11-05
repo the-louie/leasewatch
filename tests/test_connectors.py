@@ -298,6 +298,22 @@ class SwitchConnectorTests(unittest.TestCase):
         self.assertEqual(err({"user": "netmon"}, "unknown user name netmon (usmStatsUnknownUserNames), not netmonitor"),
                          "unknown user name <user> (usmStatsUnknownUserNames), not netmonitor")
 
+    def test_key_that_is_part_of_the_host_does_not_expose_the_host(self):
+        c = SnmpSwitchConnector("switch", {**SW, "auth_key": "0.0"}, CTX, client=Raises(RuntimeError()))
+        self.assertEqual(c.redact("Bad address 10.0.0.2@161"), "Bad address <host>@161")
+
+    def test_short_key_is_not_masked_but_a_4_char_key_is(self):
+        c = SnmpSwitchConnector("switch", {**SW, "priv_key": "s"}, CTX, client=Raises(RuntimeError()))
+        self.assertEqual(c.redact("snmp timeout k3y"), "snmp timeout k3y")
+        c = SnmpSwitchConnector("switch", {**SW, "priv_key": "k3yz"}, CTX, client=Raises(RuntimeError()))
+        self.assertEqual(c.redact("snmp timeout k3yz"), "snmp timeout ***")
+
+    def test_json_escaped_key_is_masked(self):
+        key = 'au"th\\K3y'
+        c = SnmpSwitchConnector("switch", {**SW, "auth_key": key}, CTX, client=Raises(RuntimeError()))
+        out = c.redact("body " + json.dumps({"k": key}))
+        self.assertNotIn("K3y", out)
+
     def test_device_names_failure_becomes_connectorerror(self):
         ctx = HostContext(now=lambda: 1700000000, device_names=lambda: {}["x"])
         snap = self.snap()

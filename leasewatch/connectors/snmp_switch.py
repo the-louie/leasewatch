@@ -12,7 +12,7 @@ from typing import Callable, Mapping
 
 from .. import snmp_profiles
 from ..switch import SwitchClient, SwitchSnapshot
-from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin
+from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin, make_redactor
 
 INFRA_RE = re.compile(r"^(ap|apu|sw|switch|xgs|gs|usw|uap)[-_0-9]", re.I)  # hostnames that mean "another AP/switch hangs on this port"
 # a host or user name shorter than this is not masked: replacing "1" or "sw" would garble every number and word in the
@@ -156,17 +156,14 @@ class SnmpSwitchConnector(SettingsMixin):
             raise ConnectorError("invalid profile settings (see the configuration check)")
 
     def redact(self, text: str) -> str:
-        """`text` with the secret settings (as given and as repr() escapes them), the host and the USM user name masked.
-        Host and user match whole occurrences only and not when shorter than MIN_REDACT (see there)."""
-        for setting in self.INFO.settings:
-            v = self.settings.get(setting.key, "")
-            if setting.secret and v:
-                for form in sorted({v, repr(v)[1:-1]}, key=len, reverse=True):
-                    text = text.replace(form, "<secret>")
+        """`text` with the host, the USM user name and the secret settings (via make_redactor: repr/JSON forms, not
+        under MIN_SECRET_LEN) masked. Host and user match whole occurrences only and not when shorter than MIN_REDACT
+        (see there). Host and user go first: a key that is a substring of the host ("0.0" in "10.0.0.2") would
+        otherwise break the host apart so its whole-occurrence pattern no longer matches the rest."""
         for key, mask in (("host", "<host>"), ("user", "<user>")):
             for rx in _bounded(_forms(self.settings.get(key, ""))):
                 text = rx.sub(mask, text)
-        return text
+        return make_redactor(self.settings.get(st.key, "") for st in self.INFO.settings if st.secret)(text)
 
     def _error(self, e: Exception) -> ConnectorError:
         """The one exception type for every failure. The client's own messages never contain the host or the keys,

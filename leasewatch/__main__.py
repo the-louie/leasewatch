@@ -60,6 +60,10 @@ def _detect_connector(args: object) -> tuple[object | None, str]:
     """(SnmpSwitchConnector, "") for the instance or the flags, or (None, error text)."""
     from .connectors.snmp_switch import SnmpSwitchConnector
     if args.host:
+        # named here: validate() would only say AUTH_KEY is required, not which variable the operator has to set
+        for flag, var in (("--auth-key-env", args.auth_key_env), ("--priv-key-env", args.priv_key_env)):
+            if var not in os.environ:
+                return None, f"environment variable {var} (from {flag}) is not set"
         settings = {"host": args.host, "user": args.user, "auth": args.auth, "profile": args.profile or "",
                     "profile_file": args.profile_file or "", "min_macs": "",
                     # keys come from the environment only: argv is visible to every user in the process list

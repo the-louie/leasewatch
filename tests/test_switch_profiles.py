@@ -391,6 +391,30 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(ProfileError, "duplicate key 'strategy'"):
             snmp_profiles.load_file(self.user_file(data))
 
+    def test_duplicate_key_message_is_truncated(self):
+        long = "k" * 5000
+        data = '{"profile": "x", "api_version": 1, "%s": 1, "%s": 2}' % (long, long)
+        with self.assertRaises(ProfileError) as cm:
+            snmp_profiles.load_file(self.user_file(data))
+        self.assertIn("duplicate key '" + "k" * 40 + "'", str(cm.exception))
+        self.assertNotIn("k" * 41, str(cm.exception))
+
+    def test_profile_file_must_be_a_small_regular_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, d)
+        with self.assertRaisesRegex(ProfileError, "not a regular file"):
+            snmp_profiles.load_file(d)
+        big = '{"profile": "x", "api_version": 1, "extends": "standard", "pad": "' + "SECRETPAD" * 30000 + '"}'
+        with self.assertRaises(ProfileError) as cm:
+            snmp_profiles.load_file(self.user_file(big))
+        self.assertIn("larger than 256 KiB", str(cm.exception))
+        self.assertNotIn("SECRETPAD", str(cm.exception))
+
+    def test_huge_integer_timeout_gets_the_timeout_message(self):
+        data = '{"profile": "x", "api_version": 1, "extends": "standard", "snmp": {"timeout": 1' + "0" * 400 + '}}'
+        with self.assertRaisesRegex(ProfileError, "snmp.timeout must be a number > 0"):
+            snmp_profiles.load_file(self.user_file(data))
+
     def test_standard_source_names_every_partial_short_name_hit(self):
         p = snmp_profiles.load("standard")
         for cisco in ("TwoGigabitEthernet", "FiveGigabitEthernet", "TenGigabitEthernet", "FortyGigabitEthernet", "AppGigabitEthernet"):
@@ -766,13 +790,21 @@ class CliTests(unittest.TestCase):
         for out in (out1, out2, err.getvalue()):
             for secret in ("10.0.0.2", "netmon", "auth-K3y", "priv", "K3y"):
                 self.assertNotIn(secret, out)
-        self.assertIn("<host> user <user> keys <secret> <secret>", out2)
+        self.assertIn("<host> user <user> keys *** ***", out2)
 
     def test_snmp_detect_missing_key_env_is_a_config_problem(self):
         with FakePysnmp(FakeWalker("comware")):
             rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_NOPE")
         self.assertEqual(rc, 2)
-        self.assertIn("AUTH_KEY", out)
+        self.assertIn("environment variable TEST_NOPE (from --auth-key-env) is not set", out)
+
+    def test_snmp_detect_unset_key_env_names_the_variable(self):
+        os.environ.pop("UNSET_X", None)
+        os.environ["TEST_PK"] = "test-priv"
+        with FakePysnmp(FakeWalker("comware")):
+            rc, out = cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "UNSET_X", "--priv-key-env", "TEST_PK")
+        self.assertEqual(rc, 2)
+        self.assertIn("environment variable UNSET_X (from --auth-key-env) is not set", out)
 
     def test_snmp_detect_by_instance_uses_its_settings(self):
         os.environ.update({"SNMP_HOST": "10.0.0.3", "SNMP_AUTH_KEY": "test-auth", "SNMP_PRIV_KEY": "test-priv", "FW1_URL": "https://fw1.example.lan"})

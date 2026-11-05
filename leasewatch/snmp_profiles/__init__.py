@@ -16,6 +16,7 @@ import functools
 import json
 import math
 import re
+import stat
 import string
 from pathlib import Path
 
@@ -57,12 +58,30 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
     return dict(pairs)
 
 
+MAX_FILE_BYTES = 256 * 1024  # far above any real profile; bounds what a wrong path (a log, a device node) makes us read
+
+
 def _read(path: Path) -> dict:
+    # checked before reading: a FIFO or device would block or never end, a huge file would be parsed in full
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f, object_pairs_hook=_no_duplicates)
+        st = path.stat()
+    except OSError as e:
+        raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise ProfileError(f"snmp profile {path.name}: not a regular file")
+    if st.st_size > MAX_FILE_BYTES:
+        raise ProfileError(f"snmp profile {path.name}: larger than {MAX_FILE_BYTES // 1024} KiB")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(MAX_FILE_BYTES + 1)  # bounded again: the file may have grown since stat()
+    except OSError as e:
+        raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
+    if len(raw) > MAX_FILE_BYTES:
+        raise ProfileError(f"snmp profile {path.name}: larger than {MAX_FILE_BYTES // 1024} KiB")
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
     except _DuplicateKey as e:
-        raise ProfileError(f"snmp profile {path.name}: duplicate key {e.args[0]!r}") from None
+        raise ProfileError(f"snmp profile {path.name}: duplicate key {e.args[0][:40]!r}") from None  # a key can be megabytes long
     except (OSError, ValueError, RecursionError) as e:  # ValueError: JSONDecodeError, bad encodings; RecursionError: deep nesting
         raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
     if not isinstance(data, dict):
@@ -160,6 +179,13 @@ def _validate(p: dict) -> dict:
     return p
 
 
+def _finite(v: int | float) -> bool:
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # an int too large for a float; no usable number either
+        return False
+
+
 def _value_problems(p: dict, problems: list[str]) -> None:
     """Appends to `problems` (so the ones found before an unexpected shape are kept)."""
     name = p.get("profile")
@@ -207,7 +233,7 @@ def _value_problems(p: dict, problems: list[str]) -> None:
     if not _is_int(snmp["max_repetitions"]) or not 1 <= snmp["max_repetitions"] <= 128:
         problems.append("snmp.max_repetitions must be 1..128")  # 128: the Zabbix hard cap
     # isfinite: JSON as Python reads it accepts NaN and Infinity, and NaN <= 0 is False
-    if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or not math.isfinite(snmp["timeout"])
+    if (isinstance(snmp["timeout"], bool) or not isinstance(snmp["timeout"], (int, float)) or not _finite(snmp["timeout"])
             or snmp["timeout"] <= 0
             or not _is_int(snmp["retries"]) or snmp["retries"] < 0):
         problems.append("snmp.timeout must be a number > 0 and snmp.retries an integer >= 0")
