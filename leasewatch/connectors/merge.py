@@ -8,11 +8,19 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
 
     field                 order                         rule
     online, last_online   any kind                      a sighting with presence=True this poll (rule 1)
-    ip, network, iface    presence, dhcp>arp>client>scan  taken together from one sighting: the DHCP lease whose IP a
-                                                        presence sighting confirms (shown where that sighting saw
-                                                        it), else the first by presence, kind, then the sort keys
-    hostname, vendor      dhcp, client, arp, scan       the lease's hostname first, then the first non-empty value
+    ip, network, iface    arp, dhcp, then client, scan  taken together from one sighting. The lease is the first DHCP
+                                                        sighting whose IP is in an ARP sighting, else the first DHCP
+                                                        one; shown where ARP saw that IP, else at the first ARP
+                                                        sighting, else at the lease. A lease flagged online by the
+                                                        DHCP server does not override an ARP row (1.0 behaviour).
+                                                        Only with neither DHCP nor ARP: the first client, then scan,
+                                                        then any other kind (presence first within a kind)
+    hostname              dhcp, client, arp, scan       the lease's hostname first, then the first non-empty value
+    vendor                dhcp, arp, client, scan       the first non-empty value
     lease_type            dhcp                          the chosen lease only
+
+"First" is by the sort keys (empty IP last, network, IP, static before dynamic, hostname, vendor, interface), so
+the result never depends on the order the sources return rows in.
 
 Attachments: link must be "wired" or "wifi" (anything else is ignored, logged once per instance and value). A
 controller (ConnectorInfo.roles has "controller") sends its whole client list: "wifi" places a device on Wi-Fi,
@@ -36,11 +44,12 @@ from . import Attachment, Batch, Sighting
 
 log = logging.getLogger("leasewatch.merge")
 
-IDENTITY_KINDS = ("dhcp", "arp", "client", "scan")  # ip/network/iface, after presence
-NAME_KINDS = ("dhcp", "client", "arp", "scan")      # hostname/vendor fallback
+FALLBACK_KINDS = ("client", "scan")              # ip/network/iface when there is neither a dhcp nor an arp sighting
+NAME_KINDS = ("dhcp", "client", "arp", "scan")    # hostname fallback
+VENDOR_KINDS = ("dhcp", "arp", "client", "scan")  # vendor (rule 4)
 LINKS = ("wired", "wifi")
 # module globals, written by the merge: each warning below is logged once per process, not at every poll
-_mac_warned: set[str] = set()                # instance names that sent a record with an invalid MAC
+_mac_warned: set[str] = set()                # instance names that sent a malformed record (invalid MAC, wrong type)
 _link_warned: set[tuple[str, str]] = set()   # (instance name, link value) outside LINKS
 
 
@@ -110,32 +119,33 @@ def to_fw1(s: Sighting) -> Fw1Sighting:
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     """One record per MAC, independent of the order the sources return rows in (see RANKING above).
 
-    s.source is the sighting's kind here and s.online its presence claim (to_fw1). The lease whose IP a presence
-    sighting confirms wins; ip/vlan/iface always come from one and the same sighting (what is on the wire), so a
-    device that moved VLAN while its old lease is still listed is shown where it really is."""
+    s.source is the sighting's kind here and s.online its presence claim (to_fw1). The lease whose IP is in the ARP
+    table wins; ip/vlan/iface always come from one and the same sighting (what is on the wire), so a device that
+    moved VLAN while its old lease is still listed is shown where it really is."""
     by_mac: dict[str, list[Fw1Sighting]] = {}
     for s in sightings:
         by_mac.setdefault(s.mac, []).append(s)
     out: dict[str, Merged] = {}
     # an empty IP sorts last (it cannot be where the device is), a static lease before a dynamic one
-    pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname)
-    # one total order over every sighting, so ties (same vlan/ip, several hostnames) never depend on row order
-    order = lambda s: (not s.online, _rank(IDENTITY_KINDS, s.source), s.source) + pick(s)
+    # vendor and iface too: every field the merge takes from a sighting is a key, so ties never depend on row order
+    pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname, s.vendor, s.iface)
     for mac, ss in by_mac.items():
-        ss = sorted(ss, key=order)
-        dhcp = sorted((s for s in ss if s.source == "dhcp"), key=pick)
-        seen_ips = {s.ip for s in ss if s.online and s.source != "dhcp" and s.ip}
-        confirmed = next((s for s in dhcp if s.ip in seen_ips), None)
-        lease = confirmed or (dhcp[0] if dhcp else None)
-        # a confirmed lease is shown where the presence sighting saw it (that sighting's network and interface)
-        loc = next(s for s in ss if s.online and s.source != "dhcp" and s.ip == confirmed.ip) if confirmed else ss[0]
+        ss = sorted(ss, key=lambda s: (s.source,) + pick(s))
+        dhcp = [s for s in ss if s.source == "dhcp"]
+        arp = [s for s in ss if s.source == "arp"]
+        arp_ips = {s.ip for s in arp if s.ip}
+        lease = next((s for s in dhcp if s.ip in arp_ips), dhcp[0] if dhcp else None)
+        wire = next((s for s in arp if lease and s.ip == lease.ip), arp[0] if arp else None)
+        # no firewall sighting at all (a controller or scanner only): the best of the other kinds, so they still merge
+        loc = wire or lease or min(ss, key=lambda s: (_rank(FALLBACK_KINDS, s.source), s.source, not s.online) + pick(s))
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
                    sources={s.source for s in ss}, online=any(s.online for s in ss))
         if lease:
             m.hostname, m.lease_type = lease.hostname, lease.lease_type
         named = sorted(ss, key=lambda s: (_rank(NAME_KINDS, s.source), s.source) + pick(s))
         m.hostname = m.hostname or next((s.hostname for s in named if s.hostname), "")
-        m.vendor = next((s.vendor for s in named if s.vendor), "")
+        vendors = sorted(ss, key=lambda s: (_rank(VENDOR_KINDS, s.source), s.source) + pick(s))
+        m.vendor = next((s.vendor for s in vendors if s.vendor), "")
         out[mac] = m
     return out
 
@@ -143,21 +153,32 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
 def normalise_batch(name: str, b: Batch) -> Batch:
     """The host's part of the record contract, for one instance's batch: `source` set to the instance name, `mac`
     normalised, records whose MAC fails norm_mac dropped (stats["dropped"], one WARNING per instance per process).
-    Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
-    def fix(records: list) -> list:
+    Never raises: one connector's malformed batch must not fail the poll for the others, so a record of the wrong
+    type, a MAC that is not a str, and a sightings/attachments field that is not a list (counted as one) are
+    dropped the same way. Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
+    dropped = 0
+
+    def fix(records: object, kind: type) -> list:
+        nonlocal dropped
+        if not isinstance(records, (list, tuple)):
+            dropped += 1
+            return []
         out = []
         for r in records:
-            mac = norm_mac(r.mac)
+            mac = norm_mac(r.mac) if isinstance(r, kind) and isinstance(r.mac, str) else ""
             if mac:
                 out.append(r if (mac, name) == (r.mac, r.source) else replace(r, mac=mac, source=name))
+            else:
+                dropped += 1
         return out
-    sightings, attachments = fix(b.sightings), fix(b.attachments)
-    dropped = len(b.sightings) + len(b.attachments) - len(sightings) - len(attachments)
+    sightings, attachments = fix(b.sightings, Sighting), fix(b.attachments, Attachment)
+    stats = b.stats if isinstance(b.stats, dict) else {}
+    before = stats.get("dropped", 0)
     if dropped and name not in _mac_warned:
         _mac_warned.add(name)
-        log.warning("connector %s: %d records with invalid MAC dropped", name, dropped)
+        log.warning("connector %s: %d malformed records dropped (invalid MAC or wrong type)", name, dropped)
     return Batch(sightings=sightings, attachments=attachments,
-                 stats={**b.stats, "dropped": b.stats.get("dropped", 0) + dropped})
+                 stats={**stats, "dropped": (before if isinstance(before, int) else 0) + dropped})
 
 
 def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], cfg: Config, now: int,
@@ -239,7 +260,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
     """Switch-port and Wi-Fi columns from the attachments, on the rows after the identity merge (in place).
 
     Several controllers: a device has left Wi-Fi only when every controller answered and none lists it; while any
-    controller failed this poll, a Wi-Fi device is "blind" (keeps its last values, gets no switch port). A "wifi"
+    controller failed this poll and none that answered lists it, a Wi-Fi device is "blind" (keeps its last values,
+    gets no switch port). A "wifi"
     attachment from an instance without the controller role is ignored (its list is not complete)."""
     controllers = [n for n in batches if n in state.controllers]
     wifi: dict[str, Attachment] = {}
@@ -272,7 +294,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         on_wifi = w is not None and w.link == "wifi"
         on_wire = mac in merged and merged[mac].online
         # controller down this poll: a Wi-Fi device would get the AP's uplink port from the FDB; keep its last values
-        blind = ctrl_failed and cur["link"] == "wifi"
+        # a controller that answered and lists the device (wired or Wi-Fi) is first-hand evidence, so not blind
+        blind = ctrl_failed and cur["link"] == "wifi" and w is None
         sw = wired.get(mac)
         # on the wire this poll, not in grace: the FDB ages out slower than ARP, so a departed device would get a stale port
         # Wi-Fi beats any switch port, also an edge port: a controller's client list is first-hand, an FDB entry for a

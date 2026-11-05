@@ -58,7 +58,7 @@ Each instance collects in its own thread. One that fails, or takes longer than i
 | POST | `/api/devices/<mac>` | `{"acked": bool, "name": str, "note": str}` (any subset) |
 | GET | `/api/stats` | counts, per-network, first-seen times of the last 30 days' newcomers |
 | GET | `/api/events` | last 300 events |
-| GET | `/api/status` | collector meta only, with `connectors`: one entry per instance (`name`, `label`, `type`, `ok`, `error`, `ts`, `ms`, `count`, `enabled`). `connectors` is the stable form; the `switch` and `unifi` objects in the meta are kept for 1.1 only and go away in 1.2 |
+| GET | `/api/status` | collector meta only, with `connectors`: one entry per instance (`name`, `label`, `type`, `ok`, `error`, `ts`, `ms`, `count`, `enabled`, `strategy` for a switch). `connectors` is the stable form; the `switch` and `unifi` objects in the meta are kept for 1.1 only and go away in 1.2 |
 | GET | `/api/devices.csv` | CSV export (timestamps ISO 8601 in the container's `TZ`) |
 | GET | `/healthz` | 200 when the last poll succeeded and is fresh, else 503 |
 

@@ -154,18 +154,33 @@ CASES = [
     ("scan sighting without presence: listed, not online",
      [], {"scan": Batch(sightings=[K(A, "10.0.0.8", "scan", presence=False)])}, {},
      {A: dict(ip="10.0.0.8", online=0, last_online=None, sources="scan")}, [(A, "new", "10.0.0.8 (HomeNet)")], [A]),
-    ("presence first: an unconfirmed lease loses to a client seen now",
+    # C2c item 1: identity as in 1.0/C2: a lease is placed by ARP; client/scan only when there is no dhcp/arp sighting
+    ("a lease without ARP is shown at the lease, not at a client seen now",
      [], {"fw1": fw1(S(A, "10.0.0.5", "pc", presence=False)), "ctl": Batch(sightings=[K(A, "10.0.0.7", "client")])}, {},
-     {A: dict(ip="10.0.0.7", vlan="HomeNet", hostname="pc", lease_type="dynamic", online=1)},
-     [(A, "new", "10.0.0.7 pc Acme (HomeNet)")], [A]),
-    ("a lease confirmed by a client beats an arp entry elsewhere",
+     {A: dict(ip="10.0.0.5", vlan="Clients", hostname="pc", lease_type="dynamic", online=1)},
+     [(A, "new", "10.0.0.5 pc Acme (Clients)")], [A]),
+    ("arp places the device, also when a client confirms the lease IP",
      [], {"fw1": fw1(S(A, "10.0.0.5", "pc", presence=False), arp(A, "10.0.1.9", net="Servers")),
           "ctl": Batch(sightings=[K(A, "10.0.0.5", "client")])}, {},
-     {A: dict(ip="10.0.0.5", vlan="HomeNet", iface="wlan", hostname="pc")}, [(A, "new", "10.0.0.5 pc Acme (HomeNet)")], [A]),
-    ("hostname and vendor: client before arp",
+     {A: dict(ip="10.0.1.9", vlan="Servers", iface="opt3", hostname="pc")}, [(A, "new", "10.0.1.9 pc Acme (Servers)")], [A]),
+    ("an ISC-online lease does not override the ARP row; hostname from dhcp[0]",
+     [], {"fw1": fw1(S(A, "10.0.0.5", "pc", lt="static", presence=False), S(A, "10.0.1.6", "tv", presence=True),
+                     arp(A, "10.0.0.9"))}, {},
+     {A: dict(ip="10.0.0.9", vlan="Clients", hostname="pc", lease_type="static", online=1)},
+     [(A, "new", "10.0.0.9 pc Acme (Clients)")], [A]),
+    ("an ISC-online lease and ARP: hostname from the lease matching the ARP IP",
+     [], {"fw1": fw1(S(A, "10.0.0.5", "pc", lt="static", presence=False), S(A, "10.0.1.6", "tv", presence=True),
+                     arp(A, "10.0.1.6"))}, {},
+     {A: dict(ip="10.0.1.6", hostname="tv", lease_type="dynamic", online=1)},
+     [(A, "new", "10.0.1.6 tv Acme (Clients)")], [A]),
+    ("client and scan only: the client places it",
+     [], {"ctl": Batch(sightings=[K(A, "10.0.0.7", "client", presence=False)]),
+          "scan": Batch(sightings=[K(A, "10.0.0.8", "scan", src="scan")])}, {},
+     {A: dict(ip="10.0.0.7", online=1, sources="client,scan")}, [(A, "new", "10.0.0.7 (HomeNet)")], [A]),
+    ("hostname: client before arp; vendor: arp before client",
      [], {"fw1": fw1(arp(A, host="aa-arp", vendor="ArpCo")), "ctl": Batch(sightings=[K(A, "10.0.0.5", "client", host="zz-client",
                                                                                      vendor="Apple", net="Clients")])}, {},
-     {A: dict(hostname="zz-client", vendor="Apple")}, [(A, "new", "10.0.0.5 zz-client Apple (Clients)")], [A]),
+     {A: dict(hostname="zz-client", vendor="ArpCo")}, [(A, "new", "10.0.0.5 zz-client ArpCo (Clients)")], [A]),
     # item 2: presence decides online for every kind, also arp
     ("arp without presence: not online",
      [], {"fw1": fw1(arp(A, presence=False))}, {},
@@ -201,6 +216,12 @@ CASES = [
                            "unifi": Batch(), "unifi2": ConnectorFailure("unifi2", "TimeoutError", NOW)},
      {"controllers": CTRL2},
      {A: dict(sw_port="", link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall")}, [], []),
+    # C2c item 5: a controller that answered and lists the device is evidence, even while another failed
+    ("two controllers: one says wired, one failed: not blind, port taken in this poll",
+     [row(A, **ON_WIFI)], {"fw1": fw1(arp(A)), "switch": Batch(attachments=[port(A, "GE1/0/5")]),
+                           "unifi": Batch(attachments=[ctl_wired(A)]), "unifi2": ConnectorFailure("unifi2", "TimeoutError", NOW)},
+     {"controllers": CTRL2},
+     {A: dict(link="wired", sw_port="GE1/0/5", wifi_ssid="", loc_source="switch")}, [], []),
     # C6, rule 6: several switches see one MAC
     ("two switches: the edge port beats an uplink from an earlier instance",
      [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/48", "sw1", True, via="sw-2")]),
@@ -286,7 +307,7 @@ class MergeTableTests(unittest.TestCase):
         with mock.patch.object(merge_mod, "_mac_warned", set()):
             with self.assertLogs("leasewatch.merge", "WARNING") as logs:
                 out = normalise_batch("fw2", b)
-            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector fw2: 2 records with invalid MAC dropped"])
+            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector fw2: 2 malformed records dropped (invalid MAC or wrong type)"])
             with self.assertNoLogs("leasewatch.merge", "WARNING"):  # once per instance per process
                 normalise_batch("fw2", b)
         self.assertEqual([(s.mac, s.source) for s in out.sightings], [("02:00:00:00:00:0a", "fw2")])  # host fills source
@@ -310,7 +331,36 @@ class MergeTableTests(unittest.TestCase):
                 arp(A, "10.0.1.9", presence=False, net="Servers")]
         results = {tuple((r["ip"], r["vlan"], r["hostname"], r["online"]) for r in self.run_merge([], {"x": Batch(sightings=list(p))}).rows.values())
                    for p in itertools.permutations(rows)}
-        self.assertEqual(results, {(("10.0.0.7", "HomeNet", "pc", 1),)})
+        self.assertEqual(results, {(("10.0.1.9", "Servers", "pc", 1),)})
+
+    def test_vendor_and_iface_are_order_independent(self):
+        """C2c item 2: rows that tie on every other key and differ only in vendor/iface still give one result."""
+        def R(kind, vendor, iface):
+            return Sighting(mac=A, source="x", kind=kind, presence=True, observed_at=NOW, ip="10.0.0.5", network="Clients",
+                            vendor=vendor, iface=iface)
+        rows = [R("arp", "Zeta", "opt1"), R("arp", "Acme", "opt9"), R("arp", "Acme", "opt2"), R("client", "Apple", "wlan"),
+                R("client", "", "wlan2")]
+        results = {(r["vendor"], r["iface"]) for p in itertools.permutations(rows)
+                   for r in self.run_merge([], {"x": Batch(sightings=list(p))}).rows.values()}
+        self.assertEqual(results, {("Acme", "opt2")})
+        client_only = rows[3:] + [R("client", "Apple", "wlan0")]
+        results = {(r["vendor"], r["iface"]) for p in itertools.permutations(client_only)
+                   for r in self.run_merge([], {"x": Batch(sightings=list(p))}).rows.values()}
+        self.assertEqual(results, {("Apple", "wlan2")})  # the empty vendor sorts first and places it
+
+    def test_malformed_batch_never_raises(self):
+        """C2c item 3: wrong record types, a non-str MAC and sightings=None are dropped and counted, never raised."""
+        with mock.patch.object(merge_mod, "_mac_warned", set()):
+            with self.assertLogs("leasewatch.merge", "WARNING") as logs:
+                out = normalise_batch("bad", Batch(sightings=None, attachments=[Attachment(mac=2, source="", observed_at=NOW, link="wired"),
+                                                                                arp(A), "junk"]))
+                normalise_batch("bad", Batch(sightings=[None]))
+            self.assertEqual(len(logs.output), 1)  # once per instance per process
+        self.assertEqual((out.sightings, out.attachments, out.stats), ([], [], {"dropped": 4}))
+        with mock.patch.object(merge_mod, "_mac_warned", set()):
+            with self.assertLogs("leasewatch.merge", "WARNING"):
+                res = self.run_merge([], {"bad": Batch(sightings=None), "fw1": fw1(arp(A))})
+        self.assertEqual(res.rows[A]["ip"], "10.0.0.5")
 
     def test_stats_and_history_values(self):
         res = self.run_merge([row(A, hostname="pc", lease_type="dynamic")], {"fw1": fw1(S(A, "10.0.0.6", "pc"), arp(A, "10.0.0.6"), arp(B, "10.0.0.9"))})
