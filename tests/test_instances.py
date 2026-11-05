@@ -342,6 +342,23 @@ class ThreadTests(Base):
         self.assertIsNone(logs.records[0].exc_info)  # exc_info would print the raw text past the redactor
         self.assertEqual(db.get_meta("conn.x.error"), "RuntimeError")
 
+    def test_escaped_secret_is_redacted(self):
+        secret = "pa'ss\\word"
+        col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake",
+                                  "LW_CONNECTOR__X__TOKEN": secret})
+        forms = (secret, repr(secret)[1:-1], json.dumps(secret)[1:-1], "ss\\")
+        for exc in (KeyError(secret), RuntimeError(f"bad token {secret!r}")):
+            def bug(exc=exc):
+                raise exc
+            col._connectors["x"].on_collect = bug
+            col._runs["x"].failed = False  # log the failure again (logs only on a change)
+            with self.assertLogs("leasewatch.collector", "ERROR") as logs:
+                col.run_once()
+            out = "\n".join(logs.output)
+            self.assertIn("***", out)
+            for f in forms:
+                self.assertNotIn(f, out)
+
     def test_passed_check_is_not_rerun_after_a_failed_collect(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})
         x = col._connectors["x"]
@@ -406,6 +423,15 @@ class StatusTests(Base):
         self.assertEqual((m["unifi_ok"], m["unifi_error"], m["unifi_clients"]), ("1", "", "0"))
         self.assertNotIn("switch_ok", m)
 
+    def test_strategy_copied_to_meta(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,sw,x", **FW1, "LW_CONNECTOR__SW__TYPE": "fake", "LW_CONNECTOR__X__TYPE": "fake"})
+        col._connectors["sw"].on_collect = lambda: Batch(stats={"macs": 0, "strategy": "qbridge"})
+        col._connectors["x"].on_collect = lambda: Batch(stats={"strategy": 3})  # not a str: ignored
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.strategy"), "qbridge")
+        self.assertEqual(db.get_meta("conn.x.strategy", "unset"), "unset")
+        self.assertEqual(db.get_meta("conn.fw1.strategy", "unset"), "unset")
+
     def test_api_status(self):
         env = {"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake", "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0"}
         col, db = self.collector(env)
@@ -427,7 +453,7 @@ class StatusTests(Base):
         self.assertEqual(list(body), ["meta"])
         conns = body["meta"]["connectors"]
         self.assertEqual([(c["name"], c["type"], c["ok"], c["enabled"]) for c in conns], [("fw1", "opnsense", True, True), ("x", "fake", True, True)])
-        self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "enabled"})
+        self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "strategy", "enabled"})
         self.assertEqual(conns[0]["count"], 1)
         self.assertIn("switch", body["meta"])  # the 1.0 objects stay for one release
         self.assertNotIn("fw1-key", json.dumps(body))

@@ -12,6 +12,7 @@ other exception from check()/collect() is shown as its type name only (and logge
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import ssl
@@ -117,7 +118,8 @@ class Attachment:
 class Batch:
     """The result of one collect(). stats: raw counts for status, all optional (the host reads a missing key as 0):
     "leases", "arp", "reservations" (sighting producers), "macs" (switch), "clients" (controller); the host adds
-    "dropped" (records with an invalid MAC)."""
+    "dropped" (records with an invalid MAC). Values are ints, except these documented string keys: "strategy"
+    (switch: the FDB strategy that produced the rows; the host copies it to meta conn.<name>.strategy)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
@@ -146,8 +148,11 @@ def build_opener(verify_tls: bool = True, use_env_proxy: bool = False) -> urllib
 
 
 def make_redactor(secrets: Iterable[str]) -> Callable[[str], str]:
-    """Replace every given secret value in a text by "***" (longest first, so a secret containing another is whole)."""
-    values = sorted({s for s in secrets if s}, key=len, reverse=True)
+    """Replace every given secret value in a text by "***" (longest first, so a secret containing another is whole).
+    Each secret is also matched in its repr and JSON escaped forms, because a `{x!r}`, a KeyError or a JSON body
+    echoes it with a quote or backslash escaped, and the literal would then not match."""
+    forms = {f for s in secrets if s for f in (s, repr(s)[1:-1], json.dumps(s)[1:-1])}
+    values = sorted((f for f in forms if f), key=len, reverse=True)
     if not values:
         return _redact_nothing
 

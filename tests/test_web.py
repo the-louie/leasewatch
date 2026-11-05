@@ -820,6 +820,13 @@ class QaFixTests(WebTestCase):
         self.assertEqual([(c["name"], c["label"]) for c in conns],
                          [("fw2", "fw2"), ("sw-a", "ap-hall-sw"), ("sw-b", "sw-b"), ("wifi", "Wi-Fi")])
 
+    def test_connector_strategy(self):
+        # the switch's FDB strategy from meta; "" for an instance that reports none
+        self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("sw-a", "snmp_switch", {})]
+        self.db.set_meta("conn.sw-a.strategy", "cisco_per_vlan")
+        conns = self.get_json("/api/status")[0]["meta"]["connectors"]
+        self.assertEqual([(c["name"], c["strategy"]) for c in conns], [("fw1", ""), ("sw-a", "cisco_per_vlan")])
+
     def test_port_in_use_exits_2_without_traceback(self):
         with socket.socket() as busy:
             busy.bind(("127.0.0.1", 0)); busy.listen(1)

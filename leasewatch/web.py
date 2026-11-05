@@ -95,6 +95,7 @@ def make_handler(cfg: Config, db: Database, version: str):
                 "connectors": [{"name": s.name, "label": _label(s), "type": s.type, "ok": m.get(f"conn.{s.name}.ok") == "1",
                                 "error": m.get(f"conn.{s.name}.error", ""), "ts": int(m.get(f"conn.{s.name}.ts") or 0) or None,
                                 "ms": int(m.get(f"conn.{s.name}.ms") or 0), "count": int(m.get(f"conn.{s.name}.count") or 0),
+                                "strategy": m.get(f"conn.{s.name}.strategy", ""),
                                 "enabled": m.get(f"conn.{s.name}.enabled", "1") == "1"} for s in cfg.instances],
             }
 

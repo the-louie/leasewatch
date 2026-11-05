@@ -2,6 +2,8 @@
 
 **Who is on the network, newest first.** A small self-hosted page that watches an [OPNsense](https://opnsense.org/) firewall's DHCP leases and ARP table, remembers every device it has ever seen, mails you when a new one appears, and lets you name and acknowledge devices so a newcomer is noticed once and then known.
 
+What changed between releases: [CHANGELOG.md](CHANGELOG.md).
+
 ![screenshot](docs/screenshot.png)
 
 - One row per MAC with vendor, IP, hostname, network (VLAN), lease type, first seen / last online, a history of address changes and an event log.

@@ -234,6 +234,9 @@ class Collector:
                 out[run.name] = out_obj = normalise_batch(run.name, out_obj)
                 status[f"conn.{run.name}.ms"] = str(ms)
                 status[f"conn.{run.name}.count"] = str(len(out_obj.sightings) + len(out_obj.attachments))
+                strategy = out_obj.stats.get("strategy")
+                if isinstance(strategy, str):  # the switch's FDB strategy, shown so a per-VLAN fallback is visible
+                    status[f"conn.{run.name}.strategy"] = strategy
                 continue
             exc = out_obj if isinstance(out_obj, BaseException) else None
             if res is None:
