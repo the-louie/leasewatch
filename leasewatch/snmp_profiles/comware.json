@@ -1,0 +1,8 @@
+{
+  "_source": "Research notes Key question A (HPE Comware: LibreNMS comware.yaml detects sysObjectID .1.3.6.1.4.1.25506., no FDB override, generic Q-BRIDGE). Short names are the table leasewatch 1.0 had hard-coded in short_ifname (tested on Comware 7).",
+  "profile": "comware",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": ["1.3.6.1.4.1.25506"], "sysdescr_regex": []},
+  "port_name": {"short": {"Ten-GigabitEthernet": "XGE", "GigabitEthernet": "GE", "FortyGigE": "FGE", "Bridge-Aggregation": "BAGG"}}
+}

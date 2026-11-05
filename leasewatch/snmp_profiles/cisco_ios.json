@@ -1,0 +1,9 @@
+{
+  "_source": "Research notes Focus 1 (LibreNMS ios.inc.php: VLAN list from CISCO-VTP-MIB, only vtpVlanState 1, skip 1002-1005, dot1dTpFdbPort and dot1dBasePortIfIndex once per VLAN with context 'vlan-<N>'; Cisco doc 44800 for vtpVlanState 1.3.6.1.4.1.9.9.46.1.3.1.1.2; SNMPv3 context naming from community sources only) and Key question B (Netdata selector example sysobjectid 1.3.6.1.4.1.9.* with sysdescr 'IOS'). The bridge-port map is merged over all VLAN contexts. leasewatch is SNMPv3-only, so the v1/v2c community@vlan form is out of scope.",
+  "profile": "cisco_ios",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": ["1.3.6.1.4.1.9"], "sysdescr_regex": ["IOS", "NX-OS"]},
+  "fdb": {"strategy": "cisco_per_vlan", "context_prefix": "vlan-", "vlan_source": "vtp_vlan_state", "skip_vlans": [1002, 1003, 1004, 1005]},
+  "oids": {"vtp_vlan_state": "1.3.6.1.4.1.9.9.46.1.3.1.1.2"}
+}

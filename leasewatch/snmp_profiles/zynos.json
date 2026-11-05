@@ -1,0 +1,10 @@
+{
+  "_source": "Research notes Focus 1, Focus 2 and Key question A (LibreNMS zynos.inc.php: dot1qTpFdbPort index carries an extra length octet, 'assume that 1st element is vlan, and last 6 are mac'; the port value is an ifIndex, no base-port table; zynos.yaml sysObjectID .1.3.6.1.4.1.890 with sysDescr regex /^GS/, lldpRemTable listed as unordered).",
+  "profile": "zynos",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": ["1.3.6.1.4.1.890"], "sysdescr_regex": ["^GS"]},
+  "fdb": {"index_fix": "zynos"},
+  "bridge_port_map": {"strategy": "identity"},
+  "snmp": {"allow_unordered": ["lldp_rem_sysname"]}
+}

@@ -1,0 +1,43 @@
+{
+  "macs": {
+    "02:00:00:00:00:01": {
+      "describe": [
+        "GE1/0/1",
+        ""
+      ],
+      "ifindex": 1,
+      "vlan": 10
+    },
+    "02:00:00:00:00:02": {
+      "describe": [
+        "XGE1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 2,
+      "vlan": 10
+    },
+    "02:00:00:00:00:03": {
+      "describe": [
+        "XGE1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 2,
+      "vlan": 20
+    }
+  },
+  "ports": {
+    "1": {
+      "macs": 1,
+      "name": "GigabitEthernet1/0/1",
+      "neighbor": "",
+      "uplink": false
+    },
+    "2": {
+      "macs": 2,
+      "name": "Ten-GigabitEthernet1/0/2",
+      "neighbor": "sw-attic",
+      "uplink": true
+    }
+  },
+  "profile": "comware"
+}

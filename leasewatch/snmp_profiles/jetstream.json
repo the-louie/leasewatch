@@ -1,0 +1,9 @@
+{
+  "_source": "Research notes Focus 2 and Key question A (LibreNMS jetstream.inc.php: 'ifIndex = bridge port + 49152', fallback name match against 'gigabitEthernet 1/0/<port>' (ifDescr) or 'gigabitEthernet1/0/<port>' (ifName); jetstream.yaml sysObjectID .1.3.6.1.4.1.11863.5.). Name matching here is against ifName only. The 21 no_bulk OIDs in jetstream.yaml are DDM tables leasewatch does not walk; the FDB walk uses allowUnordered (snmp.allow_unordered, documented but ignored).",
+  "profile": "jetstream",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": ["1.3.6.1.4.1.11863.5"], "sysdescr_regex": []},
+  "bridge_port_map": {"strategy": "identity", "offset": 49152, "fallback": "identity", "name_match": ["gigabitEthernet1/0/{port}", "gigabitEthernet 1/0/{port}"]},
+  "snmp": {"allow_unordered": ["fdb_port"]}
+}

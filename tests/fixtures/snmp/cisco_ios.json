@@ -1,0 +1,43 @@
+{
+  "macs": {
+    "02:00:00:00:00:01": {
+      "describe": [
+        "Gi1/0/1",
+        ""
+      ],
+      "ifindex": 10101,
+      "vlan": 1
+    },
+    "02:00:00:00:00:02": {
+      "describe": [
+        "Gi1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 10102,
+      "vlan": 10
+    },
+    "02:00:00:00:00:03": {
+      "describe": [
+        "Gi1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 10102,
+      "vlan": 10
+    }
+  },
+  "ports": {
+    "10101": {
+      "macs": 1,
+      "name": "Gi1/0/1",
+      "neighbor": "",
+      "uplink": false
+    },
+    "10102": {
+      "macs": 2,
+      "name": "Gi1/0/2",
+      "neighbor": "sw-attic",
+      "uplink": true
+    }
+  },
+  "profile": "cisco_ios"
+}

@@ -1,0 +1,38 @@
+{
+  "_source": "leasewatch 1.0 behaviour (switch.py before profiles): Q-BRIDGE dot1qTpFdbPort, dot1dBasePortIfIndex with 'assume base port = ifIndex' on a miss (research notes Focus 1 and Focus 2, LibreNMS bridge.inc.php), LLDP local port via lldpLocPortId/lldpLocPortDesc name then ifIndex (Focus 3, first steps of LibreNMS PortFinder), uplink = LLDP neighbour or >= 6 MACs (leasewatch's own heuristic, Focus 5), GETNEXT walks with timeout 4 s and 1 retry. Profiles may set snmp.bulk true to use GETBULK with snmp.max_repetitions (Focus 6: Telegraf/Zabbix default 10). OIDs: notes' OID table.",
+  "profile": "standard",
+  "api_version": 1,
+  "match": {"sysobjectid_prefix": [], "sysdescr_regex": []},
+  "fdb": {
+    "strategy": "qbridge",
+    "vlan_map": "identity",
+    "context_prefix": "vlan-",
+    "vlan_source": "vtp_vlan_state",
+    "skip_vlans": [],
+    "index_fix": "none",
+    "keep_status": [],
+    "private_oids": []
+  },
+  "bridge_port_map": {"strategy": "dot1dBasePortIfIndex", "offset": 0, "fallback": "identity", "name_match": false},
+  "lldp": {"local_port": "auto", "v2_fallback": false},
+  "port_name": {"prefer": "ifName", "short": {}},
+  "uplink": {"lldp_neighbor": true, "min_macs": 6, "trunk": null},
+  "snmp": {"bulk": false, "max_repetitions": 10, "timeout": 4, "retries": 1, "no_bulk": [], "allow_unordered": []},
+  "oids": {
+    "fdb_port": "1.3.6.1.2.1.17.7.1.2.2.1.2",
+    "fdb_status": "1.3.6.1.2.1.17.7.1.2.2.1.3",
+    "bridge_fdb_address": "1.3.6.1.2.1.17.4.3.1.1",
+    "bridge_fdb_port": "1.3.6.1.2.1.17.4.3.1.2",
+    "bridge_fdb_status": "1.3.6.1.2.1.17.4.3.1.3",
+    "baseport_ifindex": "1.3.6.1.2.1.17.1.4.1.2",
+    "vlan_fdb_id": "1.3.6.1.2.1.17.7.1.4.2.1.3",
+    "ifname": "1.3.6.1.2.1.31.1.1.1.1",
+    "ifdescr": "1.3.6.1.2.1.2.2.1.2",
+    "ifalias": "1.3.6.1.2.1.31.1.1.1.18",
+    "lldp_rem_sysname": "1.0.8802.1.1.2.1.4.1.1.9",
+    "lldp_loc_portid": "1.0.8802.1.1.2.1.3.7.1.3",
+    "lldp_loc_portdesc": "1.0.8802.1.1.2.1.3.7.1.4",
+    "sysobjectid": "1.3.6.1.2.1.1.2.0",
+    "sysdescr": "1.3.6.1.2.1.1.1.0"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "macs": {
+    "02:00:00:00:00:01": {
+      "describe": [
+        "ether1",
+        ""
+      ],
+      "ifindex": 3,
+      "vlan": 10
+    },
+    "02:00:00:00:00:02": {
+      "describe": [
+        "ether2",
+        "sw-attic"
+      ],
+      "ifindex": 4,
+      "vlan": 10
+    },
+    "02:00:00:00:00:03": {
+      "describe": [
+        "ether2",
+        "sw-attic"
+      ],
+      "ifindex": 4,
+      "vlan": 20
+    }
+  },
+  "ports": {
+    "3": {
+      "macs": 1,
+      "name": "ether1",
+      "neighbor": "",
+      "uplink": false
+    },
+    "4": {
+      "macs": 2,
+      "name": "ether2",
+      "neighbor": "sw-attic",
+      "uplink": true
+    }
+  },
+  "profile": "routeros"
+}

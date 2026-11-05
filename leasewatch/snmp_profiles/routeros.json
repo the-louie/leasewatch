@@ -1,0 +1,8 @@
+{
+  "_source": "Research notes Focus 3 and Key question A (LibreNMS Routeros.php: 'RouterOS uses the ifIndex as the LLDP port number'; routeros.yaml sysObjectID .1.3.6.1.4.1.14988.1; Observium OBS-4373: the FDB bridge port goes through dot1dBasePortIfIndex, i.e. the standard map). Not covered: neighbours on port 0 before RouterOS 7.7 (needs MIKROTIK-MIB, no numeric OID in the notes).",
+  "profile": "routeros",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": ["1.3.6.1.4.1.14988.1"], "sysdescr_regex": []},
+  "lldp": {"local_port": "ifindex"}
+}

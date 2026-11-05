@@ -1,0 +1,9 @@
+{
+  "_source": "Research notes Focus 1 and Key question A (LibreNMS edgeswitch.inc.php reads EdgeSwitch-SWITCHING-MIB::agentDynamicDsBindingTable, which yields ifIndex and VLAN directly; edgeswitch.yaml sets ifname: true). The notes give no numeric OID for that table, so fdb.private_oids is empty and a SwitchClient subclass must supply both the OIDs and fdb_decoder(). match is empty on purpose: the notes also show UniFi switches with Q-BRIDGE support (Netdata topology-role-qbridge), so this profile is only used when chosen by name.",
+  "profile": "edgeswitch",
+  "api_version": 1,
+  "extends": "standard",
+  "match": {"sysobjectid_prefix": [], "sysdescr_regex": []},
+  "fdb": {"strategy": "private", "private_oids": []},
+  "bridge_port_map": {"strategy": "identity"}
+}

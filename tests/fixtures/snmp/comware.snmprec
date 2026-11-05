@@ -1,0 +1,13 @@
+# SYNTHETIC capture written by hand (no real switch capture available): 2 ports, 3 MACs + 1 port-0 self MAC, 1 LLDP neighbour.
+# Format: numeric OID|type|value (LibreNMS .snmprec; 2=Integer, 4=OctetString, 4x=hex OctetString, 6=OID).
+1.3.6.1.2.1.1.1.0|4|Example Comware software
+1.3.6.1.2.1.1.2.0|6|1.3.6.1.4.1.25506.11.1.1
+1.3.6.1.2.1.17.1.4.1.2.1|2|1
+1.3.6.1.2.1.17.1.4.1.2.2|2|2
+1.3.6.1.2.1.17.7.1.2.2.1.2.10.2.0.0.0.0.1|2|1
+1.3.6.1.2.1.17.7.1.2.2.1.2.10.2.0.0.0.0.2|2|2
+1.3.6.1.2.1.17.7.1.2.2.1.2.20.2.0.0.0.0.3|2|2
+1.3.6.1.2.1.17.7.1.2.2.1.2.10.2.0.0.0.0.255|2|0
+1.3.6.1.2.1.31.1.1.1.1.1|4|GigabitEthernet1/0/1
+1.3.6.1.2.1.31.1.1.1.1.2|4|Ten-GigabitEthernet1/0/2
+1.0.8802.1.1.2.1.4.1.1.9.0.2.1|4|sw-attic

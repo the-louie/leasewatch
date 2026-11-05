@@ -1,0 +1,43 @@
+{
+  "macs": {
+    "02:00:00:00:00:01": {
+      "describe": [
+        "gigabitEthernet1/0/1",
+        ""
+      ],
+      "ifindex": 49153,
+      "vlan": 10
+    },
+    "02:00:00:00:00:02": {
+      "describe": [
+        "gigabitEthernet1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 49154,
+      "vlan": 10
+    },
+    "02:00:00:00:00:03": {
+      "describe": [
+        "gigabitEthernet1/0/2",
+        "sw-attic"
+      ],
+      "ifindex": 49154,
+      "vlan": 20
+    }
+  },
+  "ports": {
+    "49153": {
+      "macs": 1,
+      "name": "gigabitEthernet1/0/1",
+      "neighbor": "",
+      "uplink": false
+    },
+    "49154": {
+      "macs": 2,
+      "name": "gigabitEthernet1/0/2",
+      "neighbor": "sw-attic",
+      "uplink": true
+    }
+  },
+  "profile": "jetstream"
+}
