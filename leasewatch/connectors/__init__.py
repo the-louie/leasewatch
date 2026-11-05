@@ -8,6 +8,7 @@ the database or to the device it reads from.
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 import time
 import urllib.request
@@ -33,6 +34,9 @@ class Setting:
     secret: bool = False
     choices: tuple[str, ...] = ()
     help: str = ""
+    kind: str = "str"  # "int": the value must parse as an integer within min..max (either bound optional)
+    min: int | None = None
+    max: int | None = None
 
 
 @dataclass(frozen=True)
@@ -212,16 +216,119 @@ class SettingsMixin:
         return cls.INFO
 
     def _generic_problems(self) -> list[str]:
-        out = []
-        for s in self.INFO.settings:
-            v = self.settings.get(s.key, "")
-            if s.required and not v:
-                out.append(f"connector {self.name} ({self.INFO.type}) requires {s.key}")
-            elif v and s.choices and v not in s.choices:
-                out.append(f"connector {self.name} ({self.INFO.type}): {s.key} must be one of {', '.join(s.choices)}")
-        return out
+        return setting_problems(self.name, self.INFO.type, self.INFO.settings, self.settings)
 
     def __repr__(self) -> str:
         secret = {s.key for s in self.INFO.settings if s.secret}
         shown = {k: ("***" if k in secret and v else v) for k, v in self.settings.items()}
         return f"{type(self).__name__}({self.name!r}, {shown!r})"
+
+
+# --- instances: the registry of types and the configured instances built from it -------------------------------
+
+NAME_RE = re.compile(r"^[a-z0-9-]+$")
+# keys every instance accepts besides its type's own settings; the host reads them, the connector never sees them
+HOST_SETTINGS = (
+    Setting("type", required=True, help="connector type (opnsense, snmp_switch, unifi)"),
+    Setting("timeout", default="60", kind="int", min=1, max=3600, help="seconds a collect may run before this poll abandons it"),
+)
+HOST_KEYS = frozenset(s.key for s in HOST_SETTINGS)
+
+
+def setting_problems(name: str, type_: str, settings: Iterable[Setting], values: Mapping[str, str]) -> list[str]:
+    """The checks describe() makes possible: required keys, choices, integer ranges. Never echoes a value."""
+    out = []
+    for s in settings:
+        v = values.get(s.key, "")
+        label = f"connector {name} ({type_}): {s.key.upper()}"
+        if not v:
+            if s.required:
+                out.append(f"{label} is required")
+        elif s.choices and v not in s.choices:
+            out.append(f"{label} must be one of {', '.join(s.choices)}")
+        elif s.kind == "int":
+            try:
+                n = int(v)
+            except ValueError:
+                out.append(f"{label} must be an integer")
+                continue
+            if s.min is not None and n < s.min:
+                out.append(f"{label} must be at least {s.min}")
+            elif s.max is not None and n > s.max:
+                out.append(f"{label} must be at most {s.max}")
+    return out
+
+
+@dataclass(frozen=True, repr=False)
+class InstanceSpec:
+    """One configured instance: its name ([a-z0-9-]+), its type, and its settings (lower-case keys, TYPE excluded,
+    TIMEOUT included). The repr names the keys only, so secrets never reach a log line."""
+    name: str
+    type: str
+    settings: dict[str, str] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        return f"InstanceSpec({self.name!r}, {self.type!r}, keys={sorted(self.settings)!r})"
+
+    @property
+    def timeout(self) -> int:
+        try:
+            return max(1, int(self.settings.get("timeout") or 60))
+        except ValueError:
+            return 60  # reported by instance_problems()
+
+
+_REGISTRY: dict[str, type] | None = None
+
+
+def registry() -> dict[str, type]:
+    """type -> connector class. Built on first use (the built-in modules import this one) and cached in _REGISTRY."""
+    global _REGISTRY
+    if _REGISTRY is None:
+        from .builtin import BUILTIN
+        _REGISTRY = {cls.describe().type: cls for cls in BUILTIN}
+    return _REGISTRY
+
+
+def secret_keys(type_: str) -> frozenset[str]:
+    cls = registry().get(type_)
+    return frozenset(s.key for s in cls.describe().settings if s.secret) if cls else frozenset()
+
+
+def instances_context(specs: Iterable[InstanceSpec]) -> HostContext:
+    """One context for all instances, redacting every secret value any of them holds."""
+    return HostContext(redact=make_redactor([v for sp in specs for k, v in sp.settings.items() if k in secret_keys(sp.type)]))
+
+
+def build_instance(spec: InstanceSpec, ctx: HostContext, client: object | None = None) -> Connector:
+    """The connector object for a spec (no I/O). Raises KeyError for an unknown type. client: an already built
+    client to wrap instead of a new one (the built-in wrappers accept it)."""
+    cls = registry()[spec.type]
+    settings = {k: v for k, v in spec.settings.items() if k not in HOST_KEYS}
+    return cls(spec.name, settings, ctx, client=client) if client is not None else cls(spec.name, settings, ctx)
+
+
+def instance_problems(spec: InstanceSpec, conn: Connector | None = None) -> list[str]:
+    """Everything wrong with one instance, as "connector <name> (<type>): ..." lines: the type, the host keys,
+    unknown keys, the type's declared settings, then the instance's own validate(). No I/O."""
+    if not spec.type:
+        return [f"connector {spec.name}: TYPE is required"]
+    cls = registry().get(spec.type)
+    if cls is None:
+        return [f"connector {spec.name}: unknown type {spec.type!r} (known: {', '.join(sorted(registry()))})"]
+    info = cls.describe()
+    head = f"connector {spec.name} ({spec.type})"
+    if info.api_version != API_VERSION:
+        return [f"{head}: written for connector API {info.api_version}, this host has {API_VERSION}"]
+    problems = setting_problems(spec.name, spec.type, HOST_SETTINGS[1:], spec.settings)
+    known = {s.key for s in info.settings} | HOST_KEYS
+    problems += [f"{head}: unknown setting {k.upper()}" for k in sorted(spec.settings) if k not in known]
+    try:
+        conn = conn or build_instance(spec, HostContext())
+        own = conn.validate()
+    except Exception as e:  # a constructor that chokes on a value: name the type of failure, never the value
+        return problems + [f"{head}: cannot be set up ({type(e).__name__})"]
+    generic = setting_problems(spec.name, spec.type, info.settings, getattr(conn, "settings", spec.settings))
+    problems += generic
+    problems += [p if p.startswith("connector ") else f"{head}: {p}" for p in own if p not in generic]
+    return problems

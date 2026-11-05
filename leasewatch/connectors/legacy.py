@@ -5,10 +5,7 @@ Instance names: "fw1" (opnsense, always), "switch" (snmp_switch, when SNMP is en
 from __future__ import annotations
 
 from ..config import Config
-from . import Connector, HostContext, make_redactor
-from .opnsense import OpnsenseConnector
-from .snmp_switch import SnmpSwitchConnector
-from .unifi import UnifiConnector
+from . import Connector, HostContext, InstanceSpec, build_instance, make_redactor
 
 
 def _b(v: bool) -> str:
@@ -34,12 +31,17 @@ def legacy_context(cfg: Config) -> HostContext:
     return HostContext(redact=make_redactor([cfg.fw1_key, cfg.fw1_secret, cfg.snmp_auth_key, cfg.snmp_priv_key, cfg.unifi_password]))
 
 
+def legacy_specs(cfg: Config) -> list[InstanceSpec]:
+    """The instances today's variables describe, used when LW_CONNECTORS is unset."""
+    out = [InstanceSpec("fw1", "opnsense", fw1_settings(cfg))]
+    if cfg.snmp_enabled:
+        out.append(InstanceSpec("switch", "snmp_switch", switch_settings(cfg)))
+    if cfg.unifi_enabled:
+        out.append(InstanceSpec("unifi", "unifi", unifi_settings(cfg)))
+    return out
+
+
 def legacy_instances(cfg: Config, fw1_client: object | None = None) -> dict[str, Connector]:
     """fw1_client: an already built firewall client (the Collector's injected one), used instead of a new Fw1Client."""
     ctx = legacy_context(cfg)
-    out: dict[str, Connector] = {"fw1": OpnsenseConnector("fw1", fw1_settings(cfg), ctx, client=fw1_client)}
-    if cfg.snmp_enabled:
-        out["switch"] = SnmpSwitchConnector("switch", switch_settings(cfg), ctx)
-    if cfg.unifi_enabled:
-        out["unifi"] = UnifiConnector("unifi", unifi_settings(cfg), ctx)
-    return out
+    return {s.name: build_instance(s, ctx, client=fw1_client if s.name == "fw1" else None) for s in legacy_specs(cfg)}

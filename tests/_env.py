@@ -14,8 +14,10 @@ CONFIG_VARS = (
     "IGNORE_INTERFACES", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE", "MAILGUN_DOMAIN",
     "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PUBLIC_URL", "SITE_NAME",
     "SNMP_AUTH", "SNMP_AUTH_KEY", "SNMP_HOST", "SNMP_NAME", "SNMP_PRIV_KEY", "SNMP_USER", "UNIFI_PASSWORD",
-    "UNIFI_SITE", "UNIFI_URL", "UNIFI_USER", "UNIFI_VERIFY_TLS", "LOG_LEVEL",
+    "UNIFI_SITE", "UNIFI_URL", "UNIFI_USER", "UNIFI_VERIFY_TLS", "LOG_LEVEL", "LW_CONNECTORS",
 )
+# the per-instance settings LW_CONNECTOR__<NAME>__<KEY> have open-ended names: clean_env() drops them by prefix
+CONFIG_PREFIXES = ("LW_CONNECTOR__",)
 
 
 def clean_env(overrides: dict | None = None) -> dict:
@@ -23,6 +25,8 @@ def clean_env(overrides: dict | None = None) -> dict:
     saved = dict(os.environ)
     for k in CONFIG_VARS:
         os.environ.pop(k, None)
+    for k in [k for k in os.environ if k.startswith(CONFIG_PREFIXES)]:
+        del os.environ[k]
     os.environ.update(overrides or {})
     return saved
 

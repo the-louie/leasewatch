@@ -1,18 +1,25 @@
-"""Poll fw1, merge DHCP + ARP sightings per MAC, write devices/history/events, notify on new devices.
+"""Poll the connector instances, merge their batches per MAC, write devices/history/events, notify on new devices.
 
 LEASE_TYPE_MODE=grace times "listed without a lease" in memory (Collector._no_lease_since), not in the database:
 a restart starts the grace clock again, which only delays clearing a lease type by one grace period.
+
+Each instance collects in its own thread with its own TIMEOUT. The sighting producers (the firewall) run first, so
+the switch can name uplinks after this poll's hostnames; then the others. A thread still running at its deadline is
+abandoned: its result is dropped (generation counter) and the instance is skipped until the thread ends.
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from .config import Config
 from .db import Database
-from .connectors import ConnectorError
-from .connectors.legacy import legacy_instances, switch_settings, unifi_settings
+from .connectors import (Batch, ConnectorError, InstanceSpec, build_instance, instance_problems, instances_context,
+                         registry)
+from .connectors.legacy import switch_settings, unifi_settings
 from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState, to_fw1,
                                merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
@@ -24,21 +31,70 @@ from . import notify
 log = logging.getLogger("leasewatch.collector")
 HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
+MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
+SKIPPED = "previous collection has not completed; skipped"
+# meta aliases the 1.0 UI reads, for the instances the legacy mapping names: (ok, error, count key, Batch.stats key)
+ALIASES = {"switch": ("switch_ok", "switch_error", "switch_macs", "macs"),
+           "unifi": ("unifi_ok", "unifi_error", "unifi_clients", "clients")}
+
+
+@dataclass
+class _Run:
+    """Collection state of one instance. Only the collector thread changes it, except `result`, which a worker
+    thread sets under Collector._lock and only while `gen` is still the generation it was started with."""
+    name: str
+    type: str
+    timeout: int
+    produces: frozenset
+    backoff: int
+    disabled: str = ""          # validate() problems: never collected, never retried
+    checked: bool = False       # check() passed (or was given up on): collect() directly
+    retry_at: float = 0.0       # monotonic time before which a failed check() is not retried
+    failed: bool = False        # last outcome, so a change is logged once and not every poll
+    error: str = ""
+    thread: threading.Thread | None = None
+    started: float = 0.0
+    gen: int = 0
+    result: tuple | None = None
+    skip_logged: bool = False
 
 
 class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
-        # the sources as connector instances (fw1, switch, unifi) built from today's variables; client/_switch/_unifi
-        # below read and replace the client object each one wraps
-        self._connectors: dict = legacy_instances(cfg, fw1_client=client)
+        self._lock = threading.Lock()  # guards _Run.result/_Run.gen between the worker threads and run_once
+        specs = cfg.instances
+        # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
+        self._ctx = instances_context(specs)
+        self._ctx.device_names = self._device_names
+        self._connectors: dict = {}
+        self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
+        for spec in specs:
+            self._add(spec, client if spec.name == "fw1" else None, validate=cfg.connector_specs is not None)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
-        # the connectors share one context: lend them the device names (the switch names unnamed uplinks with them)
-        self._connectors["fw1"].ctx.device_names = self._device_names
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
 
+    def _add(self, spec: InstanceSpec, client: object | None, validate: bool) -> None:
+        """Build one instance. validate: run validate() and disable the instance on problems (LW_CONNECTORS only;
+        the legacy variables are checked by Config.validate() under their own names)."""
+        cls = registry().get(spec.type)
+        run = _Run(spec.name, spec.type, spec.timeout, cls.describe().produces if cls else frozenset(),
+                   self.cfg.poll_seconds, checked=client is not None)  # C5: remove (an injected client is a test double without check())
+        self._runs[spec.name] = run
+        try:
+            conn = build_instance(spec, self._ctx, client=client)
+            problems = instance_problems(spec, conn) if validate else []
+        except Exception as e:
+            conn, problems = None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
+        if problems:
+            run.disabled = run.error = "disabled: " + "; ".join(problems)
+            log.error("connector %s (%s) %s", spec.name, spec.type, run.error)
+            return
+        self._connectors[spec.name] = conn
+
+    # C5: remove the client/_switch/_unifi shims (tests swap the wrapped client objects through them)
     @property
     def client(self) -> object:
         return self._connectors["fw1"].client
@@ -46,6 +102,7 @@ class Collector:
     @client.setter
     def client(self, obj: object) -> None:
         self._connectors["fw1"].client = obj
+        self._runs["fw1"].checked = True
 
     def _get_client(self, name: str) -> object | None:
         conn = self._connectors.get(name)
@@ -55,10 +112,14 @@ class Collector:
         """Swap the client a connector wraps; None removes the connector, a client without one gets a new wrapper."""
         if obj is None:
             self._connectors.pop(name, None)
-        elif name in self._connectors:
+            self._runs.pop(name, None)
+            return
+        if name in self._connectors:
             self._connectors[name].client = obj
         else:
-            self._connectors[name] = factory(name, obj)
+            self._connectors[name] = conn = factory(name, obj)
+            self._runs[name] = _Run(name, conn.describe().type, 60, conn.describe().produces, self.cfg.poll_seconds)
+        self._runs[name].checked = True  # a test double: no check()
 
     @property
     def _switch(self) -> object | None:
@@ -66,7 +127,7 @@ class Collector:
 
     @_switch.setter
     def _switch(self, obj: object | None) -> None:
-        self._set_client("switch", lambda n, o: SnmpSwitchConnector(n, switch_settings(self.cfg), self._connectors["fw1"].ctx, client=o), obj)
+        self._set_client("switch", lambda n, o: SnmpSwitchConnector(n, switch_settings(self.cfg), self._ctx, client=o), obj)
 
     @property
     def _unifi(self) -> object | None:
@@ -74,7 +135,7 @@ class Collector:
 
     @_unifi.setter
     def _unifi(self, obj: object | None) -> None:
-        self._set_client("unifi", lambda n, o: UnifiConnector(n, unifi_settings(self.cfg), self._connectors["fw1"].ctx, client=o), obj)
+        self._set_client("unifi", lambda n, o: UnifiConnector(n, unifi_settings(self.cfg), self._ctx, client=o), obj)
 
     def _device_names(self) -> dict[str, str]:
         """mac -> name, else hostname, as the rows will read once this poll's firewall data is merged in."""
@@ -84,32 +145,121 @@ class Collector:
             out[r["mac"]] = r["name"] or hosts.get(r["mac"]) or r["hostname"]
         return out
 
-    def _enrich(self) -> tuple[object, object, dict]:
-        """Collect the optional sources: (switch result, UniFi result, meta status). A result is None when the source
-        is off, a ConnectorFailure when it failed; then the merge leaves the device fields as they were."""
-        sw = un = None
-        status: dict[str, str] = {}
-        if self._switch:
-            try:
-                sw = self._connectors["switch"].collect()
-                status["switch_ok"] = "1"; status["switch_error"] = ""; status["switch_macs"] = str(sw.stats["macs"])
-            except Exception as e:
-                log.warning("switch poll failed: %s", e)
-                status["switch_ok"] = "0"; status["switch_error"] = (str(e) or type(e).__name__)[:200]  # a bare TimeoutError has no text
-                sw = ConnectorFailure("switch", status["switch_error"], int(time.time()))
-        if self._unifi:
-            try:
-                un = self._connectors["unifi"].collect()
-                status["unifi_ok"] = "1"; status["unifi_error"] = ""; status["unifi_clients"] = str(un.stats["clients"])
-            except Exception as e:
-                log.warning("unifi poll failed: %s", e)
-                status["unifi_ok"] = "0"; status["unifi_error"] = (str(e) or type(e).__name__)[:200]
-                un = ConnectorFailure("unifi", status["unifi_error"], int(time.time()))
-        return sw, un, status
+    def _work(self, run: _Run, gen: int, conn: object, check: bool) -> None:
+        """Worker thread: check() if due, then collect(). Stores (phase, Batch or exception, ms) unless abandoned."""
+        t0 = time.monotonic()
+        phase = "check"
+        try:
+            if check:
+                conn.check()
+            phase = "collect"
+            out: object = conn.collect()
+        except BaseException as e:  # everything is reported through the result; a worker never dies silently
+            out = e
+        with self._lock:
+            if run.gen == gen:
+                run.result = (phase, out, int((time.monotonic() - t0) * 1000))
 
-    def _fail(self, msg: str) -> dict:
+    def _outcome(self, run: _Run, error: str, exc: BaseException | None) -> None:
+        """Log a change of state once: ok -> failed (WARNING for ConnectorError and timeouts, ERROR with traceback
+        for anything else) and failed -> ok."""
+        if error and not run.failed:
+            if exc is None or isinstance(exc, ConnectorError):
+                log.warning("connector %s (%s) failed: %s", run.name, run.type, error)
+            else:
+                log.error("connector %s (%s) failed: %s", run.name, run.type, error, exc_info=exc)
+        elif not error and run.failed:
+            log.info("connector %s (%s) recovered", run.name, run.type)
+        run.failed, run.error = bool(error), error
+
+    def _collect(self, names: list[str]) -> tuple[dict[str, object], dict[str, str]]:
+        """Collect the given instances in parallel: (name -> Batch or ConnectorFailure, meta status). A disabled
+        instance has no entry (the merge treats it as off); a skipped, waiting or failed one a ConnectorFailure."""
+        out: dict[str, object] = {}
+        status: dict[str, str] = {}
+        started: list[_Run] = []
+        now = time.monotonic()
+        for n in names:
+            run = self._runs[n]
+            if run.disabled:
+                continue
+            if run.thread is not None and run.thread.is_alive():
+                if not run.skip_logged:
+                    log.warning("connector %s (%s): %s", n, run.type, SKIPPED)
+                    run.skip_logged = True
+                continue
+            run.skip_logged = False
+            if now < run.retry_at:
+                continue  # check() failed and its backoff has not passed: stays failed with that error
+            with self._lock:
+                run.gen += 1
+                run.result = None
+            run.thread = threading.Thread(target=self._work, args=(run, run.gen, self._connectors[n], not run.checked),
+                                          name=f"connector-{n}", daemon=True)
+            run.started = time.monotonic()
+            run.thread.start()
+            started.append(run)
+        for run in started:
+            run.thread.join(max(0.0, run.started + run.timeout - time.monotonic()))
+            with self._lock:
+                res = run.result
+                if res is None:
+                    run.gen += 1  # abandoned: whatever the thread returns later belongs to no poll
+            if res is None:
+                phase, out_obj, ms = "collect", None, run.timeout * 1000
+            else:
+                phase, out_obj, ms = res
+            if isinstance(out_obj, Batch):
+                run.checked = True
+                self._outcome(run, "", None)
+                out[run.name] = out_obj
+                status[f"conn.{run.name}.ms"] = str(ms)
+                status[f"conn.{run.name}.count"] = str(len(out_obj.sightings) + len(out_obj.attachments))
+                continue
+            exc = out_obj if isinstance(out_obj, BaseException) else None
+            if res is None:
+                error = f"timed out after {run.timeout} s"
+            elif exc is not None:
+                # a bare TimeoutError has no text; a secret the connector echoed anyway is masked
+                error = self._ctx.redact(str(exc) or type(exc).__name__)[:200]
+            else:
+                error = "collect() did not return a Batch"
+            if phase == "check":
+                # retry check() after POLL_SECONDS, doubling up to MAX_BACKOFF; after that wait, collect() every poll
+                run.retry_at = time.monotonic() + min(run.backoff, MAX_BACKOFF)
+                if run.backoff >= MAX_BACKOFF:
+                    run.checked = True
+                run.backoff *= 2
+                error = f"check failed: {error}"
+            self._outcome(run, error, exc)
+            status[f"conn.{run.name}.ms"] = str(ms)
+        ts = str(int(time.time()))
+        for n in names:
+            run = self._runs[n]
+            if n in out:
+                ok, error = True, ""
+            else:
+                ok = False
+                error = SKIPPED if (not run.disabled and run.thread is not None and run.thread.is_alive()
+                                    and run not in started) else run.error
+                if not run.disabled:
+                    out[n] = ConnectorFailure(n, error, int(time.time()))
+            status.update({f"conn.{n}.type": run.type, f"conn.{n}.ok": "1" if ok else "0", f"conn.{n}.error": error,
+                           f"conn.{n}.ts": ts, f"conn.{n}.enabled": "0" if run.disabled else "1"})
+            status.setdefault(f"conn.{n}.ms", "0")
+            status.setdefault(f"conn.{n}.count", "0")
+            if n in ALIASES and not run.disabled:
+                k_ok, k_err, k_count, stat = ALIASES[n]
+                status[k_ok], status[k_err] = ("1" if ok else "0"), error
+                if ok:
+                    status[k_count] = str(out[n].stats.get(stat, 0))
+        return out, status
+
+    def _fail(self, msg: str, status: dict[str, str] | None = None) -> dict:
         now = int(time.time())
         with self.db.tx() as c:
+            for k, v in (status or {}).items():
+                self.db.set_meta(k, v, c)
             self.db.set_meta("last_error", msg, c)
             self.db.set_meta("last_error_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "0", c)
@@ -148,22 +298,30 @@ class Collector:
 
     def run_once(self) -> dict:
         t0 = time.time()
-        try:
-            fw1 = self._connectors["fw1"].collect()
-        except Exception as e:  # ConnectorError, or anything unexpected fw1 throws at us
-            log.warning("poll failed: %s", e, exc_info=not isinstance(e, ConnectorError))
-            return self._fail(str(e))
-        raw_stats = fw1.stats
+        producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
+        got, status = self._collect(producers)
+        ok = {n: b for n, b in got.items() if isinstance(b, Batch)}
+        if not ok:  # every sighting producer failed: the poll fails, so nothing stays online forever
+            errors = [(n, b.error) for n, b in got.items()]
+            msg = errors[0][1] if len(errors) == 1 else "; ".join(f"{n}: {e}" for n, e in errors) or "no sighting connector is enabled"
+            return self._fail(msg, status)
+        sightings = [s for b in ok.values() for s in b.sightings]
+        raw_stats: dict[str, int] = {}
+        for b in ok.values():
+            for k, v in b.stats.items():
+                raw_stats[k] = raw_stats.get(k, 0) + v
         # this poll's hostnames, read by _device_names() while the switch names its uplink ports
-        self._poll_hosts = {mac: m.hostname for mac, m in merge([to_fw1(s) for s in fw1.sightings]).items()}
-        sw, un, enrich_status = self._enrich()
+        self._poll_hosts = {mac: m.hostname for mac, m in merge([to_fw1(s) for s in sightings]).items()}
+        more, enrich_status = self._collect([n for n in self._runs if n not in producers])
+        got.update(more)
+        enrich_status = {**status, **enrich_status}
         now = int(time.time())
         first_run = self.db.get_meta("first_run_done", "") != "1"
         prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
-        if first_run and not fw1.sightings:
+        if first_run and not sightings:
             log.warning("first poll returned no devices (%s); not taking a baseline", raw_stats)
-            return self._fail("first poll returned no devices")
-        batches = {"fw1": fw1, **{n: r for n, r in (("switch", sw), ("unifi", un)) if r is not None}}
+            return self._fail("first poll returned no devices", enrich_status)
+        batches = {n: got[n] for n in self._runs if n in got}
         state = MergeState(self._no_lease_since, first_run, prev_ok,
                            frozenset(n for n, conn in self._connectors.items() if conn.describe().type == "unifi"))
         with self.db.tx() as c:
@@ -177,7 +335,7 @@ class Collector:
             self.db.set_meta("last_poll_ok", "1", c)
             self.db.set_meta("last_error", "", c)
             self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
-            last_raw = f"{raw_stats['leases']} leases, {raw_stats['arp']} arp"
+            last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
             if self.cfg.dhcp_backend == "kea" and "reservations" in raw_stats:
                 last_raw += f", {raw_stats['reservations']} reservations"
             self.db.set_meta("last_raw", last_raw, c)

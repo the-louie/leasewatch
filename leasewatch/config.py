@@ -5,7 +5,12 @@ import ipaddress
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Mapping
 from urllib.parse import urlparse
+
+from .connectors import NAME_RE, InstanceSpec, instance_problems, registry, secret_keys
+
+ENV_PREFIX = "LW_CONNECTOR__"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -38,6 +43,44 @@ def _host_only(entry: str) -> str:
     elif h.count(":") == 1:
         h = h.rsplit(":", 1)[0]
     return h.rstrip(".") if h != "*" else h
+
+
+def parse_instances(environ: Mapping[str, str]) -> tuple[list[InstanceSpec], list[str]]:
+    """LW_CONNECTORS (instance names, in merge order) and LW_CONNECTOR__<NAME>__<KEY> into specs, plus the problems
+    found while parsing. A secret key also accepts <KEY>_FILE: the file's stripped content is the value (read here)."""
+    problems: list[str] = []
+    by_name: dict[str, dict[str, str]] = {}
+    for k, v in environ.items():
+        if k.startswith(ENV_PREFIX):
+            name, sep, key = k[len(ENV_PREFIX):].partition("__")
+            if sep and key:
+                by_name.setdefault(name.lower(), {})[key.lower()] = v.strip()
+    specs: list[InstanceSpec] = []
+    for name in (n.strip() for n in environ.get("LW_CONNECTORS", "").split(",")):
+        if not name:
+            continue
+        if not NAME_RE.match(name):
+            problems.append(f"LW_CONNECTORS: {name!r} is not a valid instance name (a-z, 0-9 and -)")
+            continue
+        if any(sp.name == name for sp in specs):
+            problems.append(f"LW_CONNECTORS: {name} is listed twice")
+            continue
+        settings = dict(by_name.get(name, {}))
+        type_ = settings.pop("type", "").lower()
+        for key in sorted(secret_keys(type_)):
+            path = settings.pop(key + "_file", "")
+            if not path:
+                continue
+            if settings.get(key):
+                problems.append(f"connector {name} ({type_}): set {key.upper()} or {key.upper()}_FILE, not both")
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    settings[key] = f.read().strip()
+            except (OSError, UnicodeDecodeError) as e:
+                problems.append(f"connector {name} ({type_}): cannot read {key.upper()}_FILE ({getattr(e, 'strerror', None) or type(e).__name__})")
+        specs.append(InstanceSpec(name, type_, settings))
+    return specs, problems
 
 
 @dataclass
@@ -87,6 +130,21 @@ class Config:
     unifi_user: str = field(default_factory=lambda: _env("UNIFI_USER"))
     unifi_password: str = field(default_factory=lambda: _env("UNIFI_PASSWORD"), repr=False)
     unifi_verify_tls: bool = field(default_factory=lambda: _env_bool("UNIFI_VERIFY_TLS", True))
+    # connector instances from LW_CONNECTORS (None when unset: the legacy variables above describe them)
+    connector_specs: list | None = field(default=None, init=False)
+    connector_problems: list = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if _env("LW_CONNECTORS"):
+            self.connector_specs, self.connector_problems = parse_instances(os.environ)
+
+    @property
+    def instances(self) -> list[InstanceSpec]:
+        """The configured connector instances, in LW_CONNECTORS order (the merge tie-break order)."""
+        if self.connector_specs is not None:
+            return self.connector_specs
+        from .connectors.legacy import legacy_specs  # legacy.py imports this module
+        return legacy_specs(self)
 
     @property
     def snmp_enabled(self) -> bool:
@@ -125,16 +183,19 @@ class Config:
 
     def validate(self) -> list[str]:
         problems = []
-        if not self.fw1_key or not self.fw1_secret:
+        # with LW_CONNECTORS the FW1_*/SNMP_*/UNIFI_* variables are not read; the instances are checked instead
+        legacy = self.connector_specs is None
+        if legacy and (not self.fw1_key or not self.fw1_secret):
             problems.append("FW1_KEY / FW1_SECRET missing")
-        if not self.fw1_url.startswith(("http://", "https://")):
+        if legacy and not self.fw1_url.startswith(("http://", "https://")):
             problems.append("FW1_URL must be set (https://<opnsense>)")
         if self.public_url and not self.public_url.startswith(("http://", "https://")):
             problems.append("PUBLIC_URL must be a URL (https://<host>)")
-        if self.unifi_url and not self.unifi_url.startswith(("http://", "https://")):
+        if legacy and self.unifi_url and not self.unifi_url.startswith(("http://", "https://")):
             problems.append("UNIFI_URL must be a URL (https://<controller>)")
+        legacy_urls = (("FW1_URL", self.fw1_url), ("UNIFI_URL", self.unifi_url)) if legacy else ()
         # a URL without a host, or with an unclosed "[", passes the scheme check but fails on every request
-        for name, url in (("FW1_URL", self.fw1_url), ("PUBLIC_URL", self.public_url), ("UNIFI_URL", self.unifi_url)):
+        for name, url in legacy_urls[:1] + (("PUBLIC_URL", self.public_url),) + legacy_urls[1:]:
             if not url.startswith(("http://", "https://")):
                 continue  # empty or reported above
             try:
@@ -145,8 +206,7 @@ class Config:
         if not self.mailgun_api_base.startswith(("http://", "https://")):
             problems.append("MAILGUN_API_BASE must be a URL (https://api.mailgun.net or https://api.eu.mailgun.net)")
         # user:pass@host would end up in logs and error messages; credentials have their own variables
-        for name, url in (("FW1_URL", self.fw1_url), ("UNIFI_URL", self.unifi_url), ("PUBLIC_URL", self.public_url),
-                          ("MAILGUN_API_BASE", self.mailgun_api_base)):
+        for name, url in legacy_urls + (("PUBLIC_URL", self.public_url), ("MAILGUN_API_BASE", self.mailgun_api_base)):
             try:
                 netloc = urlparse(url).netloc
             except ValueError:  # e.g. an unclosed "[": reported above
@@ -163,7 +223,7 @@ class Config:
             problems.append("ONLINE_GRACE_MINUTES must not be negative")
         if self.online_grace_minutes > 10080:
             problems.append("ONLINE_GRACE_MINUTES must be at most 10080")
-        if self.dhcp_backend not in ("isc", "kea"):
+        if legacy and self.dhcp_backend not in ("isc", "kea"):
             problems.append("DHCP_BACKEND must be isc or kea")
         if self.lease_type_mode not in ("keep", "grace", "immediate"):
             problems.append("LEASE_TYPE_MODE must be keep, grace or immediate")
@@ -171,10 +231,17 @@ class Config:
             problems.append("POLL_SECONDS below 15 is unreasonable for the firewall")
         if self.poll_seconds > 86400:
             problems.append("POLL_SECONDS must be at most 86400")
-        if self.snmp_host and not self.snmp_enabled:
+        if legacy and self.snmp_host and not self.snmp_enabled:
             problems.append("SNMP_HOST set but SNMP_AUTH_KEY/SNMP_PRIV_KEY missing")
-        if self.snmp_host and self.snmp_auth not in ("SHA", "SHA256"):
+        if legacy and self.snmp_host and self.snmp_auth not in ("SHA", "SHA256"):
             problems.append("SNMP_AUTH must be SHA or SHA256")
-        if self.unifi_url and not self.unifi_enabled:
+        if legacy and self.unifi_url and not self.unifi_enabled:
             problems.append("UNIFI_URL set but UNIFI_USER/UNIFI_PASSWORD missing")
+        if not legacy:
+            problems += self.connector_problems
+            for spec in self.connector_specs:
+                problems += instance_problems(spec)
+            if not any("sighting" in cls.describe().produces for sp in self.connector_specs
+                       for cls in (registry().get(sp.type),) if cls):
+                problems.append("LW_CONNECTORS: at least one connector must produce sightings (e.g. type opnsense)")
         return problems

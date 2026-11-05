@@ -265,9 +265,10 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual((d["sw_port"], d["link"], d["wifi_ssid"]), ("", "wifi", "HomeNet"))
 
     def test_enrich_error_names_a_bare_exception(self):
-        col = Collector(self.cfg, self.db, FakeClient([]))
+        col = Collector(self.cfg, self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5")]))
         col._switch = type("W", (), {"snapshot": lambda self: (_ for _ in ()).throw(TimeoutError())})()
-        self.assertEqual(col._enrich()[2]["switch_error"], "TimeoutError")
+        col.run_once()
+        self.assertEqual(self.db.get_meta("switch_error"), "TimeoutError")
 
     def test_new_and_back_event_text(self):
         mac = "02:00:00:00:00:01"

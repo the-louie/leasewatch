@@ -83,6 +83,11 @@ def make_handler(cfg: Config, db: Database, version: str):
                 "stale": (now - last) > cfg.poll_seconds * 3 if last else True,
                 "switch": {"enabled": cfg.snmp_enabled, "name": cfg.snmp_name, "ok": m.get("switch_ok") == "1", "error": m.get("switch_error", ""), "macs": int(m.get("switch_macs") or 0)},
                 "unifi": {"enabled": cfg.unifi_enabled, "ok": m.get("unifi_ok") == "1", "error": m.get("unifi_error", ""), "clients": int(m.get("unifi_clients") or 0)},
+                # one entry per configured instance, in LW_CONNECTORS order; "switch"/"unifi" above stay for one release
+                "connectors": [{"name": s.name, "type": s.type, "ok": m.get(f"conn.{s.name}.ok") == "1",
+                                "error": m.get(f"conn.{s.name}.error", ""), "ts": int(m.get(f"conn.{s.name}.ts") or 0) or None,
+                                "ms": int(m.get(f"conn.{s.name}.ms") or 0), "count": int(m.get(f"conn.{s.name}.count") or 0),
+                                "enabled": m.get(f"conn.{s.name}.enabled", "1") == "1"} for s in cfg.instances],
             }
 
         # --- routes --------------------------------------------------------
@@ -118,6 +123,8 @@ def make_handler(cfg: Config, db: Database, version: str):
                     return self._json({"meta": self._meta(), "devices": db.devices()})
                 if p == "/api/devices.csv":
                     return self._csv()
+                if p == "/api/status":
+                    return self._json({"meta": self._meta()})
                 if p == "/api/stats":
                     return self._json({"meta": self._meta(), "stats": db.stats(cfg.new_days)})
                 if p == "/api/events":

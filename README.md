@@ -31,6 +31,14 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 - **Mail (Mailgun):** set `MAILGUN_KEY`, `MAILGUN_DOMAIN`, `MAIL_TO`; for an EU-region domain also `MAILGUN_API_BASE=https://api.eu.mailgun.net`.
 - Either source failing only greys its dot in the status pill; the last values stay.
 
+### Connectors
+
+Every source (the firewall, a switch, a UniFi controller) is a *connector instance*: a configured copy of a connector type (`opnsense`, `snmp_switch`, `unifi`) that reads its device once per poll and hands leasewatch plain records; it never writes to the database or to the device. A connector emits two kinds of record: a *sighting* says a MAC was seen with an IP, hostname or network (a lease, an ARP entry) and whether it is on the wire now, and an *attachment* says where a MAC hangs (a switch port, a Wi-Fi AP and SSID). At least one instance must produce sightings.
+
+Without `LW_CONNECTORS` the `FW1_*`, `SNMP_*` and `UNIFI_*` variables describe the instances `fw1`, `switch` and `unifi`, as before. With it, list the instance names (`a-z`, `0-9`, `-`; the order breaks ties in the merge) and configure each one with `LW_CONNECTOR__<NAME>__<KEY>`, the name upper-cased; `TYPE` is required, `TIMEOUT` (seconds, default 60) caps one collection, and any secret key also accepts `<KEY>_FILE`, a file whose content is the value (e.g. a Docker secret). The keys are the type's settings in upper case (e.g. `URL`, `KEY`, `SECRET`, `DHCP_BACKEND` for `opnsense`); see the commented block in `.env.example`. A wrong setting stops the start with a message such as `connector sw-rack (snmp_switch): HOST is required`.
+
+Each instance collects in its own thread. One that fails, or takes longer than its `TIMEOUT`, greys its status dot and keeps its last values; a collection still running at the next poll is skipped, not doubled. An instance that fails its first probe is retried with a backoff from `POLL_SECONDS` up to 10 minutes. The poll fails only when every sighting-producing instance failed. `/api/status` shows each instance's state (`ok`, `error`, last time, duration, record count).
+
 ## API
 
 | Method | Path | What |
@@ -40,6 +48,7 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 | POST | `/api/devices/<mac>` | `{"acked": bool, "name": str, "note": str}` (any subset) |
 | GET | `/api/stats` | counts, per-network, first-seen times of the last 30 days' newcomers |
 | GET | `/api/events` | last 300 events |
+| GET | `/api/status` | collector meta only, with `connectors`: one entry per instance (`name`, `type`, `ok`, `error`, `ts`, `ms`, `count`, `enabled`) |
 | GET | `/api/devices.csv` | CSV export (timestamps ISO 8601 in the container's `TZ`) |
 | GET | `/healthz` | 200 when the last poll succeeded and is fresh, else 503 |
 

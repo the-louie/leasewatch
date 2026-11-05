@@ -1,7 +1,8 @@
-import os, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
+from leasewatch import snmp_profiles
 from leasewatch.config import Config
 from leasewatch.connectors import (API_VERSION, Attachment, Batch, Connector, ConnectorError, HostContext, Sighting,
                                    make_redactor)
@@ -13,6 +14,7 @@ from leasewatch.fw1 import Fw1Error
 from leasewatch.fw1 import Sighting as Fw1Sighting
 from leasewatch.switch import build_snapshot
 from leasewatch.unifi import parse_clients
+from test_switch_profiles import FakePysnmp, FakeWalker, NoPysnmp
 
 CTX = HostContext(now=lambda: 1700000000)
 FW1 = {"url": "https://fw1.example.lan", "key": "k", "secret": "s"}
@@ -53,7 +55,7 @@ class DescribeTests(unittest.TestCase):
     def test_settings_cover_the_config_fields(self):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy"})
-        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "name", "user", "auth", "auth_key", "priv_key"})
+        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "name", "user", "auth", "auth_key", "priv_key", "profile", "profile_file", "min_macs"})
         self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "verify_tls", "proxy"})
 
     def test_wrappers_are_connectors(self):
@@ -74,9 +76,9 @@ class DescribeTests(unittest.TestCase):
 class ValidateTests(unittest.TestCase):
     def test_opnsense(self):
         p = OpnsenseConnector("fw1", {"url": "fw1.example.lan", "dhcp_backend": "dnsmasq", "verify_tls": "maybe"}, CTX).validate()
-        self.assertTrue(any("requires key" in x for x in p) and any("requires secret" in x for x in p), p)
+        self.assertTrue("connector fw1 (opnsense): KEY is required" in p and "connector fw1 (opnsense): SECRET is required" in p, p)
         self.assertTrue(any(x.startswith("url must be a URL") for x in p), p)
-        self.assertTrue(any("dhcp_backend must be one of isc, kea" in x for x in p), p)
+        self.assertTrue("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea" in p, p)
         self.assertTrue(any(x.startswith("verify_tls must be a boolean") for x in p), p)
         self.assertEqual(OpnsenseConnector("fw1", {**FW1, "url": "https://user:pw@fw1.example.lan"}, CTX).validate(), ["url must not contain credentials"])
         self.assertEqual(OpnsenseConnector("fw1", {**FW1, "url": "https://[fw1"}, CTX).validate(), ["url is not a valid URL"])
@@ -84,13 +86,13 @@ class ValidateTests(unittest.TestCase):
 
     def test_switch(self):
         p = SnmpSwitchConnector("switch", {"host": "10.0.0.2", "auth": "md5"}, CTX).validate()
-        self.assertTrue(any("requires auth_key" in x for x in p) and any("requires priv_key" in x for x in p), p)
-        self.assertTrue(any("auth must be one of SHA, SHA256" in x for x in p), p)
+        self.assertTrue("connector switch (snmp_switch): AUTH_KEY is required" in p and "connector switch (snmp_switch): PRIV_KEY is required" in p, p)
+        self.assertTrue("connector switch (snmp_switch): AUTH must be one of SHA, SHA256" in p, p)
         self.assertEqual(SnmpSwitchConnector("switch", {**SW, "auth": "sha-256"}, CTX).validate(), [])
 
     def test_unifi(self):
         p = UnifiConnector("unifi", {"url": "https://unifi.example.lan/"}, CTX).validate()
-        self.assertTrue(any("requires user" in x for x in p) and any("requires password" in x for x in p), p)
+        self.assertTrue("connector unifi (unifi): USER is required" in p and "connector unifi (unifi): PASSWORD is required" in p, p)
         self.assertEqual(UnifiConnector("unifi", {**UF, "url": "ftp://unifi.example.lan"}, CTX).validate(),
                          ["url must be a URL (https://<controller>)"])
 
@@ -126,6 +128,77 @@ class OpnsenseTests(unittest.TestCase):
         c = OpnsenseConnector("fw1", {**FW1, "url": "https://fw1.example.lan/", "dhcp_backend": "ISC"}, CTX)
         self.assertEqual((c.client.url, c.client.dhcp_backend), ("https://fw1.example.lan", "isc"))
         self.assertEqual(OpnsenseConnector("fw1", FW1, CTX).client.dhcp_backend, "kea")
+
+
+class SwitchProfileSettingTests(unittest.TestCase):
+    def profile_file(self, data) -> str:
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_profile_choices_are_the_builtin_profiles(self):
+        s = {x.key: x for x in SnmpSwitchConnector.describe().settings}
+        self.assertEqual(s["profile"].choices, snmp_profiles.BUILTIN)
+        self.assertFalse(s["profile"].required or s["profile_file"].required or s["min_macs"].required)
+
+    def test_resolution_order_file_then_name_then_detection(self):
+        path = self.profile_file({"profile": "mine", "api_version": 1, "extends": "routeros"})
+        c = SnmpSwitchConnector("switch", {**SW, "profile": "comware", "profile_file": path}, CTX)
+        self.assertEqual((c.validate(), c.client.profile_name), ([], "mine"))
+        self.assertEqual(SnmpSwitchConnector("switch", {**SW, "profile": "comware"}, CTX).client.profile_name, "comware")
+        auto = SnmpSwitchConnector("switch", SW, CTX).client
+        self.assertEqual((auto.profile, auto.min_macs), (None, None))
+        self.assertEqual(SnmpSwitchConnector("switch", {**SW, "min_macs": "3"}, CTX).client.min_macs, 3)
+
+    def test_validate_reports_bad_profile_settings_without_file_contents(self):
+        p = SnmpSwitchConnector("switch", {**SW, "profile": "nope"}, CTX).validate()
+        self.assertEqual(len(p), 1)
+        self.assertIn("PROFILE must be one of standard, comware", p[0])
+        self.assertEqual(SnmpSwitchConnector("switch", {**SW, "profile_file": "/nonexistent/x.json"}, CTX).validate(),
+                         ["connector switch (snmp_switch): PROFILE_FILE cannot be read"])
+        for data in ("{not json", {"profile": "TOPSECRET", "api_version": 1, "extends": "standard", "fdb": {"strategy": "TOPSECRET"}}):
+            p = SnmpSwitchConnector("switch", {**SW, "profile_file": self.profile_file(data)}, CTX).validate()
+            self.assertEqual(len(p), 1, p)
+            self.assertIn("PROFILE_FILE is not a valid snmp profile", p[0])
+            self.assertNotIn("TOPSECRET", p[0])
+        for v in ("0", "x", "-1", "2.5"):
+            self.assertEqual(SnmpSwitchConnector("switch", {**SW, "min_macs": v}, CTX).validate(),
+                             ["connector switch (snmp_switch): MIN_MACS must be an integer >= 1"], v)
+
+    def test_invalid_profile_settings_refuse_check_and_collect(self):
+        snap = build_snapshot([], [], [], [])
+        fake = type("W", (), {"snapshot": lambda self: snap, "probe": lambda self: ("", "")})
+        for bad in ({"profile_file": "/nonexistent/x.json"}, {"profile": "nope"}, {"min_macs": "0"}):
+            c = SnmpSwitchConnector("switch", {**SW, **bad}, CTX, client=fake())
+            for call in (c.check, c.collect):
+                with self.subTest(bad=bad, call=call.__name__), self.assertRaisesRegex(ConnectorError, "invalid profile settings"):
+                    call()
+
+
+class SwitchCheckTests(unittest.TestCase):
+    """check() is one GET of sysObjectID/sysDescr through the real client against a fake agent."""
+
+    def test_check_is_one_get_and_no_walk(self):
+        c = SnmpSwitchConnector("switch", SW, CTX)
+        with FakePysnmp(FakeWalker("comware")) as fake:
+            self.assertIsNone(c.check())
+        self.assertEqual([k for k, *_ in fake.calls], ["get"])
+        self.assertEqual(c.client.profile_name, "")  # a probe does not fix the profile
+
+    def test_check_errors_are_ui_safe_connectorerrors(self):
+        c = SnmpSwitchConnector("switch", SW, CTX)
+        with FakePysnmp(FakeWalker("comware")):
+            async def get_cmd(eng, user, tgt, ctx, *oids):
+                return "No SNMP response received before timeout", 0, 0, []
+            sys.modules["pysnmp.hlapi.v3arch.asyncio"].get_cmd = get_cmd
+            with self.assertRaises(ConnectorError) as cm:
+                c.check()
+        self.assertEqual(str(cm.exception), "snmp get sysObjectID: No SNMP response received before timeout")
+        self.assertNotIn("a" * 8, str(cm.exception))
+        with NoPysnmp(), self.assertRaisesRegex(ConnectorError, "^missing dependency pysnmp$"):
+            c.check()
 
 
 class SwitchConnectorTests(unittest.TestCase):
