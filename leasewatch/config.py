@@ -1,9 +1,11 @@
 """Configuration from environment variables (see .env.example)."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 
 def _env(name: str, default: str = "") -> str:
@@ -20,7 +22,12 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_bool(name: str, default: bool) -> bool:
     v = _env(name, "1" if default else "0").lower()
-    return v in ("1", "true", "yes", "on")
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    logging.getLogger("leasewatch").warning("%s=%r is not a boolean, using %s", name, v, default)
+    return default
 
 
 @dataclass
@@ -44,7 +51,10 @@ class Config:
     mailgun_domain: str = field(default_factory=lambda: _env("MAILGUN_DOMAIN"))
     mail_to: str = field(default_factory=lambda: _env("MAIL_TO"))
     mail_from_name: str = field(default_factory=lambda: _env("MAIL_FROM_NAME", "leasewatch"))
-    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL", ""))
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL", "").rstrip("/"))
+    # Host header values that may use the API (DNS-rebinding guard). Default: the host of PUBLIC_URL. "*" = any.
+    # IP literals and localhost are always accepted, because a rebinding attack has to use a name.
+    allowed_hosts: tuple = field(default_factory=lambda: tuple(x.strip().lower() for x in _env("ALLOWED_HOSTS").split(",") if x.strip()))
     # interfaces to ignore completely (comma separated interface identifiers, e.g. "wan,opt6")
     ignore_interfaces: tuple = field(default_factory=lambda: tuple(x for x in _env("IGNORE_INTERFACES", "wan,lo0").split(",") if x))
 
@@ -69,6 +79,25 @@ class Config:
     def unifi_enabled(self) -> bool:
         return bool(self.unifi_url and self.unifi_user and self.unifi_password)
 
+    def host_allowed(self, host: str) -> bool:
+        """`host` as sent in the Host header (may carry a port). See allowed_hosts."""
+        h = (host or "").strip().lower()
+        if not h:
+            return True  # HTTP/1.0 clients; a browser always sends Host
+        if h.startswith("["):
+            h = h[1:h.find("]")] if "]" in h else h
+        elif h.count(":") == 1:
+            h = h.rsplit(":", 1)[0]
+        if h in ("localhost", "localhost.") or "*" in self.allowed_hosts:
+            return True
+        try:
+            ipaddress.ip_address(h)
+            return True
+        except ValueError:
+            pass
+        allowed = set(self.allowed_hosts) or ({urlparse(self.public_url).hostname} if self.public_url else set())
+        return h in allowed or h.rstrip(".") in allowed
+
     @property
     def db_path(self) -> str:
         return os.path.join(self.data_dir, "leasewatch.sqlite3")
@@ -81,15 +110,21 @@ class Config:
         problems = []
         if not self.fw1_key or not self.fw1_secret:
             problems.append("FW1_KEY / FW1_SECRET missing")
-        if not self.fw1_url.startswith("http"):
+        if not self.fw1_url.startswith(("http://", "https://")):
             problems.append("FW1_URL must be set (https://<opnsense>)")
+        if self.public_url and not self.public_url.startswith(("http://", "https://")):
+            problems.append("PUBLIC_URL must be a URL (https://<host>)")
+        if self.new_days < 1:
+            problems.append("NEW_DAYS must be at least 1")
+        if self.online_grace_minutes < 0:
+            problems.append("ONLINE_GRACE_MINUTES must not be negative")
         if self.dhcp_backend not in ("isc", "kea"):
             problems.append("DHCP_BACKEND must be isc or kea")
         if self.poll_seconds < 15:
             problems.append("POLL_SECONDS below 15 is unreasonable for the firewall")
         if self.snmp_host and not self.snmp_enabled:
             problems.append("SNMP_HOST set but SNMP_AUTH_KEY/SNMP_PRIV_KEY missing")
-        if self.snmp_auth not in ("SHA", "SHA256"):
+        if self.snmp_host and self.snmp_auth not in ("SHA", "SHA256"):
             problems.append("SNMP_AUTH must be SHA or SHA256")
         if self.unifi_url and not self.unifi_enabled:
             problems.append("UNIFI_URL set but UNIFI_USER/UNIFI_PASSWORD missing")

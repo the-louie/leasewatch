@@ -1,0 +1,2 @@
+pysnmp>=7,<8
+cryptography

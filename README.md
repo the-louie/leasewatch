@@ -6,7 +6,7 @@
 
 - One row per MAC with vendor, IP, hostname, network (VLAN), lease type, first seen / last online, a history of address changes and an event log.
 - **Newest first**, a "not yet known" review queue, name + note per device, CSV export, search, filters, light/dark, phone layout.
-- Optional **"Connected via"**: switch port over SNMPv3 (Q-BRIDGE / IF / LLDP MIBs — any managed switch; uplink ports are named after the AP or switch behind them) and Wi-Fi SSID / AP / signal from a UniFi Network controller.
+- Optional **"Connected via"**: switch port over SNMPv3 (Q-BRIDGE / IF / LLDP MIBs — any managed switch; uplink ports are named after the AP or switch behind them; tested on Comware, LLDP port numbers are mapped through `lldpLocPortId`) and Wi-Fi SSID / AP / signal from a UniFi Network controller.
 - Backend: Python 3.12 standard library (`urllib`, `sqlite3`, `http.server`); the only pip dependency is `pysnmp` for the optional switch lookup. Frontend: one HTML page, vanilla JS/CSS, no build step.
 - Read-only towards the firewall: the API user needs just the DHCPv4 leases privilege (ISC or Kea, `DHCP_BACKEND`) and *Diagnostics: ARP Table*.
 
@@ -37,16 +37,16 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 | GET | `/api/devices` | all devices + collector meta |
 | GET | `/api/devices/<mac>` | one device with history and events |
 | POST | `/api/devices/<mac>` | `{"acked": bool, "name": str, "note": str}` (any subset) |
-| GET | `/api/stats` | counts, per-network, new-per-day (30 d) |
+| GET | `/api/stats` | counts, per-network, first-seen times of the last 30 days' newcomers |
 | GET | `/api/events` | last 300 events |
-| GET | `/api/devices.csv` | CSV export |
+| GET | `/api/devices.csv` | CSV export (timestamps ISO 8601 in the container's `TZ`) |
 | GET | `/healthz` | 200 when the last poll succeeded and is fresh, else 503 |
 
 ## Semantics
 
 - **Baseline:** everything present at the very first poll is marked `baseline` — not "new", no mail, sorted after real newcomers. An empty first poll is not taken as the baseline.
 - **New** = first seen within `NEW_DAYS` and not baseline. **Not yet known** = not marked known and not baseline.
-- **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device the firewall stops listing stays online for `ONLINE_GRACE_MINUTES`, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed, so the UI shows *last online*.
+- **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device that leaves the ARP table (or is no longer listed) stays online for `ONLINE_GRACE_MINUTES` after it was last seen on the wire, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed, so the UI shows *last online*.
 - **History** rows are written only when IP, hostname, network or lease type change (capped at 200 per device). **Events:** new, ip, hostname, vlan, lease_type, port, wifi, back (online again after > 1 day), acked / unacked; kept for a year.
 - Interfaces in `IGNORE_INTERFACES` (default WAN and loopback) are skipped.
 
@@ -58,7 +58,7 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 
 ## Security notes
 
-The page has no login: it is meant for a trusted LAN behind a reverse proxy. Anyone who can reach it can read the device list and mark devices known; nothing can be changed on the firewall through it. POSTs require `Content-Type: application/json` and a same-origin `Sec-Fetch-Site`, so a page on another site cannot submit them. The CSV export neutralises spreadsheet formula injection from untrusted hostnames.
+The page has no login: it is meant for a trusted LAN behind a reverse proxy. Anyone who can reach it can read the device list and mark devices known; nothing can be changed on the firewall through it. POSTs require `Content-Type: application/json` and a same-origin `Sec-Fetch-Site`, so a page on another site cannot submit them. Requests whose `Host` header is neither an IP address, `localhost` nor a name in `ALLOWED_HOSTS` (default: the host of `PUBLIC_URL`) get 421, which blocks DNS rebinding; set `ALLOWED_HOSTS=*` to turn that off. The CSV export neutralises spreadsheet formula injection from untrusted hostnames.
 
 ## Tests
 

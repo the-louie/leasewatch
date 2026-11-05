@@ -87,9 +87,11 @@
     $("#cTotal").textContent = s.total; $("#cOnline").textContent = s.online; $("#cNew").textContent = s.new; $("#cUnacked").textContent = s.unacked;
     $$(".card[data-filter]").forEach(c => { const on = c.dataset.filter === state.status && state.status !== "all"; c.classList.toggle("active", on); c.setAttribute("aria-pressed", on); });
     const bars = $("#bars"); bars.innerHTML = "";
+    const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const perDay = {}; for (const t of s.new_recent || []) { const k = dayKey(new Date(t * 1000)); perDay[k] = (perDay[k] || 0) + 1; }
     const days = []; const today = new Date(); today.setHours(0, 0, 0, 0);
     let max = 1;
-    for (let i = 29; i >= 0; i--) { const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i); const k = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; const n = s.new_per_day[k] || 0; max = Math.max(max, n); days.push([k, n]); }
+    for (let i = 29; i >= 0; i--) { const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i); const k = dayKey(d); const n = perDay[k] || 0; max = Math.max(max, n); days.push([k, n]); }
     for (const [k, n] of days) { const b = document.createElement("span"); b.style.height = n ? `${Math.max(18, Math.round(n / max * 100))}%` : "2px"; b.title = `${k}: ${n} new`; if (n) b.classList.add("has"); bars.appendChild(b); }
     $("#barsSum").textContent = `${days.reduce((a, [, n]) => a + n, 0)} in 30 d`;
   }
@@ -220,7 +222,8 @@
   }
 
   async function refreshDrawer(mac, focus) {
-    let r; try { r = await api(`/api/devices/${mac}`); } catch (e) { $("#dBody").innerHTML = `<p>${esc(e.message)}</p>`; return; }
+    let r; try { r = await api(`/api/devices/${mac}`); } catch (e) { if (state.open === mac) $("#dBody").innerHTML = `<p>${esc(e.message)}</p>`; return; }
+    if (state.open !== mac) return; // another device was opened while this one loaded
     const d = r.device;
     $("#dTitle").textContent = label(d);
     const b = $("#dBody");

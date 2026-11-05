@@ -29,7 +29,8 @@ def new_devices(cfg: Config, devices: list[dict]) -> None:
     lines = [f"{n} new device{'s' if n != 1 else ''} on the network:", ""]
     for d in devices:
         lines.append(f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or '(no hostname)':28}  {d['vendor'] or '?'}  [{d['vlan']}{', ' + d['lease_type'] if d['lease_type'] else ''}]")
-    lines += ["", f"Review and acknowledge: {cfg.public_url}/?filter=unacked"]
+    if cfg.public_url:
+        lines += ["", f"Review and acknowledge: {cfg.public_url}/?filter=unacked"]
     first = devices[0]
     who = first["hostname"] or first["vendor"] or first["mac"]
     subject = f"New device: {who} ({first['ip']}, {first['vlan']})" if n == 1 else f"{n} new devices on the network"

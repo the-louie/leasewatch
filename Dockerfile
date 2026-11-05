@@ -1,8 +1,9 @@
 FROM python:3.12-alpine
-RUN addgroup -S app && adduser -S -G app -h /app app && mkdir -p /data && chown app:app /data
+RUN apk add --no-cache tzdata && addgroup -S app && adduser -S -G app -h /app app && mkdir -p /data && chown app:app /data
 WORKDIR /app
 # the only non-stdlib dependency: pysnmp (SNMPv3 to the switch) and its crypto backend
-RUN pip install --no-cache-dir --root-user-action=ignore "pysnmp>=7,<8" cryptography
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 COPY leasewatch/ /app/leasewatch/
 USER app
 ENV DATA_DIR=/data LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

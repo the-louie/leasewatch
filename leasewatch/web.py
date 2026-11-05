@@ -87,9 +87,17 @@ def make_handler(cfg: Config, db: Database, version: str):
 
         do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed
 
+        def _host_ok(self) -> bool:
+            if cfg.host_allowed(self.headers.get("Host", "")):
+                return True
+            self._error(421, "unknown Host header; set ALLOWED_HOSTS or PUBLIC_URL")
+            return False
+
         def do_GET(self):
             u = urlparse(self.path)
             p = u.path
+            if not self._host_ok():
+                return
             try:
                 if p == "/":
                     return self._static("index.html")
@@ -124,6 +132,8 @@ def make_handler(cfg: Config, db: Database, version: str):
 
         def do_POST(self):
             p = urlparse(self.path).path
+            if not self._host_ok():
+                return
             m = re.match(r"^/api/devices/([0-9a-f:]{17})$", p)
             if not m:
                 return self._error(404, "not found")
@@ -172,7 +182,7 @@ def make_handler(cfg: Config, db: Database, version: str):
                 s = str(v)
                 return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
             def ts(t):
-                return time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else ""
+                return time.strftime("%Y-%m-%dT%H:%M%z", time.localtime(t)) if t else ""  # ISO 8601 with the server's UTC offset
             w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "note"])
             for d in db.devices():
                 w.writerow([d["mac"], d["ip"], cell(d["name"]), cell(d["hostname"]), cell(d["vendor"]), d["vlan"], d["lease_type"], d["sources"], d["online"],

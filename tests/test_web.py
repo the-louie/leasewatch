@@ -17,7 +17,6 @@ from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Fw1Error, Sighting  # noqa: E402
-from leasewatch import web  # noqa: E402
 from leasewatch.web import MAX_BODY, serve  # noqa: E402
 
 MAC1 = "aa:bb:cc:dd:ee:01"  # baseline device (present at first poll)
@@ -53,16 +52,9 @@ class WebTestCase(unittest.TestCase):
     def setUpClass(cls):
         cls._saved_env = dict(os.environ)
         logging.disable(logging.CRITICAL)  # the app logs failed polls / handler errors; keep test output clean
-        # Workaround for the bug pinned by BugRegressionTests.test_static_dir_is_normalised: when the package is
-        # imported through a non-normalised sys.path entry (test_collector.py inserts "<tests>/.."), web.STATIC_DIR
-        # contains "/../" and _static() 404s every file. Normalise it here so the HTTP tests exercise the real
-        # static handling independent of which test module imported the package first.
-        cls._saved_static_dir = web.STATIC_DIR
-        web.STATIC_DIR = os.path.normpath(web.STATIC_DIR)
 
     @classmethod
     def tearDownClass(cls):
-        web.STATIC_DIR = cls._saved_static_dir
         logging.disable(logging.NOTSET)
         os.environ.clear()
         os.environ.update(cls._saved_env)
@@ -264,7 +256,7 @@ class ApiReadTests(WebTestCase):
         vlans = {v["vlan"]: v for v in st["vlans"]}
         self.assertEqual(vlans["Clients"]["n"], 2)
         self.assertEqual(vlans["IOT"]["n"], 1)
-        self.assertEqual(sum(st["new_per_day"].values()), 2)
+        self.assertEqual(len(st["new_recent"]), 2)
         self.assertIn("meta", data)
 
     def test_events(self):
@@ -327,12 +319,11 @@ class ApiReadTests(WebTestCase):
         text = body.decode("utf-8-sig")
         lines = text.splitlines()
         self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
-        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
         self.assertEqual([l.split(",")[0] for l in lines[1:]], [MAC2, MAC3, MAC1])
         self.assertIn("Åkes TV", text)
         self.assertIn("Köksbolaget", text)
         # timestamps are rendered, not epoch
-        self.assertRegex(lines[1], r",\d{4}-\d{2}-\d{2} \d{2}:\d{2},\d{4}-\d{2}-\d{2} \d{2}:\d{2},")
+        self.assertRegex(lines[1], r",\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4},\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4},")
 
     def test_csv_quotes_commas_and_newlines_in_user_fields(self):
         self.post(MAC2, {"name": 'TV, "vardagsrum"', "note": "line1\nline2"})
@@ -568,7 +559,7 @@ class ApiWriteTests(WebTestCase):
             self.assertEqual(json.loads(body)["error"], "not found", path)
 
     def test_non_numeric_content_length_is_400(self):
-        raw = (f"POST /api/devices/{MAC1} HTTP/1.0\r\nHost: x\r\nContent-Type: application/json\r\n"
+        raw = (f"POST /api/devices/{MAC1} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                f"Content-Length: abc\r\n\r\n").encode()
         resp = self.raw_request(raw)
         self.assertTrue(resp.startswith(b"HTTP/1."), f"server dropped the connection without a response: {resp[:80]!r}")
@@ -576,7 +567,7 @@ class ApiWriteTests(WebTestCase):
         self.assertEqual(self.db.device(MAC1)["acked"], 0)
 
     def test_negative_content_length_is_400(self):
-        raw = (f"POST /api/devices/{MAC1} HTTP/1.0\r\nHost: x\r\nContent-Type: application/json\r\n"
+        raw = (f"POST /api/devices/{MAC1} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                f"Content-Length: -5\r\n\r\n").encode()
         resp = self.raw_request(raw)
         self.assertIn(b" 400 ", resp.split(b"\r\n", 1)[0])
@@ -643,24 +634,6 @@ class HeaderTests(WebTestCase):
 
 # ----------------------------------------------------------------------------
 class ConcurrencyTests(WebTestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Workaround for the bug pinned by BugRegressionTests.test_listen_backlog_absorbs_a_burst_of_clients: serve()
-        # keeps socketserver's default listen backlog of 5, so 25 clients connecting at once get kernel ListenOverflows
-        # and some see ECONNRESET before any handler runs. Raise it here so this test measures the handlers.
-        cls._saved_server_cls = web.ThreadingHTTPServer
-
-        class _BigBacklog(web.ThreadingHTTPServer):
-            request_queue_size = 128
-
-        web.ThreadingHTTPServer = _BigBacklog
-
-    @classmethod
-    def tearDownClass(cls):
-        web.ThreadingHTTPServer = cls._saved_server_cls
-        super().tearDownClass()
-
     def test_parallel_reads_and_acks_produce_no_500s(self):
         results = []
         errors = []
@@ -711,13 +684,12 @@ class ConcurrencyTests(WebTestCase):
 
 # ----------------------------------------------------------------------------
 class BugRegressionTests(unittest.TestCase):
-    """Reproductions of app bugs that the HTTP suite above works around; each should pass once the app is fixed."""
+    """Regression tests for fixed server bugs (STATIC_DIR normalisation, listen backlog)."""
 
     def test_static_dir_is_normalised(self):
-        # leasewatch/web.py:21 builds STATIC_DIR from __file__ without normpath/abspath. Imported through a path such
-        # as "<repo>/tests/../leasewatch" the constant keeps the "/../", and _static()'s guard
-        # `normpath(join(STATIC_DIR, name)).startswith(STATIC_DIR + os.sep)` is then false for every file -> all of
-        # "/", /static/style.css, /static/app.js, /static/favicon.svg answer 404.
+        # web.STATIC_DIR is built with realpath. Imported through a path such as "<repo>/tests/../leasewatch" a plain
+        # join would keep the "/../", and _static()'s guard `normpath(join(STATIC_DIR, name)).startswith(STATIC_DIR + os.sep)`
+        # would then be false for every file -> "/", /static/style.css, /static/app.js, /static/favicon.svg all 404.
         code = ("import os, sys\n"
                 "sys.path.insert(0, os.path.join('tests', '..'))\n"
                 "from leasewatch import web\n"
@@ -731,11 +703,10 @@ class BugRegressionTests(unittest.TestCase):
         self.assertEqual(guard_ok, "1", f"_static() guard rejects its own static dir {static_dir}")
 
     def test_listen_backlog_absorbs_a_burst_of_clients(self):
-        # leasewatch/web.py:166 builds a plain ThreadingHTTPServer, inheriting socketserver.TCPServer.request_queue_size
-        # = 5 (the listen(2) backlog). While the accept loop is busy, only backlog+1 handshakes can complete; the rest
-        # are dropped by the kernel (TcpExt ListenOverflows/ListenDrops) and a bursty client sees ECONNRESET or a
-        # SYN-retransmit stall. Deterministic reproduction: the accept loop is deliberately not started, 16 clients
-        # connect with a short timeout, and all of them must complete the handshake (backlog 5 lets 6 through).
+        # web.Server sets request_queue_size = 128. With socketserver's default listen(2) backlog of 5, only backlog+1
+        # handshakes complete while the accept loop is busy; the rest are dropped by the kernel (TcpExt ListenOverflows)
+        # and a bursty client sees ECONNRESET or a SYN-retransmit stall. Deterministic check: the accept loop is
+        # deliberately not started, 16 clients connect with a short timeout, and all must complete the handshake.
         tmp = tempfile.TemporaryDirectory()
         saved = dict(os.environ)
         try:
@@ -769,11 +740,6 @@ class BugRegressionTests(unittest.TestCase):
             tmp.cleanup()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-
 class ReleaseReviewTests(WebTestCase):
     def test_text_plain_with_json_suffix_is_rejected(self):
         st, body, _ = self.post(MAC2, {"note": "x"}, ctype="text/plain;application/json")
@@ -795,6 +761,22 @@ class ReleaseReviewTests(WebTestCase):
             st, hdrs, _ = self.req(m, "/api/devices")
             self.assertEqual(st, 405, m); self.assertEqual(hdrs.get("Allow"), "GET, HEAD, POST")
 
+    def test_unknown_host_header_is_421(self):
+        # DNS rebinding: a browser page at evil.example whose name now resolves to this server sends Host: evil.example
+        for path, method, body in (("/api/devices", "GET", None), (f"/api/devices/{MAC2}", "POST", b'{"acked":true}'), ("/", "GET", None)):
+            st, hdrs, data = self.req(method, path, body=body, headers={"Host": "evil.example", "Content-Type": "application/json"})
+            self.assertEqual(st, 421, (path, data)); self.assertEqual(json.loads(data)["error"][:12], "unknown Host")
+        self.assertEqual(self.db.device(MAC2)["acked"], 0)
+        for host in ("127.0.0.1:%d" % self.port, "localhost", "[::1]:8080"):
+            st, _, _ = self.req("GET", "/api/stats", headers={"Host": host}); self.assertEqual(st, 200, host)
+        os.environ["ALLOWED_HOSTS"] = "leases.lan"; self.cfg.allowed_hosts = ("leases.lan",)
+        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "leases.lan"}); self.assertEqual(st, 200)
+        st, _, _ = self.req("GET", "/api/stats", headers={"Host": "other.lan"}); self.assertEqual(st, 421)
+
     def test_index_only_at_root(self):
         st, _, _ = self.req("GET", "/static/index.html"); self.assertEqual(st, 404)
         st, _, _ = self.req("GET", "/?filter=new"); self.assertEqual(st, 200)
+
+
+if __name__ == "__main__":
+    unittest.main()

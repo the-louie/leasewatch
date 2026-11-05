@@ -1,6 +1,6 @@
 """Switch port per MAC over SNMPv3 (Q-BRIDGE-MIB forwarding table + IF-MIB names + LLDP neighbours).
 
-Works with the HP 5130 (Comware 7); the MIBs are standard so any managed switch should do.
+Tested on HP/H3C Comware 7; the MIBs are standard, so any managed switch with Q-BRIDGE and LLDP should do.
 pysnmp (7.x) is imported lazily so the rest of leasewatch works without it.
 """
 from __future__ import annotations
@@ -18,7 +18,8 @@ OID_FDB_PORT = "1.3.6.1.2.1.17.7.1.2.2.1.2"      # dot1qTpFdbPort: index vlan.ma
 OID_BASEPORT_IFINDEX = "1.3.6.1.2.1.17.1.4.1.2"  # dot1dBasePortIfIndex: bridge port -> ifIndex
 OID_IFNAME = "1.3.6.1.2.1.31.1.1.1.1"            # ifName: ifIndex -> name
 OID_LLDP_REM_SYSNAME = "1.0.8802.1.1.2.1.4.1.1.9"  # lldpRemSysName: timeMark.localPort.index -> neighbour name
-OID_LLDP_REM_PORTDESC = "1.0.8802.1.1.2.1.4.1.1.8"
+OID_LLDP_LOC_PORTID = "1.0.8802.1.1.2.1.3.7.1.3"    # lldpLocPortId: lldpLocPortNum -> port id (usually the ifName)
+OID_LLDP_LOC_PORTDESC = "1.0.8802.1.1.2.1.3.7.1.4"  # lldpLocPortDesc: lldpLocPortNum -> description
 UPLINK_MACS = 6  # a port with this many MACs (and no LLDP neighbour) is treated as an uplink/AP port anyway
 
 
@@ -49,20 +50,35 @@ class SwitchSnapshot:
         p = self.ports.get(hit[0])
         if not p:
             return f"port {hit[0]}", ""
-        return short_ifname(p.name), p.neighbor if p.uplink else ""
+        return short_ifname(p.name), (p.neighbor or f"{p.macs} devices") if p.uplink else ""
 
 
 def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], ifname: list[tuple[str, str]],
-                   lldp: list[tuple[str, str]]) -> SwitchSnapshot:
-    """Pure function over raw (index, value) walks, so it can be unit-tested without a switch."""
+                   lldp: list[tuple[str, str]], locports: list[tuple[str, str]] | None = None) -> SwitchSnapshot:
+    """Pure function over raw (index, value) walks, so it can be unit-tested without a switch.
+
+    lldpRemSysName is indexed by lldpLocPortNum, which is only the ifIndex on some vendors (Comware). `locports`
+    (lldpLocPortId / lldpLocPortDesc rows: lldpLocPortNum -> text) maps a port number to the interface whose ifName
+    matches; a number without a match is taken as an ifIndex."""
     bp2if = {int(k): int(v) for k, v in baseport}
     names = {int(k): str(v) for k, v in ifname}
+    by_name = {v: k for k, v in names.items()}
+    by_name.update({short_ifname(v): k for k, v in names.items()})
+    loc2if: dict[int, int] = {}
+    for num, text in locports or []:
+        try:
+            n, t = int(num), str(text).strip()
+        except ValueError:
+            continue
+        if t in by_name:
+            loc2if.setdefault(n, by_name[t])
     neighbors: dict[int, str] = {}
     for idx, name in lldp:
         parts = idx.split(".")
         if len(parts) >= 2:
             try:
-                neighbors[int(parts[1])] = str(name)
+                n = int(parts[1])
+                neighbors[loc2if.get(n, n)] = str(name)
             except ValueError:
                 pass
     snap = SwitchSnapshot()
@@ -91,7 +107,6 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
             p.uplink = True
         elif p.macs >= UPLINK_MACS:  # many MACs on one port without LLDP: an unmanaged switch or AP hangs there
             p.uplink = True
-            p.neighbor = f"{p.macs} devices"
     return snap
 
 
@@ -129,7 +144,8 @@ class SwitchClient:
             bp = [(k, int(v)) for k, v in await self._walk(eng, tgt, user, OID_BASEPORT_IFINDEX)]
             names = [(k, str(v)) for k, v in await self._walk(eng, tgt, user, OID_IFNAME)]
             lldp = [(k, str(v)) for k, v in await self._walk(eng, tgt, user, OID_LLDP_REM_SYSNAME)]
-            return build_snapshot(fdb, bp, names, lldp)
+            locports = [(k, str(v)) for oid in (OID_LLDP_LOC_PORTID, OID_LLDP_LOC_PORTDESC) for k, v in await self._walk(eng, tgt, user, oid)]
+            return build_snapshot(fdb, bp, names, lldp, locports)
         finally:
             eng.close_dispatcher()
 

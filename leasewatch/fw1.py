@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import logging
 import re
 import ssl
 import urllib.error
@@ -15,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+log = logging.getLogger("leasewatch.fw1")
+LEASE_ROWS = 5000
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 
@@ -100,9 +103,15 @@ class Fw1Client:
     # --- raw ---------------------------------------------------------------
     def leases_raw(self) -> list[dict]:
         path = "/api/kea/leases4/search" if self.dhcp_backend == "kea" else "/api/dhcpv4/leases/searchLease"
-        r = self._call(path, {"current": 1, "rowCount": 5000})
+        r = self._call(path, {"current": 1, "rowCount": LEASE_ROWS})
         if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
             raise Fw1Error("fw1 leases: unexpected response shape")
+        try:
+            total = int(r.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total > len(r["rows"]):
+            log.warning("lease list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)
         return r["rows"]
 
     def arp_raw(self) -> list[dict]:
@@ -141,11 +150,11 @@ class Fw1Client:
             mac = norm_mac(a.get("mac", ""))
             if not mac or a.get("permanent") or a.get("expired"):
                 continue
-            iface = a.get("intf", "")
+            iface = a.get("intf") or ""
             if skip(iface, a.get("intf_description")):
                 continue
             out.append(Sighting(
-                mac=mac, ip=a.get("ip", ""), hostname=(a.get("hostname") or "").strip(),
+                mac=mac, ip=a.get("ip") or "", hostname=(a.get("hostname") or "").strip(),
                 vendor=(a.get("manufacturer") or "").strip(),
                 vlan=(a.get("intf_description") or iface).strip(), iface=iface,
                 source="arp", lease_type="", online=True,

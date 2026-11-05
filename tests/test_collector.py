@@ -19,11 +19,12 @@ def S(mac, ip, host="", src="dhcp", vlan="Clients", lt="dynamic", online=True, v
 
 class CollectorTests(unittest.TestCase):
     def setUp(self):
+        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
         os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
 
     def test_merge_prefers_dhcp_hostname_and_arp_online(self):
         m = merge([S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="phone", online=False), S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="", src="arp")])
@@ -44,7 +45,7 @@ class CollectorTests(unittest.TestCase):
         col.run_once(); self.assertEqual(len(self.db.history("aa:bb:cc:dd:ee:02")), 2)
         self.assertIn("ip", [e["kind"] for e in self.db.events("aa:bb:cc:dd:ee:02")])
         c.sightings_data.pop(1); col.run_once(); self.assertEqual(self.db.device("aa:bb:cc:dd:ee:02")["online"], 1)  # grace period
-        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700 WHERE mac=?", ("aa:bb:cc:dd:ee:02",)); col.run_once(); self.assertEqual(self.db.device("aa:bb:cc:dd:ee:02")["online"], 0)
+        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700, last_online=last_online-700 WHERE mac=?", ("aa:bb:cc:dd:ee:02",)); col.run_once(); self.assertEqual(self.db.device("aa:bb:cc:dd:ee:02")["online"], 0)
         st = self.db.stats(7); self.assertEqual(st["total"], 2); self.assertEqual(st["new"], 1); self.assertEqual(st["unacked"], 1)
 
     def test_failed_poll_keeps_data_and_records_error(self):
@@ -63,17 +64,18 @@ class CollectorTests(unittest.TestCase):
 
 class CollectorRegressionTests(unittest.TestCase):
     def setUp(self):
+        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
         os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
 
     def test_grace_period_keeps_device_online_when_missing_from_one_poll(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
         c.sightings_data = []; col.run_once()
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 1, "still within the grace period")
-        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700"); col.run_once()
+        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700, last_online=last_online-700"); col.run_once()
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 0)
 
     def test_empty_first_poll_is_not_a_baseline(self):
@@ -92,7 +94,7 @@ class CollectorRegressionTests(unittest.TestCase):
 
     def test_failed_poll_ages_online_and_unexpected_exceptions_are_recorded(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
-        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700")
+        self.db._conn.execute("UPDATE devices SET last_seen=last_seen-700, last_online=last_online-700")
         c.sightings = lambda ignore=(): (_ for _ in ()).throw(RuntimeError("weird"))
         r = col.run_once(); self.assertFalse(r["ok"]); self.assertIn("weird", self.db.get_meta("last_error"))
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 0)
@@ -100,11 +102,12 @@ class CollectorRegressionTests(unittest.TestCase):
 
 class FixRegressionTests(unittest.TestCase):
     def setUp(self):
+        self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
         os.environ.update({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup()
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); os.environ.clear(); os.environ.update(self._env)
 
     def test_wifi_device_seen_wired_later_drops_wifi_details(self):
         from leasewatch.unifi import WifiInfo
@@ -127,6 +130,59 @@ class FixRegressionTests(unittest.TestCase):
         self.assertNotIn("Traceback", out.stderr)
         self.assertIn("not a log level", out.stderr)
         self.assertEqual(out.returncode, 2)  # stops at the (deliberately) missing FW1_URL, not at the log level
+
+    def test_dhcp_device_leaving_arp_keeps_online_during_grace(self):
+        mac = "aa:bb:cc:dd:ee:01"
+        c = FakeClient([S(mac, "10.0.0.5", "pc"), S(mac, "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
+        c.sightings_data = [S(mac, "10.0.0.5", "pc", online=False)]  # lease still listed, gone from ARP
+        col.run_once(); self.assertEqual(self.db.device(mac)["online"], 1)
+        self.db.q("UPDATE devices SET last_online=last_online-700"); col.run_once()
+        self.assertEqual(self.db.device(mac)["online"], 0)
+
+    def test_wifi_device_drops_old_switch_port(self):
+        from leasewatch.unifi import WifiInfo
+        from leasewatch.switch import build_snapshot
+        mac = "aa:bb:cc:dd:ee:01"
+        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        wifi = {}
+        col._unifi = type("U", (), {"clients": lambda self: wifi})()
+        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.170.187.204.221.238.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        col.run_once(); self.assertEqual((self.db.device(mac)["sw_port"], self.db.device(mac)["link"]), ("GE1/0/5", "wired"))
+        wifi[mac] = WifiInfo(ssid="HomeNet", ap="ap-hall")
+        col.run_once(); d = self.db.device(mac)
+        self.assertEqual((d["sw_port"], d["sw_via"], d["link"], d["wifi_ssid"]), ("", "", "wifi", "HomeNet"))
+
+    def test_config_validation(self):
+        for env, msg in [({"FW1_URL": "httpfoo"}, "FW1_URL must be set"), ({"NEW_DAYS": "0"}, "NEW_DAYS"), ({"ONLINE_GRACE_MINUTES": "-1"}, "ONLINE_GRACE"),
+                         ({"PUBLIC_URL": "leases.example"}, "PUBLIC_URL"), ({"SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "a", "SNMP_PRIV_KEY": "b", "SNMP_AUTH": "MD5"}, "SNMP_AUTH")]:
+            os.environ.update({"FW1_URL": "https://fw"}); os.environ.update(env)
+            self.assertTrue(any(msg in p for p in Config().validate()), (env, Config().validate()))
+            for k in env: os.environ.pop(k)
+        os.environ.update({"FW1_URL": "https://fw", "SNMP_AUTH": "MD5"})  # SNMP off: its auth setting is not checked
+        self.assertEqual(Config().validate(), [])
+
+    def test_host_allowed(self):
+        os.environ.update({"PUBLIC_URL": "https://leases.example.lan/"})
+        cfg = Config()
+        for h in ("leases.example.lan", "LEASES.example.lan:443", "10.0.0.5:8080", "[::1]:8080", "localhost", ""):
+            self.assertTrue(cfg.host_allowed(h), h)
+        for h in ("evil.example", "evil.example:8080", "leases.example.lan.evil.example"):
+            self.assertFalse(cfg.host_allowed(h), h)
+        os.environ["ALLOWED_HOSTS"] = "a.lan, b.lan"
+        self.assertTrue(Config().host_allowed("b.lan")); self.assertFalse(Config().host_allowed("leases.example.lan"))
+        os.environ["ALLOWED_HOSTS"] = "*"
+        self.assertTrue(Config().host_allowed("evil.example"))
+
+    def test_mail_text(self):
+        from leasewatch import notify
+        sent = []
+        notify._send = lambda cfg, subject, text: sent.append((subject, text))
+        devs = [{"mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.5", "hostname": "pc", "vendor": "Acme", "vlan": "LAN", "lease_type": "dynamic"}]
+        notify.new_devices(self.cfg, devs)
+        self.assertEqual(sent[-1][0], "New device: pc (10.0.0.5, LAN)"); self.assertNotIn("acknowledge", sent[-1][1])  # no PUBLIC_URL: no link
+        os.environ["PUBLIC_URL"] = "https://leases.example.lan"
+        notify.new_devices(Config(), devs + devs)
+        self.assertEqual(sent[-1][0], "2 new devices on the network"); self.assertIn("https://leases.example.lan/?filter=unacked", sent[-1][1])
 
     def test_dhcp_backend_is_validated(self):
         os.environ["DHCP_BACKEND"] = "dnsmasq"

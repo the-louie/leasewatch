@@ -1,6 +1,6 @@
 """Wi-Fi details per MAC from a self-hosted UniFi Network controller (classic session API, read-only user).
 
-GET /api/s/<site>/stat/sta gives every active client: ap_mac, essid, channel, radio, rssi/signal, is_wired,
+GET /api/s/<site>/stat/sta gives every active client: ap_mac, essid, channel, radio, signal, is_wired,
 and the operator-set alias ("name"). /stat/device maps ap_mac to the AP's name.
 """
 from __future__ import annotations
@@ -42,13 +42,11 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
         if not mac:
             continue
         wired = bool(c.get("is_wired"))
-        sig = c.get("signal", c.get("rssi"))
+        sig = c.get("signal")  # dBm; "rssi" is an SNR-like positive number, not a usable fallback
         try:
             sig = int(sig) if sig is not None else None
         except (TypeError, ValueError):
             sig = None
-        if sig is not None and sig > 0:  # some firmwares report rssi as a positive number
-            sig = -sig
         radio = str(c.get("radio") or "")
         out[mac] = WifiInfo(
             ssid="" if wired else str(c.get("essid") or ""),

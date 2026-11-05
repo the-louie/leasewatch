@@ -12,7 +12,7 @@ services:
     environment:
       VIRTUAL_HOST: leases.example.lan
       VIRTUAL_PORT: "8080"
-      TZ: UTC
+      TZ: UTC  # your zone (e.g. Europe/Stockholm): used for log and CSV timestamps; the UI uses the browser's zone
     volumes:
       - ./data:/data
     networks:

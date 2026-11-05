@@ -28,6 +28,16 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(short_ifname("Ten-GigabitEthernet1/0/50"), "XGE1/0/50"); self.assertEqual(short_ifname("Bridge-Aggregation1"), "BAGG1")
 
 
+    def test_lldp_local_port_number_is_mapped_through_locport_id(self):
+        # a switch whose lldpLocPortNum (3) is not the ifIndex (14): lldpLocPortId names the interface
+        s = build_snapshot([("1.1.2.3.4.5.1", 14)], [("14", 14)], [("14", "GigabitEthernet1/0/14"), ("3", "GigabitEthernet1/0/3")],
+                           [("1.3.1", "ap-hall")], locports=[("3", "GigabitEthernet1/0/14")])
+        self.assertEqual(s.ports[14].neighbor, "ap-hall"); self.assertEqual(s.ports[3].neighbor, "")
+        self.assertEqual(s.describe("01:02:03:04:05:01"), ("GE1/0/14", "ap-hall"))
+        # without locport rows the number is used as the ifIndex (Comware)
+        s = build_snapshot([], [], [("3", "GigabitEthernet1/0/3")], [("1.3.1", "ap-hall")])
+        self.assertEqual(s.ports[3].neighbor, "ap-hall")
+
     def test_fdb_port_zero_is_skipped(self):
         s = build_snapshot([("1.170.187.204.221.238.2", 0)], [], [], [])
         self.assertEqual(s.describe("aa:bb:cc:dd:ee:02"), ("", ""))
@@ -58,7 +68,9 @@ class Fw1Tests(unittest.TestCase):
                 {"hwaddr": "aa:bb:cc:dd:ee:02", "address": "10.0.0.6", "hostname": "", "state": 0, "if": "lan", "if_descr": "LAN"},
                 {"hwaddr": "aa:bb:cc:dd:ee:03", "address": "10.0.0.7", "state": "2", "if": "lan"},       # expired-reclaimed
                 {"hwaddr": "aa:bb:cc:dd:ee:04", "address": "10.0.0.8", "state": "0", "if": "wan"}]      # ignored interface
+        self.ARP = self.ARP + [{"mac": "aa:bb:cc:dd:ee:05", "ip": None, "intf": None, "intf_description": None}]  # bug 12: null fields
         s, _ = self.client("kea", rows).sightings(("wan",))
+        self.assertIn("aa:bb:cc:dd:ee:05", {x.mac for x in s if x.source == "arp"})
         self.assertEqual(self.calls[0], "/api/kea/leases4/search")
         d = {x.mac: x for x in s if x.source == "dhcp"}
         self.assertEqual(sorted(d), ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"])
@@ -75,7 +87,7 @@ class UnifiTests(unittest.TestCase):
         r = parse_clients(sta, dev)
         a = r["aa:bb:cc:dd:ee:01"]; self.assertEqual((a.ssid, a.ap, a.signal, a.radio, a.channel, a.wired, a.alias), ("HomeNet", "ap-hall", -61, "5 GHz", 44, False, "Alex iPad"))
         b = r["aa:bb:cc:dd:ee:02"]; self.assertTrue(b.wired); self.assertEqual(b.ssid, ""); self.assertEqual(b.alias, "NAS")
-        c = r["aa:bb:cc:dd:ee:03"]; self.assertEqual((c.signal, c.radio, c.channel, c.ap), (-55, "2.4 GHz", None, ""))
+        c = r["aa:bb:cc:dd:ee:03"]; self.assertEqual((c.signal, c.radio, c.channel, c.ap), (None, "2.4 GHz", None, ""))  # rssi is not dBm
         self.assertNotIn("bad", r)
 
 

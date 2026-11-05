@@ -93,7 +93,8 @@ class Database:
         return r[0]["value"] if r else default
 
     def set_meta(self, key: str, value: str, conn=None) -> None:
-        (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+        with self._lock:  # RLock: harmless inside tx(), required outside it
+            (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
     def all_meta(self) -> dict:
         return {r["key"]: r["value"] for r in self.q("SELECT key, value FROM meta")}
@@ -139,10 +140,10 @@ class Database:
     def stats(self, new_days: int) -> dict:
         now = int(time.time())
         rows = self.q("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices GROUP BY vlan ORDER BY n DESC")
-        per_day = self.q("SELECT date(first_seen,'unixepoch','localtime') d, COUNT(*) n FROM devices WHERE baseline=0 AND first_seen>=? GROUP BY d", (now - 30 * 86400,))
+        recent = self.q("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,))
         tot = self.q("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices", (now - new_days * 86400,))[0]
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],
-            "new_per_day": {r["d"]: r["n"] for r in per_day},
+            "new_recent": [r["first_seen"] for r in recent],  # epochs; the browser buckets them by its own local day
         }

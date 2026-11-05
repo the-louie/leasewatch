@@ -98,7 +98,7 @@ class Collector:
             self.db.set_meta("last_error_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "0", c)
             # the grace rule still applies while fw1 is unreachable: nothing stays "online" forever
-            c.execute("UPDATE devices SET online=0 WHERE online=1 AND last_seen<?", (now - self.cfg.online_grace_minutes * 60,))
+            c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
         return {"ok": False, "error": msg}
 
     def run_once(self) -> dict:
@@ -152,25 +152,27 @@ class Collector:
                               (mac, now, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vlan or cur["vlan"], m.lease_type or cur["lease_type"]))
                     touched_history.append(mac)
                     changes += 1
+                # not on the wire right now: stays online until the grace period after its last sighting has passed
+                online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= grace)
                 c.execute(
                     "UPDATE devices SET last_seen=?, last_online=COALESCE(?, last_online), ip=?, hostname=?, vendor=?, vlan=?, iface=?, lease_type=?, sources=?, online=? WHERE mac=?",
                     (now, now if m.online else None, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vendor or cur["vendor"],
-                     m.vlan or cur["vlan"], m.iface or cur["iface"], m.lease_type or cur["lease_type"], sources, int(m.online), mac))
+                     m.vlan or cur["vlan"], m.iface or cur["iface"], m.lease_type or cur["lease_type"], sources, int(online), mac))
             # --- optional enrichers: switch port and Wi-Fi ---
             if snap is not None or wifi:
                 rows = {r["mac"]: dict(r) for r in c.execute("SELECT mac, sw_port, sw_via, wifi_ssid, wifi_ap, link, online, hostname, name FROM devices").fetchall()}
                 if snap is not None:
                     # an uplink port without an LLDP name: if an infrastructure device (AP, switch) sits on it, name the port after it
                     for p in snap.ports.values():
-                        if p.uplink and p.neighbor.endswith(" devices"):
-                            for mac2, (ifi, _vlan) in snap.by_mac.items():
-                                r2 = rows.get(mac2)
-                                if ifi == p.ifindex and r2 and INFRA_RE.match(r2["name"] or r2["hostname"] or ""):
-                                    p.neighbor = r2["name"] or r2["hostname"]
-                                    break
+                        if p.uplink and not p.neighbor:
+                            infra = sorted(r2["name"] or r2["hostname"] for mac2, (ifi, _vlan) in snap.by_mac.items()
+                                           for r2 in (rows.get(mac2),) if ifi == p.ifindex and r2 and INFRA_RE.match(r2["name"] or r2["hostname"] or ""))
+                            if infra:
+                                p.neighbor = infra[0]
                 for mac, cur in rows.items():
                     sets, params = [], []
-                    if snap is not None and cur["online"]:
+                    w0 = wifi.get(mac) if wifi else None
+                    if snap is not None and cur["online"] and not (w0 and not w0.wired):
                         port, via = snap.describe(mac)
                         if port and (port != cur["sw_port"] or via != cur["sw_via"]):
                             if cur["sw_port"] and port != cur["sw_port"]:
@@ -184,6 +186,8 @@ class Collector:
                                     c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "wifi", f"{cur['wifi_ssid']} @ {cur['wifi_ap'] or '?'} -> {w.ssid} @ {w.ap or '?'}"))
                             sets += ["wifi_ssid=?", "wifi_ap=?", "wifi_signal=?", "wifi_radio=?", "wifi_alias=?", "link=?"]
                             params += [w.ssid, w.ap, w.signal, w.radio, w.alias, "wifi"]
+                            if cur["sw_port"] and "sw_port=?" not in sets:  # on Wi-Fi now: the switch port it had on a cable is stale
+                                sets += ["sw_port=?", "sw_via=?"]; params += ["", ""]
                         elif w and w.wired:  # UniFi says wired now: drop the old Wi-Fi details
                             sets += ["wifi_ssid=?", "wifi_ap=?", "wifi_signal=?", "wifi_radio=?", "wifi_alias=?", "link=?"]
                             params += ["", "", None, "", w.alias, "wired"]
@@ -194,8 +198,8 @@ class Collector:
                         c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
             for k, v in enrich_status.items():
                 self.db.set_meta(k, v, c)
-            # devices not listed for longer than the grace period go offline (listed ones were set above)
-            c.execute("UPDATE devices SET online=0 WHERE online=1 AND last_seen<?", (grace,))
+            # devices not seen on the wire for longer than the grace period go offline
+            c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (grace,))
             for mac in touched_history:
                 c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
             c.execute("DELETE FROM events WHERE ts<?", (now - EVENT_DAYS * 86400,))
