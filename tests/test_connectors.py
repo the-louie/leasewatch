@@ -82,8 +82,8 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual(SnmpSwitchConnector.describe().roles, frozenset())
 
     def test_redactor(self):
-        self.assertEqual(make_redactor(["abc", "", "abcdef"])("x abcdef abc"), "x *** ***")
-        self.assertEqual(make_redactor([])("abc"), "abc")
+        self.assertEqual(make_redactor(["abcd-secret", "", "abcd-secret-long"])("x abcd-secret-long abcd-secret"), "x *** ***")
+        self.assertEqual(make_redactor([])("abcd-secret"), "abcd-secret")
 
 
 class ValidateTests(unittest.TestCase):
@@ -316,9 +316,9 @@ class UnifiConnectorTests(unittest.TestCase):
         b = c.collect()
         self.assertEqual(b.stats, {"clients": 2})
         by = {a.mac: a for a in b.attachments}
-        self.assertEqual(by["aa:bb:cc:dd:ee:01"], Attachment(mac="aa:bb:cc:dd:ee:01", source="unifi", observed_at=1700000000, link="wifi",
+        self.assertEqual(by["aa:bb:cc:dd:ee:01"], Attachment(mac="aa:bb:cc:dd:ee:01", source="unifi", observed_at=1700000000, link="wifi", present=True,
                                                              ssid="HomeNet", ap="ap-hall", signal=-61, radio="5 GHz", alias="Alex's iPad"))
-        self.assertEqual(by["aa:bb:cc:dd:ee:02"], Attachment(mac="aa:bb:cc:dd:ee:02", source="unifi", observed_at=1700000000, link="wired", alias="NAS"))
+        self.assertEqual(by["aa:bb:cc:dd:ee:02"], Attachment(mac="aa:bb:cc:dd:ee:02", source="unifi", observed_at=1700000000, link="wired", present=True, alias="NAS"))
 
     def test_errors_become_connectorerror(self):
         c = UnifiConnector("unifi", UF, CTX, client=Raises(RuntimeError("unifi: HTTP 403")))
@@ -370,7 +370,7 @@ class LegacyTests(unittest.TestCase):
         cfg = self.cfg({"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s", "DHCP_BACKEND": "isc",
                         "FW1_VERIFY_TLS": "0", "IGNORE_INTERFACES": "wan,opt6", "PROXY_FOR_LAN": "1",
                         "SNMP_HOST": "10.0.0.2", "SNMP_NAME": "sw-rack", "SNMP_AUTH": "sha256", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8,
-                        "UNIFI_URL": "https://unifi.example.lan/", "UNIFI_USER": "ro", "UNIFI_PASSWORD": "pw", "UNIFI_SITE": "home"})
+                        "UNIFI_URL": "https://unifi.example.lan/", "UNIFI_USER": "ro", "UNIFI_PASSWORD": "pw-secret", "UNIFI_SITE": "home"})
         conns = legacy_instances(cfg)
         self.assertEqual(list(conns), ["fw1", "switch", "unifi"])
         for c in conns.values():
@@ -383,9 +383,9 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(conns["switch"].settings["name"], "sw-rack")
         uf = conns["unifi"].client.cfg
         self.assertEqual((uf.unifi_url, uf.unifi_site, uf.unifi_user, uf.unifi_password, uf.unifi_verify_tls, uf.lan_proxy),
-                         ("https://unifi.example.lan", "home", "ro", "pw", True, True))
-        self.assertNotIn("pw", repr(uf)); self.assertNotIn("a" * 8, repr(sw))
-        self.assertEqual(fw.ctx.redact("bad pw here"), "bad *** here")
+                         ("https://unifi.example.lan", "home", "ro", "pw-secret", True, True))
+        self.assertNotIn("pw-secret", repr(uf)); self.assertNotIn("a" * 8, repr(sw))
+        self.assertEqual(fw.ctx.redact("bad pw-secret here"), "bad *** here")
 
     def test_injected_client_is_used(self):
         fake = FakeFw1([])

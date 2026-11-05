@@ -512,6 +512,49 @@ class SchemaVersionTests(unittest.TestCase):
         finally:
             db._conn.close()
 
+    def test_non_integer_schema_version_is_treated_as_1(self):
+        db = Database(self.path)
+        db.set_meta("schema_version", "two"); db._conn.execute("DROP TABLE seen"); db._conn.close()
+        with self.assertLogs("leasewatch.db", "WARNING") as logs:
+            db = Database(self.path)
+        try:
+            self.assertIn("not a number; treated as 1", logs.output[0])
+            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(db.seen("02:00:00:00:00:01"), [])  # step 2 ran again
+        finally:
+            db._conn.close()
+
+    def test_newer_schema_version_warns_and_is_left_alone(self):
+        db = Database(self.path)
+        db.set_meta("schema_version", "9"); db._conn.close()
+        with self.assertLogs("leasewatch.db", "WARNING") as logs:
+            db = Database(self.path)
+        try:
+            self.assertEqual(logs.output, ["WARNING:leasewatch.db:database schema 9 is newer than this version (2); no migration"])
+            self.assertEqual(db.get_meta("schema_version"), "9")
+        finally:
+            db._conn.close()
+
+    def test_seen_rows_of_unconfigured_instances_are_pruned_at_startup(self):
+        env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        try:
+            cfg = Config(); db = Database(cfg.db_path)
+            try:
+                mac = "02:00:00:00:00:01"
+                db._conn.executemany("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,1,1)",
+                                     [(mac, "fw1"), (mac, "sw-old"), (mac, "unifi-old")])
+                with self.assertLogs("leasewatch.collector", "INFO") as logs:
+                    Collector(cfg, db, FakeClient([]))
+                self.assertEqual([r["source"] for r in db.seen(mac)], ["fw1"])
+                self.assertEqual([m for m in logs.output if "seen rows" in m],
+                                 ["INFO:leasewatch.collector:removed 2 seen rows of instances that are no longer configured"])
+                with self.assertNoLogs("leasewatch.collector", "INFO"):
+                    Collector(cfg, db, FakeClient([]))  # nothing left to prune: no log line
+            finally:
+                db._conn.close()
+        finally:
+            restore(env)
+
     def test_seen_upsert_keeps_last_present_on_a_listing_without_presence(self):
         env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
         try:

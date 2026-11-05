@@ -1,11 +1,14 @@
 """SQLite storage: devices (one row per MAC), change history, events, meta."""
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+
+log = logging.getLogger("leasewatch.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -77,7 +80,14 @@ class Database:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         if not self.get_meta("schema_version"):
             self.set_meta("schema_version", "1")
-        version = int(self.get_meta("schema_version"))
+        raw = self.get_meta("schema_version")
+        try:
+            version = int(raw)
+        except ValueError:  # a hand-edited or damaged value: the steps are idempotent, so re-running them is safe
+            log.warning("database schema_version %r is not a number; treated as 1", raw[:40])
+            version = 1
+        if version > SCHEMA_VERSION:  # written by a newer leasewatch: never step it down or touch its tables
+            log.warning("database schema %d is newer than this version (%d); no migration", version, SCHEMA_VERSION)
         for step in range(version + 1, SCHEMA_VERSION + 1):
             with self.tx() as c:  # the step and its version number together, so a crash in between re-runs the step
                 c.execute(VERSION_STEPS[step])

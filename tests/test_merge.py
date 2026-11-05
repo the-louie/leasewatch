@@ -1,5 +1,6 @@
 """merge() called directly with Batch objects: (prev rows, batches, state) -> rows, events, history."""
 import itertools, logging, os, sys, tempfile, unittest
+from dataclasses import replace
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -227,18 +228,55 @@ CASES = [
      [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/48", "sw1", True, via="sw-2")]),
                 "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2")])}, {},
      {A: dict(sw_port="GE1/0/7", sw_via="", link="wired", loc_source="sw2")}, [], []),
-    ("two switches, two edge ports: the newest observation wins",
+    ("two switches, two edge ports: observed_at is ignored (C6b), instance order",
      [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1", at=NOW - 120)]),
                 "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2", at=NOW)])}, {},
-     {A: dict(sw_port="GE1/0/7", loc_source="sw2")}, [], []),
+     {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [], []),
     ("two switches, two edge ports, same time: instance order",
      [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
                 "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2")])}, {},
      {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [], []),
-    ("two uplinks: newest, and shown via",
+    ("two uplinks: instance order (not the newest), and shown via",
      [row(A)], {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/47", "sw1", True, NOW - 60, "sw-2")]),
                 "sw2": Batch(attachments=[swp(A, "GE1/0/1", "sw2", True, NOW, "sw-1")])}, {},
+     {A: dict(sw_port="GE1/0/47", sw_via="sw-2", loc_source="sw1")}, [], []),
+    # C6b (1): the switch that holds a wired device failed this poll
+    ("sw2 holds the device and fails while sw1 offers an uplink: port kept, no event",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/48", "sw1", True, via="sw-2")]),
+      "sw2": ConnectorFailure("sw2", "TimeoutError", NOW)}, {},
+     {A: dict(sw_port="GE1/0/7", sw_via="", link="wired", loc_source="sw2")}, [], []),
+    ("sw2 holds the device and fails while sw1 offers an edge port: port kept, no event",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
+      "sw2": ConnectorFailure("sw2", "TimeoutError", NOW)}, {},
+     {A: dict(sw_port="GE1/0/7", link="wired", loc_source="sw2")}, [], []),
+    ("a failed switch that does not hold the device protects nothing",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
+      "sw3": ConnectorFailure("sw3", "TimeoutError", NOW)}, {},
+     {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [(A, "port", "GE1/0/7 -> GE1/0/3")], []),
+    # C6b (2): sticky between equal ranks
+    ("two edge ports: the switch that already holds the device stays (sticky over instance order)",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1", at=NOW)]),
+      "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2", at=NOW - 30)])}, {},
+     {A: dict(sw_port="GE1/0/7", loc_source="sw2")}, [], []),
+    ("two uplinks: sticky too",
+     [row(A, link="wired", sw_port="GE1/0/1", sw_via="sw-1", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/47", "sw1", True, via="sw-2")]),
+      "sw2": Batch(attachments=[swp(A, "GE1/0/1", "sw2", True, via="sw-1")])}, {},
      {A: dict(sw_port="GE1/0/1", sw_via="sw-1", loc_source="sw2")}, [], []),
+    ("sticky never beats an edge port: the holder now offers only an uplink",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]),
+      "sw2": Batch(attachments=[swp(A, "GE1/0/48", "sw2", True, via="sw-1")])}, {},
+     {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [(A, "port", "GE1/0/7 -> GE1/0/3")], []),
+    ("the holder no longer lists the device: instance order",
+     [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")],
+     {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]), "sw2": Batch(),
+      "sw3": Batch(attachments=[swp(A, "GE1/0/9", "sw3")])}, {},
+     {A: dict(sw_port="GE1/0/3", loc_source="sw1")}, [(A, "port", "GE1/0/7 -> GE1/0/3")], []),
     ("only the losing uplink moved: no port event, port kept",
      [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2", last_online=NOW, last_seen=NOW, sources="arp,dhcp",
           hostname="pc", lease_type="dynamic")],
@@ -299,6 +337,32 @@ class MergeTableTests(unittest.TestCase):
                                         "unifi": Batch(attachments=[wifi(B)]), "sw2": ConnectorFailure("sw2", "x", NOW)},
                              controllers=CTRL)
         self.assertEqual(sorted(res.seen), [(A, "fw1", NOW, NOW), (A, "sw1", NOW, None), (B, "fw1", NOW, None), (B, "unifi", NOW, None)])
+
+    def test_two_edge_ports_alternating_walk_order_stay_stable(self):
+        """C6b (2): which switch's walk ends last alternates per poll; the winner must not flap (no port events)."""
+        rows = [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")]
+        for p in range(4):
+            early, late = (NOW - 5, NOW) if p % 2 else (NOW, NOW - 5)
+            res = self.run_merge(rows, {"fw1": fw1(arp(A)), "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1", at=early)]),
+                                        "sw2": Batch(attachments=[swp(A, "GE1/0/7", "sw2", at=late)])})
+            self.assertEqual((res.rows[A]["sw_port"], res.rows[A]["loc_source"], res.events), ("GE1/0/7", "sw2", []))
+            rows = [res.rows[A]]
+
+    def test_present_attachment_sets_last_present_not_online(self):
+        """C6b (3): a controller's active client is "on the wire" for that instance; online stays sighting-only."""
+        res = self.run_merge([row(B, online=0, last_online=None)],
+                             {"fw1": fw1(S(B, "10.0.0.9", presence=False)),
+                              "unifi": Batch(attachments=[replace(wifi(B), present=True)]),
+                              "sw1": Batch(attachments=[swp(B, "GE1/0/3", "sw1")])}, controllers=CTRL)
+        self.assertEqual(sorted(res.seen), [(B, "fw1", NOW, None), (B, "sw1", NOW, None), (B, "unifi", NOW, NOW)])
+        self.assertEqual((res.rows[B]["online"], res.rows[B]["last_online"]), (0, None))
+
+    def test_unifi_attachments_are_present(self):
+        from leasewatch.connectors.unifi import to_attachments
+        from leasewatch.unifi import WifiInfo
+        out = to_attachments({A: WifiInfo(ssid="HomeNet"), B: WifiInfo(wired=True)}, "unifi", NOW)
+        self.assertEqual([a.present for a in out], [True, True])  # stat/sta lists only active clients, wired or not
+        self.assertFalse(swp(A, "GE1/0/3", "sw1").present)  # the default: an FDB entry is not present
 
     def test_normalise_batch(self):
         b = Batch(sightings=[Sighting(mac="02:00:00:00:00:0A", source="", kind="arp", presence=True, observed_at=NOW),

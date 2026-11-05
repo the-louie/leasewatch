@@ -359,6 +359,12 @@ class ThreadTests(Base):
             for f in forms:
                 self.assertNotIn(f, out)
 
+    def test_short_secret_is_not_masked(self):
+        """A one-letter secret (FW1_SECRET=s in tests) must not mangle unrelated text; a 4-character one is masked."""
+        from leasewatch.connectors import make_redactor
+        self.assertEqual(make_redactor(["s"])("snmp timeout"), "snmp timeout")
+        self.assertEqual(make_redactor(["s", "abcd"])("snmp abcd timeout"), "snmp *** timeout")
+
     def test_passed_check_is_not_rerun_after_a_failed_collect(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})
         x = col._connectors["x"]

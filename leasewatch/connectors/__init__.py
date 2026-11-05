@@ -91,13 +91,15 @@ class Attachment:
     """Where one device hangs: a switch port, a Wi-Fi AP, a port behind a controller-managed switch.
 
     mac, source, observed_at: as for Sighting (the host normalises mac and fills source; observed_at is
-    informational in API 1). link: exactly "wired" or "wifi"; any other value is ignored by the host (logged once).
+    informational: the merge never ranks by it, a walk stamps all its rows with one time). link: exactly "wired" or "wifi"; any other value is ignored by the host (logged once).
     From an instance with the "controller" role, "wired" means the controller sees the device on a cable: its
     Wi-Fi details are cleared. device: the switch/AP name as the operator knows it. port: short port label
     ("GE1/0/14"), "" for Wi-Fi. uplink: the port leads to more infrastructure, so it is not where the device
     really is; via: what sits behind that port (LLDP neighbour or "7 devices"). vlan: VLAN id, if the source knows
     it. ssid/ap/signal (dBm)/alias: Wi-Fi details and the name set in the controller. radio: free text, shown as
-    given ("2.4 GHz", "5 GHz", "6 GHz" suggested)."""
+    given ("2.4 GHz", "5 GHz", "6 GHz" suggested). present: the source vouches the device is connected now (a
+    controller's active client); it feeds the per-source "on the wire" (seen.last_present), never `online`, which
+    only sightings set. An FDB entry is not present (it ages out slower than the device leaves)."""
     mac: str
     source: str
     observed_at: int
@@ -112,13 +114,14 @@ class Attachment:
     signal: int | None = None
     radio: str = ""
     alias: str = ""
+    present: bool = False
 
 
 @dataclass
 class Batch:
     """The result of one collect(). stats: raw counts for status, all optional (the host reads a missing key as 0):
     "leases", "arp", "reservations" (sighting producers), "macs" (switch), "clients" (controller); the host adds
-    "dropped" (records with an invalid MAC). Values are ints, except these documented string keys: "strategy"
+    "dropped" (malformed records dropped: an invalid MAC or the wrong type). Values are ints, except these documented string keys: "strategy"
     (switch: the FDB strategy that produced the rows; the host copies it to meta conn.<name>.strategy)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
@@ -147,11 +150,16 @@ def build_opener(verify_tls: bool = True, use_env_proxy: bool = False) -> urllib
     return urllib.request.build_opener(*handlers)
 
 
+MIN_SECRET_LEN = 4
+
+
 def make_redactor(secrets: Iterable[str]) -> Callable[[str], str]:
     """Replace every given secret value in a text by "***" (longest first, so a secret containing another is whole).
     Each secret is also matched in its repr and JSON escaped forms, because a `{x!r}`, a KeyError or a JSON body
-    echoes it with a quote or backslash escaped, and the literal would then not match."""
-    forms = {f for s in secrets if s for f in (s, repr(s)[1:-1], json.dumps(s)[1:-1])}
+    echoes it with a quote or backslash escaped, and the literal would then not match. A secret shorter than
+    MIN_SECRET_LEN is skipped: it cannot be masked without destroying unrelated text ("s" would turn "snmp timeout"
+    into "***nmp timeout"), and a value that short is not a real secret."""
+    forms = {f for s in secrets if s and len(s) >= MIN_SECRET_LEN for f in (s, repr(s)[1:-1], json.dumps(s)[1:-1])}
     values = sorted((f for f in forms if f), key=len, reverse=True)
     if not values:
         return _redact_nothing

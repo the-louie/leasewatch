@@ -26,7 +26,8 @@ def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> 
     out = []
     for mac, w in wifi.items():
         out.append(Attachment(mac=mac, source=source, observed_at=observed_at, link="wired" if w.wired else "wifi",
-                              ssid=w.ssid, ap=w.ap, signal=w.signal, radio=w.radio, alias=w.alias))
+                              ssid=w.ssid, ap=w.ap, signal=w.signal, radio=w.radio, alias=w.alias,
+                              present=True))  # the controller lists only active clients
     return out
 
 

@@ -76,6 +76,13 @@ class Collector:
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
             self._add(spec, client if spec.name == "fw1" else None, validate=cfg.connector_specs is not None)
+        # an instance removed from the configuration (or renamed) would keep its "Seen by" line forever: its rows never
+        # update again. Disabled instances are still configured, so theirs stay (writes to the seen table)
+        names = [spec.name for spec in specs]
+        with db.tx() as c:
+            pruned = c.execute(f"DELETE FROM seen WHERE source NOT IN ({','.join('?' * len(names))})", names).rowcount
+        if pruned:
+            log.info("removed %d seen rows of instances that are no longer configured", pruned)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch

@@ -26,11 +26,15 @@ Attachments: link must be "wired" or "wifi" (anything else is ignored, logged on
 controller (ConnectorInfo.roles has "controller") sends its whole client list: "wifi" places a device on Wi-Fi,
 "wired" means the controller sees it on a cable, so its Wi-Fi details are cleared. Several switches: each instance's
 first wired attachment for a MAC is its candidate; across instances an edge (non-uplink) port beats an uplink port,
-then the newest observed_at, then the instance order (batch order = LW_CONNECTORS). Wi-Fi from a controller still
-beats any switch port. loc_source is the instance whose attachment placed the device.
+then the instance that already holds the device (its loc_source, if it still lists the MAC), then the instance order
+(batch order = LW_CONNECTORS); the same between two uplinks. observed_at is not used: a walk stamps every row with
+one time, so it would flap. Wi-Fi from a controller still beats any switch port. loc_source is the instance whose
+attachment placed the device. A wired device whose loc_source switch failed this poll keeps its port (no event),
+whatever the other switches offer, as a Wi-Fi device is "blind" while its controller is down.
 
-Per-source freshness (MergeResult.seen): one (mac, instance, now, now if presence else None) per instance that listed
-a known MAC this poll, in a sighting or an attachment.
+Per-source freshness (MergeResult.seen): one (mac, instance, now, now if present else None) per instance that listed
+a known MAC this poll, in a sighting or an attachment; present when a sighting has presence or an attachment has
+present (a controller's active client).
 """
 from __future__ import annotations
 
@@ -106,7 +110,8 @@ class MergeResult:
     history: list[tuple[str, dict]] = field(default_factory=list)     # (mac, {ip, hostname, vlan, lease_type})
     stats: dict[str, int] = field(default_factory=dict)       # devices, new, changed
     # (mac, instance, last_seen, last_present or None): the instance listed the MAC this poll; last_present only when
-    # one of its sightings asserted presence (the writer keeps the stored last_present on None)
+    # one of its sightings asserted presence or one of its attachments is present (the writer keeps the stored
+    # last_present on None)
     seen: list[tuple[str, str, int, int | None]] = field(default_factory=list)
 
 
@@ -243,7 +248,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         for s in b.sightings:
             listed[s.mac] = listed.get(s.mac, False) or s.presence
         for a in b.attachments:
-            listed.setdefault(a.mac, False)
+            listed[a.mac] = listed.get(a.mac, False) or a.present is True
         res.seen += [(mac, n, now, now if present else None) for mac, present in listed.items() if mac in rows]
     for row in rows.values():
         # devices not seen on the wire for longer than the grace period go offline
@@ -281,8 +286,10 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
             elif a.link == "wired" and a.mac not in mine:
                 mine.add(a.mac)
                 # the edge port is where the device is; an uplink only says which way it lies. Two edge ports (the
-                # FDBs age at different speeds): the newest observation, then the instance order
-                key = (bool(a.uplink), -(a.observed_at or 0), i)
+                # FDBs age at different speeds): the switch that already holds the device (sticky, so a walk order
+                # or an FDB timing never makes it flap), then the instance order
+                sticky = n == rows.get(a.mac, {}).get("loc_source")
+                key = (bool(a.uplink), not sticky, i)
                 if a.mac not in rank or key < rank[a.mac]:
                     wired[a.mac], rank[a.mac] = a, key
     ctrl_ok = any(n in ok for n in controllers)
@@ -297,10 +304,14 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         # a controller that answered and lists the device (wired or Wi-Fi) is first-hand evidence, so not blind
         blind = ctrl_failed and cur["link"] == "wifi" and w is None
         sw = wired.get(mac)
+        # the switch that placed this wired device failed this poll: another switch can only offer a worse view (an
+        # uplink towards it, an aged FDB entry), so the port stays as it is, as a Wi-Fi device does while blind
+        held = (cur["link"] == "wired" and cur["loc_source"] in batches and cur["loc_source"] not in ok
+                and cur["loc_source"] not in state.controllers)
         # on the wire this poll, not in grace: the FDB ages out slower than ARP, so a departed device would get a stale port
         # Wi-Fi beats any switch port, also an edge port: a controller's client list is first-hand, an FDB entry for a
         # Wi-Fi client can be an AP port that is not marked as an uplink
-        if sw and on_wire and not on_wifi and not blind and sw.port:
+        if sw and on_wire and not on_wifi and not blind and not held and sw.port:
             # only the winner is compared with the row, so a losing candidate that moves writes no event
             if sw.port != cur["sw_port"] or sw.via != cur["sw_via"]:
                 if cur["sw_port"] and sw.port != cur["sw_port"]:
