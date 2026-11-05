@@ -8,7 +8,7 @@
 - **Newest first**, a "not yet known" review queue, name + note per device, CSV export, search, filters, light/dark, phone layout.
 - Optional **"Connected via"**: switch port over SNMPv3 (Q-BRIDGE / IF / LLDP MIBs — any managed switch; uplink ports are named after the AP or switch behind them; tested on Comware, LLDP port numbers are mapped through `lldpLocPortId`) and Wi-Fi SSID / AP / signal from a UniFi Network controller.
 - Backend: Python 3.12 standard library (`urllib`, `sqlite3`, `http.server`); the only pip dependency is `pysnmp` for the optional switch lookup. Frontend: one HTML page, vanilla JS/CSS, no build step.
-- Read-only towards the firewall: the API user needs just the DHCPv4 leases privilege (Kea, or legacy ISC; `DHCP_BACKEND`) and *Diagnostics: ARP Table*.
+- Read-only towards the firewall: only lease, reservation and ARP searches are called. The API user needs *Diagnostics: ARP Table* and the DHCP server's privilege (*Services: DHCP: Kea(v4)*, or *Services: ISC DHCPv4: Leases* for the legacy ISC server; `DHCP_BACKEND`).
 
 ## Run
 
@@ -22,7 +22,7 @@ Local development: `DATA_DIR=./data LISTEN_PORT=8089 FW1_URL=… FW1_KEY=… FW1
 
 ### OPNsense API user
 
-Create a user with only the privileges *Diagnostics: ARP Table* and the leases page of the DHCPv4 server you run — the Kea DHCPv4 leases privilege (`DHCP_BACKEND=kea`, the default, reads `/api/kea/leases4/search`) or, for the legacy ISC server, *Services: ISC DHCPv4: Leases* (`DHCP_BACKEND=isc`; ISC DHCP is end-of-life in OPNsense and moves to a plugin from 26.1, so new installs should use Kea or dnsmasq — dnsmasq leases are not read yet) — generate an API key for it (System › Access › Users › the user › API keys) and put key and secret in `.env`. The ACL for the ARP table matches the snake_case endpoint (`get_arp`), which is what leasewatch calls.
+Create a user with only the privileges *Diagnostics: ARP Table* and the leases page of the DHCPv4 server you run — *Services: DHCP: Kea(v4)* (`DHCP_BACKEND=kea`, the default; leasewatch reads the leases, `/api/kea/leases4/search`, and the reservations, `/api/kea/dhcpv4/searchReservation`; OPNsense has no read-only Kea privilege, so this one also allows configuration writes) or, for the legacy ISC server, *Services: ISC DHCPv4: Leases* (`DHCP_BACKEND=isc`; ISC DHCP is end-of-life in OPNsense and moves to a plugin from 26.1, so new installs should use Kea or dnsmasq — dnsmasq leases are not read yet) — generate an API key for it (System › Access › Users › the user › API keys) and put key and secret in `.env`. The ACL for the ARP table matches the snake_case endpoint (`get_arp`), which is what leasewatch calls.
 
 ### Optional sources
 
@@ -47,7 +47,7 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 
 - **Baseline:** everything present at the very first poll is marked `baseline` — not "new", no mail, sorted after real newcomers. An empty first poll is not taken as the baseline.
 - **New** = first seen within `NEW_DAYS` and not baseline. **Not yet known** = not marked known and not baseline.
-- **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device that leaves the ARP table (or is no longer listed) stays online for `ONLINE_GRACE_MINUTES` after it was last seen on the wire, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed, so the UI shows *last online*.
+- **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device that leaves the ARP table (or is no longer listed) stays online for `ONLINE_GRACE_MINUTES` after it was last seen on the wire, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed (under Kea, which lists only reservations with an active lease, the reservations are read for the same effect), so the UI shows *last online*.
 - **History** rows are written only when IP, hostname, network or lease type change (capped at 200 per device). **Events:** new, ip, hostname, vlan, lease_type, port, wifi, back (online again after > 1 day), acked / unacked; kept for a year.
 - Lease type of a device whose lease is gone (`LEASE_TYPE_MODE`): `keep` (default) keeps the last type, so an expiring lease that is still in ARP does not flap between types on every poll; `grace` clears it once the device has been listed without a lease for `ONLINE_GRACE_MINUTES` (timed in memory, so a restart starts the clock again); `immediate` clears it at the first poll without a lease. Clearing writes a `lease_type` event and a history row. `sources` shows what listed it last.
 - A Wi-Fi device that leaves keeps its last SSID/AP for the record; the Wi-Fi details are dropped only when it is on the wire again without UniFi listing it.

@@ -145,6 +145,76 @@ class Fw1HttpTests(StubCase):
         self.assertEqual(len(kea_leases([{"hwaddr": "02:00:00:00:00:04", "state": 0, "if_descr": 5}])), 1)
 
 
+KEA_LEASES = "/api/kea/leases4/search"
+KEA_RES = "/api/kea/dhcpv4/searchReservation"
+
+
+class KeaTests(StubCase):
+    LEASE = {"hwaddr": "02:00:00:00:01:01", "address": "10.0.110.5", "state": 0, "hostname": "ap-hall",
+             "if": "vlan0110", "if_name": "opt3", "if_descr": "Clients", "mac_info": "Acme", "lease_type": "dynamic"}
+
+    def run_kea(self, leases, reservations=(), arp=(), ignore=()):
+        fw = self.stub({KEA_LEASES: js({"rows": leases}), KEA_RES: js({"rows": list(reservations)}), ARP: js(list(arp))})
+        out, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="kea").sightings(ignore)
+        return out, stats, fw
+
+    def test_kea_interface_identifier_and_description(self):
+        out, _, _ = self.run_kea([self.LEASE])
+        self.assertEqual([(s.iface, s.vlan, s.vendor) for s in out], [("opt3", "Clients", "Acme")])
+
+    def test_kea_ignore_matches_device_identifier_and_description(self):
+        for ign in (("vlan0110",), ("opt3",), ("clients",)):
+            out, _, _ = self.run_kea([self.LEASE], ignore=ign)
+            self.assertEqual(out, [], ign)
+
+    def test_kea_precomputed_lease_type_wins(self):
+        out, _, _ = self.run_kea([{**self.LEASE, "lease_type": "static", "is_reserved": ""}])
+        self.assertEqual(out[0].lease_type, "static")
+
+    def test_kea_reservation_without_lease_is_listed(self):
+        res = [{"subnet": "10.0.110.0/24", "ip_address": "10.0.110.20", "hw_address": "02:00:00:00:01:02", "hostname": "nas"},
+               {"subnet": "10.0.110.0/24", "ip_address": "10.0.110.5", "hw_address": "02:00:00:00:01:01", "hostname": "x"}]
+        out, stats, fw = self.run_kea([self.LEASE], res)
+        by = {}
+        for s in out:
+            by.setdefault(s.mac, []).append(s)
+        self.assertEqual(len(by["02:00:00:00:01:01"]), 1)  # leased reservation not duplicated
+        self.assertEqual(by["02:00:00:00:01:01"][0].hostname, "ap-hall")
+        r = by["02:00:00:00:01:02"][0]
+        self.assertEqual((r.source, r.lease_type, r.online, r.ip, r.hostname, r.iface, r.vlan),
+                         ("dhcp", "static", False, "10.0.110.20", "nas", "opt3", "Clients"))
+        self.assertEqual(stats, {"leases": 1, "arp": 0, "reservations": 2})
+        post = [(m, p) for m, p, _, _ in fw.requests if p == KEA_RES]
+        self.assertEqual(post, [("POST", KEA_RES)])
+
+    def test_kea_reservation_vlan_from_arp_and_ignore(self):
+        res = [{"subnet": "10.0.120.0/24", "ip_address": "10.0.120.9", "hw_address": "02:00:00:00:01:03"},
+               {"subnet": "10.0.130.0/24", "ip_address": "10.0.130.9", "hw_address": "02:00:00:00:01:04"}]
+        arp = [{"mac": "02:00:00:00:01:05", "ip": "10.0.120.7", "intf": "vlan0120", "intf_description": "IOT"}]
+        out, _, _ = self.run_kea([], res, arp)
+        by = {s.mac: s for s in out if s.source == "dhcp"}
+        self.assertEqual((by["02:00:00:00:01:03"].vlan, by["02:00:00:00:01:03"].iface), ("IOT", ""))
+        self.assertEqual(by["02:00:00:00:01:04"].vlan, "")  # unknown subnet
+        out, _, _ = self.run_kea([], res, arp, ignore=("vlan0120",))
+        self.assertNotIn("02:00:00:00:01:03", {s.mac for s in out})
+
+    def test_kea_reservation_failure_is_not_fatal(self):
+        arp = [{"mac": "02:00:00:00:01:05", "ip": "10.0.110.7", "intf": "vlan0110", "intf_description": "Clients"}]
+        fw = self.stub({KEA_LEASES: js({"rows": [self.LEASE]}), KEA_RES: (403, {}, b"{}"), ARP: js(arp)})
+        with self.assertLogs("leasewatch.fw1", "WARNING") as logs:
+            out, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="kea").sightings()
+        self.assertEqual({s.mac for s in out}, {"02:00:00:00:01:01", "02:00:00:00:01:05"})
+        self.assertNotIn("reservations", stats)
+        self.assertEqual((stats["leases"], stats["arp"]), (1, 1))
+        self.assertIn("reservations unavailable", logs.output[0])
+
+    def test_isc_never_reads_reservations(self):
+        fw = self.stub({LEASES: js({"rows": []}), ARP: js([])})
+        _, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="isc").sightings()
+        self.assertNotIn(KEA_RES, [p for _, p, _, _ in fw.requests])
+        self.assertNotIn("reservations", stats)
+
+
 def unifi_cfg(url):
     return Config(unifi_url=url, unifi_user="ro", unifi_password="pw", unifi_verify_tls=False)
 

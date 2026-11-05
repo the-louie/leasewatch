@@ -124,7 +124,8 @@ class Fw1Tests(unittest.TestCase):
 
     def client(self, backend, leases):
         c = Fw1Client("https://fw.example", "k", "s", dhcp_backend=backend)
-        c._call = lambda path, body=None: (self.calls.append(path), {"rows": leases} if "lease" in path else {"rows": self.ARP})[1]
+        c._call = lambda path, body=None: (self.calls.append(path), {"rows": leases} if "lease" in path
+                                           else {"rows": []} if "Reservation" in path else {"rows": self.ARP})[1]
         return c
 
     def setUp(self): self.calls = []

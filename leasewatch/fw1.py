@@ -1,12 +1,13 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
-Only two read-only endpoints are used: the DHCPv4 lease list (ISC or Kea, see DHCP_BACKEND) and the ARP table.
-The API user needs just the matching leases privilege and "Diagnostics: ARP Table".
+Only read-only endpoints are used: the DHCPv4 lease list (ISC or Kea, see DHCP_BACKEND), under Kea also the
+reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
 import base64
 import http.client
+import ipaddress
 import json
 import logging
 import re
@@ -70,19 +71,80 @@ def isc_leases(rows: list[dict]) -> list[dict]:
 def kea_leases(rows: list[dict]) -> list[dict]:
     """Kea DHCPv4 rows (/api/kea/leases4/search) in the common shape. Kea names the MAC "hwaddr", the lease state is
     numeric (0 = default/active, 1 = declined, 2 = expired-reclaimed), hostnames may be FQDNs with a trailing dot,
-    and reservations are flagged "is_reserved". Kea has no online status: ARP decides.
+    and reservations are flagged "is_reserved" (newer OPNsense also sends a precomputed "lease_type", preferred).
+    Kea has no online status: ARP decides. "if" is the device (vlan0110), "if_name" the identifier (opt3): the
+    identifier goes to "if" for parity with ISC, the device to "if_dev" so IGNORE_INTERFACES can still name it.
     Kea always sends "state" as an int; a row with "state": null is malformed and is treated as not active."""
     out = []
     for l in rows:
         if not isinstance(l, dict) or str(l.get("state", "0")).strip() not in ("", "0"):
             continue
-        reserved = _s(l.get("is_reserved")).lower() not in ("", "0", "false", "no")
+        lease_type = _s(l.get("lease_type")).lower()
+        if not lease_type:
+            lease_type = "static" if _s(l.get("is_reserved")).lower() not in ("", "0", "false", "no") else "dynamic"
         out.append({
             "mac": _s(l.get("hwaddr")) or _s(l.get("mac")), "address": _s(l.get("address")),
-            "hostname": _s(l.get("hostname")).rstrip("."), "man": _s(l.get("man")) or _s(l.get("mac_info")),
-            "if": _s(l.get("if")), "if_descr": _s(l.get("if_descr")),
-            "type": "static" if reserved else "dynamic", "status": "",
+            "hostname": _s(l.get("hostname")).rstrip("."), "man": _s(l.get("mac_info")) or _s(l.get("man")),
+            "if": _s(l.get("if_name")) or _s(l.get("if")), "if_descr": _s(l.get("if_descr")), "if_dev": _s(l.get("if")),
+            "type": lease_type, "status": "",
         })
+    return out
+
+
+def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
+    """Kea reservation rows (/api/kea/dhcpv4/searchReservation) in the common lease shape. Unlike ISC static
+    mappings, a Kea reservation without an active lease is not in the lease list, so it is read separately.
+    Kea subnets carry no interface: cidr_map (CIDR text -> (if, if_descr, if_dev)) supplies it; unknown -> ""."""
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ifc, descr, dev = cidr_map.get(_s(r.get("subnet")), ("", "", ""))
+        out.append({
+            "mac": _s(r.get("hw_address")), "address": _s(r.get("ip_address")),
+            "hostname": _s(r.get("hostname")).rstrip("."), "man": "",
+            "if": ifc, "if_descr": descr, "if_dev": dev, "type": "static", "status": "",
+        })
+    return out
+
+
+def _net(text: str):
+    """A reservation subnet as an ip_network, or None when it is not a valid CIDR."""
+    try:
+        return ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        return None
+
+
+def _addr(text: str):
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        return None
+
+
+def _cidr_map(reservations: list, lease_rows: list[dict], arp: list) -> dict:
+    """Map each reservation subnet to the interface of a lease (first wins), else of an ARP entry, in that subnet."""
+    nets = {}
+    for r in reservations:
+        if isinstance(r, dict):
+            text = _s(r.get("subnet"))
+            net = _net(text) if text else None
+            if net is not None:
+                nets[text] = net
+    out: dict = {}
+    for l in lease_rows:
+        ip = _addr(_s(l.get("address"))) if _s(l.get("address")) else None
+        for text, net in nets.items():
+            if ip is not None and text not in out and ip in net:
+                out[text] = (_s(l.get("if")), _s(l.get("if_descr")), _s(l.get("if_dev")))
+    for a in arp:
+        if not isinstance(a, dict):
+            continue
+        ip = _addr(_s(a.get("ip"))) if _s(a.get("ip")) else None
+        for text, net in nets.items():
+            if ip is not None and text not in out and ip in net:
+                out[text] = ("", _s(a.get("intf_description")), _s(a.get("intf")))
     return out
 
 
@@ -144,6 +206,19 @@ class Fw1Client:
             log.warning("lease list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)
         return r["rows"]
 
+    def reservations_raw(self) -> list[dict]:
+        """Kea reservations; a read-only search, POSTed like the lease search."""
+        r = self._call("/api/kea/dhcpv4/searchReservation", {"current": 1, "rowCount": LEASE_ROWS})
+        if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
+            raise Fw1Error("fw1 reservations: unexpected response shape")
+        try:
+            total = int(r.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total > len(r["rows"]):
+            log.warning("reservation list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)
+        return r["rows"]
+
     def arp_raw(self) -> list[dict]:
         r = self._call("/api/diagnostics/interface/get_arp")
         if isinstance(r, dict):
@@ -154,25 +229,37 @@ class Fw1Client:
 
     # --- normalised --------------------------------------------------------
     def sightings(self, ignore_interfaces: tuple = ()) -> tuple[list[Sighting], dict]:
-        """Return (sightings, stats). Raises Fw1Error if either call fails.
+        """Return (sightings, stats). Raises Fw1Error if the lease or ARP call fails; the Kea reservation search is best-effort.
 
         ignore_interfaces matches (case-insensitively) the OPNsense identifier (opt3), the device (vlan0110, igc4)
         or the description (Klienter, WAN), because leases and ARP rows name interfaces differently."""
         ign = {_s(x).lower() for x in ignore_interfaces if _s(x)}
         skip = lambda *names: any(_s(n).lower() in ign for n in names)
         leases = self.leases_raw()
+        reservations = None
+        if self.dhcp_backend == "kea":
+            # reservations only add lease-less devices; an API key without that privilege must not stop the poll
+            try:
+                reservations = self.reservations_raw()
+            except Fw1Error as e:
+                log.warning("reservations unavailable, listing leases only: %s", e)
         arp = self.arp_raw()
         try:
-            return self._sightings(leases, arp, skip)
+            return self._sightings(leases, arp, skip, reservations)
         except (TypeError, AttributeError, KeyError) as e:
             raise Fw1Error("fw1: unexpected field type in leases/arp") from e
 
-    def _sightings(self, leases: list, arp: list, skip) -> tuple[list[Sighting], dict]:
+    def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
         lease_rows = kea_leases(leases) if self.dhcp_backend == "kea" else isc_leases(leases)
+        if reservations:
+            # an active lease already carries what its reservation says; only lease-less reservations are added
+            leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
+            lease_rows = lease_rows + [r for r in kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
+                                       if norm_mac(_s(r.get("mac"))) not in leased]
         for l in lease_rows:
             mac = norm_mac(_s(l.get("mac")))
-            if not mac or skip(l.get("if"), l.get("if_descr")):
+            if not mac or skip(l.get("if"), l.get("if_dev"), l.get("if_descr")):
                 continue
             lease_type = _s(l.get("type")).lower() or "dynamic"
             if lease_type not in ("dynamic", "static"):
@@ -200,4 +287,7 @@ class Fw1Client:
                 vlan=_s(a.get("intf_description")) or iface, iface=iface,
                 source="arp", lease_type="", online=True,
             ))
-        return out, {"leases": len(leases), "arp": len(arp)}
+        stats = {"leases": len(leases), "arp": len(arp)}
+        if reservations is not None:
+            stats["reservations"] = len(reservations)
+        return out, stats

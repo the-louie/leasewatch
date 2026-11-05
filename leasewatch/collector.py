@@ -240,7 +240,10 @@ class Collector:
             self.db.set_meta("last_poll_ok", "1", c)
             self.db.set_meta("last_error", "", c)
             self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
-            self.db.set_meta("last_raw", f"{raw_stats['leases']} leases, {raw_stats['arp']} arp", c)
+            last_raw = f"{raw_stats['leases']} leases, {raw_stats['arp']} arp"
+            if self.cfg.dhcp_backend == "kea" and "reservations" in raw_stats:
+                last_raw += f", {raw_stats['reservations']} reservations"
+            self.db.set_meta("last_raw", last_raw, c)
             if first_run:
                 self.db.set_meta("baseline_ts", str(now), c)
         if self.cfg.mail_enabled:
