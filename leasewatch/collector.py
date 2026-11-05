@@ -1,4 +1,8 @@
-"""Poll fw1, merge DHCP + ARP sightings per MAC, write devices/history/events, notify on new devices."""
+"""Poll fw1, merge DHCP + ARP sightings per MAC, write devices/history/events, notify on new devices.
+
+LEASE_TYPE_MODE=grace times "listed without a lease" in memory (Collector._no_lease_since), not in the database:
+a restart starts the grace clock again, which only delays clearing a lease type by one grace period.
+"""
 from __future__ import annotations
 
 import logging
@@ -65,7 +69,9 @@ class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
-        self.client = client or Fw1Client(cfg.fw1_url, cfg.fw1_key, cfg.fw1_secret, cfg.fw1_verify_tls, dhcp_backend=cfg.dhcp_backend)
+        self.client = client or Fw1Client(cfg.fw1_url, cfg.fw1_key, cfg.fw1_secret, cfg.fw1_verify_tls, dhcp_backend=cfg.dhcp_backend,
+                                            use_env_proxy=cfg.lan_proxy)
+        self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
         self._switch = None
         self._unifi = None
@@ -147,6 +153,15 @@ class Collector:
                     ev.append(("vlan", f"{cur['vlan'] or '-'} -> {m.vlan}"))
                 if m.lease_type and m.lease_type != cur["lease_type"]:
                     ev.append(("lease_type", f"{cur['lease_type'] or 'no DHCP'} -> {m.lease_type}"))
+                lease_type = m.lease_type or cur["lease_type"]
+                if m.lease_type:
+                    self._no_lease_since.pop(mac, None)
+                elif cur["lease_type"] and self.cfg.lease_type_mode != "keep":
+                    since = self._no_lease_since.setdefault(mac, now)
+                    if self.cfg.lease_type_mode == "immediate" or now - since >= self.cfg.online_grace_minutes * 60:
+                        lease_type = ""
+                        self._no_lease_since.pop(mac, None)
+                        ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
                 # prev_ok: after a failed poll every device looks "away" for the outage, so "back" would be a false positive
                 if m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and prev_ok:
                     days = (now - cur["last_online"]) // 86400
@@ -155,7 +170,7 @@ class Collector:
                     c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, kind, detail))
                 if any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
                     c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)",
-                              (mac, now, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vlan or cur["vlan"], m.lease_type or cur["lease_type"]))
+                              (mac, now, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vlan or cur["vlan"], lease_type))
                     touched_history.append(mac)
                     changes += 1
                 # not on the wire right now: stays online until the grace period after its last sighting has passed
@@ -163,7 +178,7 @@ class Collector:
                 c.execute(
                     "UPDATE devices SET last_seen=?, last_online=COALESCE(?, last_online), ip=?, hostname=?, vendor=?, vlan=?, iface=?, lease_type=?, sources=?, online=? WHERE mac=?",
                     (now, now if m.online else None, m.ip or cur["ip"], m.hostname or cur["hostname"], m.vendor or cur["vendor"],
-                     m.vlan or cur["vlan"], m.iface or cur["iface"], m.lease_type or cur["lease_type"], sources, int(online), mac))
+                     m.vlan or cur["vlan"], m.iface or cur["iface"], lease_type, sources, int(online), mac))
             # --- optional enrichers: switch port and Wi-Fi ---
             unifi_ok = enrich_status.get("unifi_ok") == "1"
             if snap is not None or wifi or unifi_ok:

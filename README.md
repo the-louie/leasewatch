@@ -8,7 +8,7 @@
 - **Newest first**, a "not yet known" review queue, name + note per device, CSV export, search, filters, light/dark, phone layout.
 - Optional **"Connected via"**: switch port over SNMPv3 (Q-BRIDGE / IF / LLDP MIBs — any managed switch; uplink ports are named after the AP or switch behind them; tested on Comware, LLDP port numbers are mapped through `lldpLocPortId`) and Wi-Fi SSID / AP / signal from a UniFi Network controller.
 - Backend: Python 3.12 standard library (`urllib`, `sqlite3`, `http.server`); the only pip dependency is `pysnmp` for the optional switch lookup. Frontend: one HTML page, vanilla JS/CSS, no build step.
-- Read-only towards the firewall: the API user needs just the DHCPv4 leases privilege (ISC or Kea, `DHCP_BACKEND`) and *Diagnostics: ARP Table*.
+- Read-only towards the firewall: the API user needs just the DHCPv4 leases privilege (Kea, or legacy ISC; `DHCP_BACKEND`) and *Diagnostics: ARP Table*.
 
 ## Run
 
@@ -22,7 +22,7 @@ Local development: `DATA_DIR=./data LISTEN_PORT=8089 FW1_URL=… FW1_KEY=… FW1
 
 ### OPNsense API user
 
-Create a user with only the privileges *Diagnostics: ARP Table* and the leases page of the DHCPv4 server you run — *Services: ISC DHCPv4: Leases* (`DHCP_BACKEND=isc`, the default) or the Kea DHCPv4 leases privilege (`DHCP_BACKEND=kea`, reads `/api/kea/leases4/search`) — generate an API key for it (System › Access › Users › the user › API keys) and put key and secret in `.env`. The ACL for the ARP table matches the snake_case endpoint (`get_arp`), which is what leasewatch calls.
+Create a user with only the privileges *Diagnostics: ARP Table* and the leases page of the DHCPv4 server you run — the Kea DHCPv4 leases privilege (`DHCP_BACKEND=kea`, the default, reads `/api/kea/leases4/search`) or, for the legacy ISC server, *Services: ISC DHCPv4: Leases* (`DHCP_BACKEND=isc`; ISC DHCP is end-of-life in OPNsense and moves to a plugin from 26.1, so new installs should use Kea or dnsmasq — dnsmasq leases are not read yet) — generate an API key for it (System › Access › Users › the user › API keys) and put key and secret in `.env`. The ACL for the ARP table matches the snake_case endpoint (`get_arp`), which is what leasewatch calls.
 
 ### Optional sources
 
@@ -49,7 +49,7 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 - **New** = first seen within `NEW_DAYS` and not baseline. **Not yet known** = not marked known and not baseline.
 - **Online** = in the ARP table now (or the lease says online), re-evaluated every poll. A device that leaves the ARP table (or is no longer listed) stays online for `ONLINE_GRACE_MINUTES` after it was last seen on the wire, then goes offline. `last_online` is the last time it was actually online; `last_seen` (CSV `last_listed`) the last time the firewall listed it at all — static mappings are always listed, so the UI shows *last online*.
 - **History** rows are written only when IP, hostname, network or lease type change (capped at 200 per device). **Events:** new, ip, hostname, vlan, lease_type, port, wifi, back (online again after > 1 day), acked / unacked; kept for a year.
-- A device keeps its last lease type after the lease is gone (a device seen only in ARP stays "DHCP" if it once had a lease); otherwise an expiring lease that is still in ARP would flap between types on every poll. `sources` shows what listed it last.
+- Lease type of a device whose lease is gone (`LEASE_TYPE_MODE`): `keep` (default) keeps the last type, so an expiring lease that is still in ARP does not flap between types on every poll; `grace` clears it once the device has been listed without a lease for `ONLINE_GRACE_MINUTES` (timed in memory, so a restart starts the clock again); `immediate` clears it at the first poll without a lease. Clearing writes a `lease_type` event and a history row. `sources` shows what listed it last.
 - A Wi-Fi device that leaves keeps its last SSID/AP for the record; the Wi-Fi details are dropped only when it is on the wire again without UniFi listing it.
 - Interfaces in `IGNORE_INTERFACES` (default WAN and loopback) are skipped.
 
@@ -61,7 +61,7 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 
 ## Security notes
 
-The page has no login: it is meant for a trusted LAN behind a reverse proxy. Anyone who can reach it can read the device list and mark devices known; nothing can be changed on the firewall through it. POSTs require `Content-Type: application/json` and a same-origin `Sec-Fetch-Site`, so a page on another site cannot submit them. Requests whose `Host` header is neither an IP address, `localhost` nor a name in `ALLOWED_HOSTS` (default: the host of `PUBLIC_URL`) get 421, which blocks DNS rebinding; set `ALLOWED_HOSTS=*` to turn that off. The CSV export neutralises spreadsheet formula injection from untrusted hostnames.
+The page has no login: it is meant for a trusted LAN behind a reverse proxy. Anyone who can reach it can read the device list and mark devices known; nothing can be changed on the firewall through it. POSTs require `Content-Type: application/json` and a same-origin `Sec-Fetch-Site`, so a page on another site cannot submit them. Requests whose `Host` header is neither an IP address, `localhost` nor a name in `ALLOWED_HOSTS` (default: the host of `PUBLIC_URL`) get 421, which blocks DNS rebinding; set `ALLOWED_HOSTS=*` to turn that off. The CSV export neutralises spreadsheet formula injection from untrusted hostnames. Requests to the firewall and the UniFi controller ignore `http_proxy`/`https_proxy` unless `PROXY_FOR_LAN=1`, so a proxy never sees their credentials; mail to Mailgun always uses them.
 
 ## Tests
 

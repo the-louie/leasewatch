@@ -73,7 +73,10 @@ class UnifiClient:
     def _opener(self):
         cj = http.cookiejar.CookieJar()
         # no redirects: a 3xx on /api/login would carry the password to wherever it points
-        return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj), urllib.request.HTTPSHandler(context=self._ctx), _NoRedirect())
+        handlers = [urllib.request.HTTPCookieProcessor(cj), urllib.request.HTTPSHandler(context=self._ctx), _NoRedirect()]
+        if not self.cfg.lan_proxy:  # the controller is on the LAN: ignore http(s)_proxy unless PROXY_FOR_LAN is set
+            handlers.append(urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
 
     def _get(self, op, path: str) -> list[dict]:
         with op.open(urllib.request.Request(self.cfg.unifi_url + path, headers={"Accept": "application/json"}), timeout=20) as r:

@@ -341,5 +341,62 @@ class DatabaseFixTests(unittest.TestCase):
         self.assertEqual(self.db.device(self.mac)["name"], "")
 
 
+class LeaseTypeModeTests(unittest.TestCase):
+    MAC = "02:00:00:00:10:01"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        os.environ.pop("LEASE_TYPE_MODE", None)
+
+    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+
+    def _lease_then_arp_only(self, mode):
+        """Poll 1: lease + ARP. Poll 2: ARP only (the lease is gone). Returns the collector for further polls."""
+        if mode:
+            os.environ["LEASE_TYPE_MODE"] = mode
+        self.cfg = Config(); self.db = Database(self.cfg.db_path)
+        self.client = FakeClient([S(self.MAC, "10.0.0.5", "pc", lt="static"), S(self.MAC, "10.0.0.5", src="arp")])
+        col = Collector(self.cfg, self.db, self.client); col.run_once()
+        self.client.sightings_data = [S(self.MAC, "10.0.0.5", src="arp")]
+        col.run_once()
+        return col
+
+    def lease_events(self):
+        return [r["detail"] for r in self.db.q("SELECT detail FROM events WHERE mac=? AND kind='lease_type'", (self.MAC,))]
+
+    def test_keep_is_default_and_keeps_last_type(self):
+        col = self._lease_then_arp_only(None)
+        self.assertEqual(self.cfg.lease_type_mode, "keep")
+        col.run_once()
+        self.assertEqual(self.db.device(self.MAC)["lease_type"], "static")
+        self.assertEqual(self.lease_events(), [])
+        self.assertEqual(col._no_lease_since, {})
+
+    def test_immediate_clears_on_first_poll_without_lease(self):
+        self._lease_then_arp_only("immediate")
+        self.assertEqual(self.db.device(self.MAC)["lease_type"], "")
+        self.assertEqual(self.lease_events(), ["static -> no DHCP"])
+        hist = self.db.q("SELECT lease_type FROM history WHERE mac=? ORDER BY id", (self.MAC,))
+        self.assertEqual([r["lease_type"] for r in hist], ["static", ""])
+
+    def test_grace_clears_only_after_grace_period(self):
+        col = self._lease_then_arp_only("grace")
+        self.assertEqual(self.db.device(self.MAC)["lease_type"], "static")  # inside the grace period
+        self.assertIn(self.MAC, col._no_lease_since)
+        col._no_lease_since[self.MAC] -= self.cfg.online_grace_minutes * 60  # backdate the first lease-less poll
+        col.run_once()
+        self.assertEqual(self.db.device(self.MAC)["lease_type"], "")
+        self.assertEqual(self.lease_events(), ["static -> no DHCP"])
+        self.assertNotIn(self.MAC, col._no_lease_since)
+
+    def test_grace_clock_resets_when_lease_returns(self):
+        col = self._lease_then_arp_only("grace")
+        self.client.sightings_data = [S(self.MAC, "10.0.0.5", "pc", lt="static"), S(self.MAC, "10.0.0.5", src="arp")]
+        col.run_once()
+        self.assertNotIn(self.MAC, col._no_lease_since)
+        self.assertEqual(self.db.device(self.MAC)["lease_type"], "static")
+
+
 if __name__ == "__main__":
     unittest.main()

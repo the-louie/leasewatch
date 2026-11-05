@@ -10,7 +10,7 @@ import os
 # Every name read through _env/_env_int/_env_bool in leasewatch/config.py, plus LOG_LEVEL (__main__.py).
 # Derived with: grep -oE '_env(_int|_bool)?\("[A-Z0-9_]+"' leasewatch/config.py. Keep in sync when a setting is added.
 CONFIG_VARS = (
-    "ALLOWED_HOSTS", "DATA_DIR", "DHCP_BACKEND", "FW1_KEY", "FW1_SECRET", "FW1_URL", "FW1_VERIFY_TLS",
+    "ALLOWED_HOSTS", "DATA_DIR", "DHCP_BACKEND", "LEASE_TYPE_MODE", "PROXY_FOR_LAN", "FW1_KEY", "FW1_SECRET", "FW1_URL", "FW1_VERIFY_TLS",
     "IGNORE_INTERFACES", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE", "MAILGUN_DOMAIN",
     "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PUBLIC_URL", "SITE_NAME",
     "SNMP_AUTH", "SNMP_AUTH_KEY", "SNMP_HOST", "SNMP_NAME", "SNMP_PRIV_KEY", "SNMP_USER", "UNIFI_PASSWORD",

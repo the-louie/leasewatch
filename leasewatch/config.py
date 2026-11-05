@@ -46,8 +46,13 @@ class Config:
     fw1_key: str = field(default_factory=lambda: _env("FW1_KEY"), repr=False)
     fw1_secret: str = field(default_factory=lambda: _env("FW1_SECRET"), repr=False)
     fw1_verify_tls: bool = field(default_factory=lambda: _env_bool("FW1_VERIFY_TLS", True))
-    # which OPNsense DHCPv4 server to read leases from: "isc" or "kea"
-    dhcp_backend: str = field(default_factory=lambda: _env("DHCP_BACKEND", "isc").lower())
+    # which OPNsense DHCPv4 server to read leases from: "kea" (default) or "isc" (end-of-life in OPNsense, a plugin from 26.1)
+    dhcp_backend: str = field(default_factory=lambda: _env("DHCP_BACKEND", "kea").lower())
+    # what a device whose lease is gone shows as lease type: "keep" the last one, clear it after the "grace" period, or "immediate"ly
+    lease_type_mode: str = field(default_factory=lambda: _env("LEASE_TYPE_MODE", "keep").lower())
+    # honour http(s)_proxy for the LAN clients (firewall, UniFi); off by default so a proxy meant for the internet
+    # never sees the firewall API key. Mail (Mailgun) always uses the environment's proxy settings.
+    lan_proxy: bool = field(default_factory=lambda: _env_bool("PROXY_FOR_LAN", False))
     poll_seconds: int = field(default_factory=lambda: _env_int("POLL_SECONDS", 120))
     data_dir: str = field(default_factory=lambda: _env("DATA_DIR", "/data"))
     listen_host: str = field(default_factory=lambda: _env("LISTEN_HOST", "0.0.0.0"))
@@ -160,6 +165,8 @@ class Config:
             problems.append("ONLINE_GRACE_MINUTES must be at most 10080")
         if self.dhcp_backend not in ("isc", "kea"):
             problems.append("DHCP_BACKEND must be isc or kea")
+        if self.lease_type_mode not in ("keep", "grace", "immediate"):
+            problems.append("LEASE_TYPE_MODE must be keep, grace or immediate")
         if self.poll_seconds < 15:
             problems.append("POLL_SECONDS below 15 is unreasonable for the firewall")
         if self.poll_seconds > 86400:

@@ -266,5 +266,35 @@ class NotifyTests(StubCase):
         self.assertIn("evil  Bcc: x@example.com", subject)
 
 
+class ProxyTests(StubCase):
+    """LAN clients must not send the firewall/UniFi credentials through an http(s)_proxy unless PROXY_FOR_LAN is set."""
+    PROXY_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
+
+    def setUp(self):
+        super().setUp()
+        for k in self.PROXY_VARS:
+            os.environ.pop(k, None)
+        self.fw = self.stub({LEASES: js({"rows": [], "total": 0})})
+        self.proxy = self.stub()
+        # urllib reads the proxy settings when the opener is built, so they are set before the client exists
+        os.environ["http_proxy"] = os.environ["https_proxy"] = self.proxy.url
+
+    def test_fw1_ignores_env_proxy_by_default(self):
+        Fw1Client(self.fw.url, "k", "s", timeout=5).leases_raw()
+        self.assertEqual(self.proxy.requests, [])
+        self.assertEqual([r[1] for r in self.fw.requests], [LEASES])
+
+    def test_fw1_uses_env_proxy_when_asked(self):
+        with self.assertRaises(Fw1Error):  # the proxy stub answers 404
+            Fw1Client(self.fw.url, "k", "s", timeout=5, use_env_proxy=True).leases_raw()
+        self.assertEqual(self.fw.requests, [])
+        self.assertEqual([r[1] for r in self.proxy.requests], [self.fw.url + LEASES])
+
+    def test_unifi_ignores_env_proxy_by_default(self):
+        ctl = self.stub({"/api/login": js(OK), STA: js(OK), DEV: js(OK)})
+        self.assertEqual(UnifiClient(unifi_cfg(ctl.url)).clients(), {})
+        self.assertEqual(self.proxy.requests, [])
+
+
 if __name__ == "__main__":
     unittest.main()

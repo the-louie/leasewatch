@@ -99,5 +99,31 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(c.host_allowed("evil.example.com:8443"))
 
 
+class SettingDefaultsTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = clean_env(BASE)
+        for k in ("LEASE_TYPE_MODE", "PROXY_FOR_LAN"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        restore(self._saved)
+
+    def test_default_backend_is_kea(self):
+        self.assertEqual(Config().dhcp_backend, "kea")
+
+    def test_lease_type_mode_default_and_validation(self):
+        self.assertEqual(Config().lease_type_mode, "keep")
+        for mode in ("keep", "grace", "immediate", "GRACE"):
+            os.environ["LEASE_TYPE_MODE"] = mode
+            self.assertEqual(Config().validate(), [], mode)
+        os.environ["LEASE_TYPE_MODE"] = "forever"
+        self.assertIn("LEASE_TYPE_MODE must be keep, grace or immediate", Config().validate())
+
+    def test_lan_proxy_default_off(self):
+        self.assertFalse(Config().lan_proxy)
+        os.environ["PROXY_FOR_LAN"] = "1"
+        self.assertTrue(Config().lan_proxy)
+
+
 if __name__ == "__main__":
     unittest.main()

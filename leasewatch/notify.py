@@ -30,6 +30,7 @@ def _send(cfg: Config, subject: str, text: str) -> None:
         # inside the try: a base without a scheme raises ValueError here, not in urlopen
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Authorization", "Basic " + base64.b64encode(f"api:{cfg.mailgun_key}".encode()).decode())
+        # urlopen honours http(s)_proxy on purpose: Mailgun is on the internet (PROXY_FOR_LAN only covers LAN clients)
         with urllib.request.urlopen(req, timeout=20) as resp:
             resp.read()
     except urllib.error.HTTPError as e:

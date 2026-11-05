@@ -87,7 +87,8 @@ def kea_leases(rows: list[dict]) -> list[dict]:
 
 
 class Fw1Client:
-    def __init__(self, url: str, key: str, secret: str, verify_tls: bool = True, timeout: int = 20, dhcp_backend: str = "isc"):
+    def __init__(self, url: str, key: str, secret: str, verify_tls: bool = True, timeout: int = 20, dhcp_backend: str = "isc",
+                 use_env_proxy: bool = False):
         self.url = url.rstrip("/")
         self.dhcp_backend = dhcp_backend
         self.timeout = timeout
@@ -97,8 +98,12 @@ class Fw1Client:
         if not verify_tls:
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
-        # build_opener uses _NoRedirect in place of the default redirect handler
-        self._opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=self._ctx))
+        # build_opener uses _NoRedirect in place of the default redirect handler. An empty ProxyHandler ignores
+        # http(s)_proxy: the firewall is on the LAN, and a proxy would see the Basic auth header (PROXY_FOR_LAN turns it on).
+        handlers = [_NoRedirect(), urllib.request.HTTPSHandler(context=self._ctx)]
+        if not use_env_proxy:
+            handlers.append(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(*handlers)
 
     def _call(self, path: str, body: dict | None = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
@@ -126,6 +131,7 @@ class Fw1Client:
 
     # --- raw ---------------------------------------------------------------
     def leases_raw(self) -> list[dict]:
+        # dhcp_backend comes from DHCP_BACKEND (default kea); this class's own "isc" default only applies when built directly
         path = "/api/kea/leases4/search" if self.dhcp_backend == "kea" else "/api/dhcpv4/leases/searchLease"
         r = self._call(path, {"current": 1, "rowCount": LEASE_ROWS})
         if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
