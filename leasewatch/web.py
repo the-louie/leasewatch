@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from .config import Config
+from .connectors import InstanceSpec
 from .db import Database
 from .fw1 import MAC_RE
 
@@ -71,6 +72,11 @@ def make_handler(cfg: Config, db: Database, version: str):
             self._send(200, body, ctype, {"Cache-Control": "no-cache"})
 
         def _meta(self) -> dict:
+            def _label(s: InstanceSpec) -> str:
+                if s.type == "snmp_switch":
+                    return s.settings.get("name") or s.name
+                return "Wi-Fi" if s.type == "unifi" else s.name
+
             m = db.all_meta()
             now = int(time.time())
             last = int(m.get("last_poll_ts") or 0)
@@ -84,7 +90,8 @@ def make_handler(cfg: Config, db: Database, version: str):
                 "switch": {"enabled": cfg.snmp_enabled, "name": cfg.snmp_name, "ok": m.get("switch_ok") == "1", "error": m.get("switch_error", ""), "macs": int(m.get("switch_macs") or 0)},
                 "unifi": {"enabled": cfg.unifi_enabled, "ok": m.get("unifi_ok") == "1", "error": m.get("unifi_error", ""), "clients": int(m.get("unifi_clients") or 0)},
                 # one entry per configured instance, in LW_CONNECTORS order; "switch"/"unifi" above stay for one release
-                "connectors": [{"name": s.name, "type": s.type, "ok": m.get(f"conn.{s.name}.ok") == "1",
+                # label: the dot text in the page (the switch's own NAME, "Wi-Fi"); name stays the instance id
+                "connectors": [{"name": s.name, "label": _label(s), "type": s.type, "ok": m.get(f"conn.{s.name}.ok") == "1",
                                 "error": m.get(f"conn.{s.name}.error", ""), "ts": int(m.get(f"conn.{s.name}.ts") or 0) or None,
                                 "ms": int(m.get(f"conn.{s.name}.ms") or 0), "count": int(m.get(f"conn.{s.name}.count") or 0),
                                 "enabled": m.get(f"conn.{s.name}.enabled", "1") == "1"} for s in cfg.instances],

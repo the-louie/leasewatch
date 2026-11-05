@@ -27,9 +27,17 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 ### Optional sources
 
 - **Switch port (SNMPv3):** a read-only v3 user on the switch with a view that includes `1.3.6.1.2.1` (mib-2) and `1.0.8802.1.1.2` (LLDP), authentication SHA or SHA-256, privacy AES-128. Set `SNMP_HOST` (a host name or IP without a port; UDP 161 is used), `SNMP_USER`, `SNMP_AUTH`, `SNMP_AUTH_KEY`, `SNMP_PRIV_KEY`. Ports with an LLDP neighbour or ≥ 6 MACs are shown as `port → what hangs there`.
+  - `SNMP_PROFILE` / `SNMP_PROFILE_FILE` / `SNMP_MIN_MACS` (or `PROFILE` / `PROFILE_FILE` / `MIN_MACS` per `snmp_switch` instance, see Connectors): the SNMP profile says which tables are walked and which vendor quirks apply. Without them leasewatch detects the profile from `sysObjectID`/`sysDescr` (first match wins, else `standard`). A profile file is your own JSON profile and wins over the profile name; it may `extends` a built-in one. `MIN_MACS` (default: the profile's `uplink.min_macs`, 6) is how many MACs on a port without an LLDP neighbour make it an uplink.
+  - Cisco IOS (`cisco_ios`): the forwarding table is read per VLAN through SNMPv3 contexts named `vlan-<N>`; the SNMPv3 group needs `context vlan- match prefix` (or one context per VLAN). Without them leasewatch logs "per-VLAN contexts unavailable, using Q-BRIDGE" once and reads Q-BRIDGE instead.
+  - Port names are shortened on every profile (`GigabitEthernet1/0/1` → `GE1/0/1`, `Ten-GigabitEthernet` → `XGE`, `FortyGigE` → `FGE`, `HundredGigE` → `HGE`, `TwentyFiveGigE` → `TGE`, `Bridge-Aggregation` → `BAGG`, `Port-channel` → `Po`); a profile's `port_name.short` replaces the map.
 - **Wi-Fi (UniFi Network):** a read-only admin on the controller; set `UNIFI_URL`, `UNIFI_USER`, `UNIFI_PASSWORD` (classic session API: `/api/login`, `/api/s/<site>/stat/sta`). The controller's device alias becomes the display name when no name or hostname exists.
 - **Mail (Mailgun):** set `MAILGUN_KEY`, `MAILGUN_DOMAIN`, `MAIL_TO`; for an EU-region domain also `MAILGUN_API_BASE=https://api.eu.mailgun.net`.
 - Either source failing only greys its dot in the status pill; the last values stay.
+
+### Commands
+
+- `python -m leasewatch snmp-profiles` lists the built-in SNMP profiles and their match rules.
+- `python -m leasewatch snmp-detect <instance>` (or `--host 10.0.0.2 --auth-key-env SNMP_AUTH_KEY --priv-key-env SNMP_PRIV_KEY`) prints sysObjectID, sysDescr, the chosen profile and the first rows of each walk. Keys are read from environment variables, never from the command line. Needs pysnmp.
 
 ### Connectors
 
@@ -48,7 +56,7 @@ Each instance collects in its own thread. One that fails, or takes longer than i
 | POST | `/api/devices/<mac>` | `{"acked": bool, "name": str, "note": str}` (any subset) |
 | GET | `/api/stats` | counts, per-network, first-seen times of the last 30 days' newcomers |
 | GET | `/api/events` | last 300 events |
-| GET | `/api/status` | collector meta only, with `connectors`: one entry per instance (`name`, `type`, `ok`, `error`, `ts`, `ms`, `count`, `enabled`) |
+| GET | `/api/status` | collector meta only, with `connectors`: one entry per instance (`name`, `label`, `type`, `ok`, `error`, `ts`, `ms`, `count`, `enabled`). `connectors` is the stable form; the `switch` and `unifi` objects in the meta are kept for 1.1 only and go away in 1.2 |
 | GET | `/api/devices.csv` | CSV export (timestamps ISO 8601 in the container's `TZ`) |
 | GET | `/healthz` | 200 when the last poll succeeded and is fresh, else 503 |
 

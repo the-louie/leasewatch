@@ -73,11 +73,13 @@
     const ok = m.last_poll_ok && !stale;
     dot.className = "dot " + (ok ? "ok" : "bad");
     txt.innerHTML = m.last_poll_ts ? `fw1 polled ${esc(rel(m.last_poll_ts))} · ${esc(m.last_raw.replace("arp", "ARP entries"))}` : "no poll yet";
-    // one dot per connector instance; a server without m.connectors (1.0) has only the switch and UniFi objects
-    const sources = m.connectors ? m.connectors.map(c => [c.name, c])
-      : [[m.switch?.name || "switch", m.switch], ["Wi-Fi", m.unifi]].filter(([, s]) => s && s.enabled);
-    for (const [label, s] of sources) {
-      txt.insertAdjacentHTML("beforeend", `<span class="src" title="${esc(s.ok ? `${label}: OK` : `${label}: ${s.error}`)}"><span class="dot ${s.ok ? "ok" : "bad"}"></span>${esc(label)}</span>`);
+    // one dot per connector instance, text = its display label, tooltip = its instance name; a server without
+    // m.connectors (1.0) has only the switch and UniFi objects, and one without label (1.1 before labels) the name
+    // an instance disabled at start (invalid settings) gets no dot: it never polls, and the start log names the problem
+    const sources = m.connectors ? m.connectors.filter(c => c.enabled !== false).map(c => [c.label || c.name, c.name, c])
+      : [[m.switch?.name || "switch", "switch", m.switch], ["Wi-Fi", "unifi", m.unifi]].filter(([, , s]) => s && s.enabled);
+    for (const [label, name, s] of sources) {
+      txt.insertAdjacentHTML("beforeend", `<span class="src" title="${esc(s.ok ? `${name}: OK` : `${name}: ${s.error}`)}"><span class="dot ${s.ok ? "ok" : "bad"}"></span>${esc(label)}</span>`);
     }
     $("#status").title = m.last_error ? `Last error: ${m.last_error}` : `Polls every ${m.poll_seconds}s`;
     if (!m.last_poll_ok && m.last_error) showBanner(`Collector cannot read fw1: ${m.last_error} (last good data ${rel(m.last_poll_ts)})`);

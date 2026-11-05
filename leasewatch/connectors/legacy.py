@@ -18,8 +18,13 @@ def fw1_settings(cfg: Config) -> dict[str, str]:
 
 
 def switch_settings(cfg: Config) -> dict[str, str]:
-    return {"host": cfg.snmp_host, "name": cfg.snmp_name, "user": cfg.snmp_user, "auth": cfg.snmp_auth,
-            "auth_key": cfg.snmp_auth_key, "priv_key": cfg.snmp_priv_key}
+    out = {"host": cfg.snmp_host, "name": cfg.snmp_name, "user": cfg.snmp_user, "auth": cfg.snmp_auth,
+           "auth_key": cfg.snmp_auth_key, "priv_key": cfg.snmp_priv_key}
+    # only when set: empty is the wrapper's default (detection, the profile's min_macs) anyway
+    for key, value in (("profile", cfg.snmp_profile), ("profile_file", cfg.snmp_profile_file), ("min_macs", cfg.snmp_min_macs)):
+        if value:
+            out[key] = value
+    return out
 
 
 def unifi_settings(cfg: Config) -> dict[str, str]:

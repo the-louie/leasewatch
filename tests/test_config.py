@@ -2,6 +2,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
+from leasewatch.__main__ import startup_line
 from leasewatch.config import Config
 
 BASE = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s"}
@@ -17,6 +18,13 @@ class ConfigTests(unittest.TestCase):
     def problems(self, **env):
         os.environ.update(env)
         return Config().validate()
+
+    def test_startup_line_names_instances_not_urls(self):
+        os.environ.update({"SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8,
+                           "UNIFI_URL": "https://unifi.example.lan", "UNIFI_USER": "ro", "UNIFI_PASSWORD": "pw"})
+        line = startup_line(Config(), "1.1.0.dev0")
+        self.assertEqual(line, "leasewatch 1.1.0.dev0, connectors fw1 (opnsense), switch (snmp_switch), unifi (unifi); poll 120 s; mail off")
+        self.assertNotIn("fw1.example.lan", line)
 
     def test_base_is_valid(self):
         self.assertEqual(self.problems(), [])

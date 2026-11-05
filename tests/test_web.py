@@ -19,6 +19,7 @@ from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Fw1Error, Sighting  # noqa: E402
+from leasewatch.connectors import InstanceSpec  # noqa: E402
 from leasewatch.web import MAX_BODY, serve  # noqa: E402
 
 MAC1 = "aa:bb:cc:dd:ee:01"  # baseline device (present at first poll)
@@ -793,6 +794,19 @@ class QaFixTests(WebTestCase):
         self.cfg.site_name = "A{{VERSION}}B"
         st, _, body = self.req("GET", "/")
         self.assertEqual(st, 200); self.assertIn(b"A{{VERSION}}B", body)
+
+    def test_connector_labels(self):
+        # legacy variables: the switch's SNMP_NAME and "Wi-Fi" as dot text, the instance name stays in "name"
+        self.cfg.snmp_host, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, self.cfg.snmp_name = "10.0.0.2", "a" * 8, "p" * 8, "sw-rack"
+        self.cfg.unifi_url, self.cfg.unifi_user, self.cfg.unifi_password = "https://unifi.example.lan", "ro", "pw"
+        conns = self.get_json("/api/status")[0]["meta"]["connectors"]
+        self.assertEqual([(c["name"], c["label"]) for c in conns], [("fw1", "fw1"), ("switch", "sw-rack"), ("unifi", "Wi-Fi")])
+        # LW_CONNECTORS: NAME when set, else the instance name
+        self.cfg.connector_specs = [InstanceSpec("fw2", "opnsense", {}), InstanceSpec("sw-a", "snmp_switch", {"name": "ap-hall-sw"}),
+                                    InstanceSpec("sw-b", "snmp_switch", {}), InstanceSpec("wifi", "unifi", {})]
+        conns = self.get_json("/api/status")[0]["meta"]["connectors"]
+        self.assertEqual([(c["name"], c["label"]) for c in conns],
+                         [("fw2", "fw2"), ("sw-a", "ap-hall-sw"), ("sw-b", "sw-b"), ("wifi", "Wi-Fi")])
 
     def test_port_in_use_exits_2_without_traceback(self):
         with socket.socket() as busy:

@@ -19,6 +19,7 @@ from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, InstanceSpec,  # noqa: E402
                                    Setting, SettingsMixin, Sighting, registry)
 from leasewatch.connectors.legacy import fw1_settings, legacy_specs  # noqa: E402
+from leasewatch import snmp_profiles  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Fw1Error  # noqa: E402
 from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
@@ -130,6 +131,27 @@ class ParseTests(Base):
         self.assertIn("connector fw1 (opnsense): cannot read SECRET_FILE (No such file or directory)", cfg.validate())
         cfg = self.cfg({**FW1, "LW_CONNECTORS": "fw1", "LW_CONNECTOR__FW1__URL_FILE": path})
         self.assertIn("connector fw1 (opnsense): unknown setting URL_FILE", cfg.validate())
+        # a FIFO or device would block the start, a huge file stall it: refused before reading, path contents not echoed
+        fifo = os.path.join(self.tmp.name, "fifo")
+        os.mkfifo(fifo)
+        for bad in (fifo, "/dev/zero", self.tmp.name):
+            cfg = self.cfg({**env, "LW_CONNECTOR__FW1__SECRET_FILE": bad})
+            self.assertIn("connector fw1 (opnsense): cannot read SECRET_FILE (not a regular file)", cfg.validate())
+        big = os.path.join(self.tmp.name, "big")
+        with open(big, "w") as f:
+            f.write("sekret" + "x" * 64 * 1024)
+        p = self.cfg({**env, "LW_CONNECTOR__FW1__SECRET_FILE": big}).validate()
+        self.assertIn("connector fw1 (opnsense): cannot read SECRET_FILE (larger than 64 KiB)", p)
+        self.assertNotIn("sekret", "\n".join(p))
+
+    def test_settings_for_unlisted_instance_or_case_twins(self):
+        p = self.cfg({"LW_CONNECTORS": "fw1", **FW1, "LW_CONNECTOR__FW2__URL": "https://fw2.example.lan",
+                      "LW_CONNECTOR__FW2__TYPE": "opnsense", "LW_CONNECTOR__SW-A__HOST": "10.0.0.2"}).validate()
+        self.assertEqual(p, ["LW_CONNECTOR__FW2__TYPE set but fw2 is not in LW_CONNECTORS",
+                             "LW_CONNECTOR__SW-A__HOST set but sw-a is not in LW_CONNECTORS"])
+        p = self.cfg({"LW_CONNECTORS": "fw1", **FW1, "LW_CONNECTOR__fw1__key": "sekret-other"}).validate()
+        self.assertEqual(p, ["LW_CONNECTOR__FW1__KEY and LW_CONNECTOR__fw1__key differ only in case"])
+
 
     def test_unknown_or_missing_type_and_bad_names(self):
         p = self.cfg({**FW1, "LW_CONNECTORS": "fw1,x,y,Bad_Name,fw1", "LW_CONNECTOR__X__TYPE": "dnsmasq"}).validate()
@@ -161,6 +183,26 @@ class ParseTests(Base):
         self.assertEqual(new.instances, expected[:1])
         # only fw1 without the optional sources; LW_CONNECTORS="" counts as unset
         self.assertEqual([s.name for s in self.cfg({"FW1_KEY": "k", "LW_CONNECTORS": ""}).instances], ["fw1"])
+
+
+    def test_legacy_snmp_profile_variables(self):
+        snmp = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s", "SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8}
+        path = os.path.join(self.tmp.name, "mine.json")
+        with open(path, "w") as f:
+            json.dump({"profile": "mine", "api_version": 1, "extends": "standard"}, f)
+        cfg = self.cfg({**snmp, "SNMP_PROFILE": "cisco_ios", "SNMP_PROFILE_FILE": path, "SNMP_MIN_MACS": "4"})
+        sw = next(s for s in cfg.instances if s.name == "switch")
+        self.assertEqual((sw.settings["profile"], sw.settings["profile_file"], sw.settings["min_macs"]), ("cisco_ios", path, "4"))
+        # unset: not in the spec, so the wrapper's defaults (detection, the profile's min_macs) apply
+        sw = next(s for s in self.cfg(snmp).instances if s.name == "switch")
+        self.assertFalse({"profile", "profile_file", "min_macs"} & set(sw.settings))
+        # wrong values are reported at start under the variable names the operator set
+        p = self.cfg({**snmp, "SNMP_PROFILE": "nope", "SNMP_MIN_MACS": "0"}).validate()
+        self.assertIn("SNMP_PROFILE must be one of " + ", ".join(snmp_profiles.BUILTIN), p)
+        self.assertIn("SNMP_MIN_MACS must be an integer >= 1", p)
+        p = self.cfg({**snmp, "SNMP_PROFILE_FILE": os.path.join(self.tmp.name, "missing.json")}).validate()
+        self.assertEqual(p, ["SNMP_PROFILE_FILE cannot be read"])
+        self.assertEqual(self.cfg({**snmp, "SNMP_PROFILE_FILE": path, "SNMP_MIN_MACS": "4"}).validate(), [])
 
 
 class ValidateTests(Base):
@@ -334,7 +376,7 @@ class StatusTests(Base):
         self.assertEqual(list(body), ["meta"])
         conns = body["meta"]["connectors"]
         self.assertEqual([(c["name"], c["type"], c["ok"], c["enabled"]) for c in conns], [("fw1", "opnsense", True, True), ("x", "fake", True, True)])
-        self.assertEqual(set(conns[0]), {"name", "type", "ok", "error", "ts", "ms", "count", "enabled"})
+        self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "enabled"})
         self.assertEqual(conns[0]["count"], 1)
         self.assertIn("switch", body["meta"])  # the 1.0 objects stay for one release
         self.assertNotIn("fw1-key", json.dumps(body))

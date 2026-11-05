@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from .connectors import NAME_RE, InstanceSpec, instance_problems, registry, secret_keys
 
 ENV_PREFIX = "LW_CONNECTOR__"
+MAX_SECRET_FILE = 64 * 1024  # bytes of a <KEY>_FILE; a secret is a few hundred at most
 
 
 def _env(name: str, default: str = "") -> str:
@@ -50,11 +51,23 @@ def parse_instances(environ: Mapping[str, str]) -> tuple[list[InstanceSpec], lis
     found while parsing. A secret key also accepts <KEY>_FILE: the file's stripped content is the value (read here)."""
     problems: list[str] = []
     by_name: dict[str, dict[str, str]] = {}
-    for k, v in environ.items():
+    var_of: dict[tuple[str, str], str] = {}  # (name, key) -> the variable that set it, for the messages below
+    for k in sorted(environ):
         if k.startswith(ENV_PREFIX):
             name, sep, key = k[len(ENV_PREFIX):].partition("__")
             if sep and key:
-                by_name.setdefault(name.lower(), {})[key.lower()] = v.strip()
+                name, key = name.lower(), key.lower()
+                if (name, key) in var_of:
+                    # which of the two wins would depend on the environment's order; never echo the values
+                    problems.append(f"{var_of[name, key]} and {k} differ only in case")
+                    continue
+                var_of[name, key] = k
+                by_name.setdefault(name, {})[key] = environ[k].strip()
+    listed = {n.strip() for n in environ.get("LW_CONNECTORS", "").split(",")}
+    # a typo in an instance name (or one dropped from the list) would otherwise silently ignore its settings
+    for name in sorted(set(by_name) - listed):
+        first = var_of[name, min(by_name[name])]
+        problems.append(f"{first} set but {name} is not in LW_CONNECTORS")
     specs: list[InstanceSpec] = []
     for name in (n.strip() for n in environ.get("LW_CONNECTORS", "").split(",")):
         if not name:
@@ -74,9 +87,21 @@ def parse_instances(environ: Mapping[str, str]) -> tuple[list[InstanceSpec], lis
             if settings.get(key):
                 problems.append(f"connector {name} ({type_}): set {key.upper()} or {key.upper()}_FILE, not both")
                 continue
+            label = f"connector {name} ({type_}): cannot read {key.upper()}_FILE"
+            # a FIFO, a device such as /dev/zero or a huge file would block or stall the start
+            if os.path.exists(path) and not os.path.isfile(path):
+                problems.append(f"{label} (not a regular file)")
+                continue
             try:
+                if os.path.getsize(path) > MAX_SECRET_FILE:
+                    problems.append(f"{label} (larger than 64 KiB)")
+                    continue
                 with open(path, encoding="utf-8") as f:
-                    settings[key] = f.read().strip()
+                    value = f.read(MAX_SECRET_FILE + 1)  # the file may grow between the size check and the read
+                if len(value) > MAX_SECRET_FILE:
+                    problems.append(f"{label} (larger than 64 KiB)")
+                    continue
+                settings[key] = value.strip()
             except (OSError, UnicodeDecodeError) as e:
                 problems.append(f"connector {name} ({type_}): cannot read {key.upper()}_FILE ({getattr(e, 'strerror', None) or type(e).__name__})")
         specs.append(InstanceSpec(name, type_, settings))
@@ -125,6 +150,11 @@ class Config:
     snmp_auth: str = field(default_factory=lambda: _env("SNMP_AUTH", "SHA").upper().replace("-", ""))
     snmp_auth_key: str = field(default_factory=lambda: _env("SNMP_AUTH_KEY"), repr=False)
     snmp_priv_key: str = field(default_factory=lambda: _env("SNMP_PRIV_KEY"), repr=False)
+    # SNMP profile of the switch: empty = detected from sysObjectID/sysDescr; PROFILE_FILE (own JSON) wins over PROFILE
+    snmp_profile: str = field(default_factory=lambda: _env("SNMP_PROFILE"))
+    snmp_profile_file: str = field(default_factory=lambda: _env("SNMP_PROFILE_FILE"))
+    # MACs on a port without an LLDP neighbour that make it an uplink; empty = the profile's uplink.min_macs
+    snmp_min_macs: str = field(default_factory=lambda: _env("SNMP_MIN_MACS"))
     unifi_url: str = field(default_factory=lambda: _env("UNIFI_URL").rstrip("/"))
     unifi_site: str = field(default_factory=lambda: _env("UNIFI_SITE", "default"))
     unifi_user: str = field(default_factory=lambda: _env("UNIFI_USER"))
@@ -235,6 +265,14 @@ class Config:
             problems.append("SNMP_HOST set but SNMP_AUTH_KEY/SNMP_PRIV_KEY missing")
         if legacy and self.snmp_host and self.snmp_auth not in ("SHA", "SHA256"):
             problems.append("SNMP_AUTH must be SHA or SHA256")
+        if legacy and self.snmp_enabled and (self.snmp_profile or self.snmp_profile_file or self.snmp_min_macs):
+            # the switch wrapper checks these; its "connector switch (snmp_switch): PROFILE ..." lines are renamed to the
+            # variables the operator actually set
+            from .connectors.legacy import legacy_specs  # legacy.py imports this module
+            head = "connector switch (snmp_switch): "
+            spec = next(sp for sp in legacy_specs(self) if sp.name == "switch")
+            problems += ["SNMP_" + p[len(head):] for p in instance_problems(spec)
+                         if p.startswith(head) and p[len(head):].startswith(("PROFILE", "MIN_MACS"))]
         if legacy and self.unifi_url and not self.unifi_enabled:
             problems.append("UNIFI_URL set but UNIFI_USER/UNIFI_PASSWORD missing")
         if not legacy:

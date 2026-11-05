@@ -138,6 +138,12 @@ def snmp_detect_cmd(argv: list[str]) -> int:
     return 0
 
 
+def startup_line(cfg: Config, version: str) -> str:
+    """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail."""
+    conns = ", ".join(f"{s.name} ({s.type})" for s in cfg.instances)
+    return f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {'on' if cfg.mail_enabled else 'off'}"
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in SUBCOMMANDS:
@@ -178,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    log.info("leasewatch %s, polling %s every %ss, mail %s", __version__, cfg.fw1_url, cfg.poll_seconds, "on" if cfg.mail_enabled else "off")
+    log.info("%s", startup_line(cfg, __version__))
     srv.serve_forever()
     srv.server_close()
     t.join(10)  # let a poll in flight commit before the interpreter goes away
