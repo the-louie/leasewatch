@@ -9,9 +9,13 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .config import Config
 from .db import Database
+from .connectors.legacy import legacy_instances, switch_settings, unifi_settings
+from .connectors.snmp_switch import SnmpSwitchConnector
+from .connectors.unifi import UnifiConnector
 from .fw1 import Fw1Client, Fw1Error, Sighting
 from . import notify
 
@@ -69,32 +73,62 @@ class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
-        self.client = client or Fw1Client(cfg.fw1_url, cfg.fw1_key, cfg.fw1_secret, cfg.fw1_verify_tls, dhcp_backend=cfg.dhcp_backend,
-                                            use_env_proxy=cfg.lan_proxy)
+        # the sources as connector instances (fw1, switch, unifi) built from today's variables; client/_switch/_unifi
+        # below read and replace the client object each one wraps
+        self._connectors: dict = legacy_instances(cfg, fw1_client=client)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
-        self._switch = None
-        self._unifi = None
-        if cfg.snmp_enabled:
-            from .switch import SwitchClient
-            self._switch = SwitchClient(cfg)
-        if cfg.unifi_enabled:
-            from .unifi import UnifiClient
-            self._unifi = UnifiClient(cfg)
+
+    @property
+    def client(self) -> object:
+        return self._connectors["fw1"].client
+
+    @client.setter
+    def client(self, obj: object) -> None:
+        self._connectors["fw1"].client = obj
+
+    def _get_client(self, name: str) -> object | None:
+        conn = self._connectors.get(name)
+        return conn.client if conn else None
+
+    def _set_client(self, name: str, factory: Callable[[str, object], object], obj: object | None) -> None:
+        """Swap the client a connector wraps; None removes the connector, a client without one gets a new wrapper."""
+        if obj is None:
+            self._connectors.pop(name, None)
+        elif name in self._connectors:
+            self._connectors[name].client = obj
+        else:
+            self._connectors[name] = factory(name, obj)
+
+    @property
+    def _switch(self) -> object | None:
+        return self._get_client("switch")
+
+    @_switch.setter
+    def _switch(self, obj: object | None) -> None:
+        self._set_client("switch", lambda n, o: SnmpSwitchConnector(n, switch_settings(self.cfg), self._connectors["fw1"].ctx, client=o), obj)
+
+    @property
+    def _unifi(self) -> object | None:
+        return self._get_client("unifi")
+
+    @_unifi.setter
+    def _unifi(self, obj: object | None) -> None:
+        self._set_client("unifi", lambda n, o: UnifiConnector(n, unifi_settings(self.cfg), self._connectors["fw1"].ctx, client=o), obj)
 
     def _enrich(self) -> tuple[object, dict, dict]:
         """Fetch the optional sources; a failure is recorded in meta and the device fields are left as they were."""
         snap, wifi, status = None, {}, {}
         if self._switch:
             try:
-                snap = self._switch.snapshot()
+                snap = self._connectors["switch"].collect().extra["snapshot"]
                 status["switch_ok"] = "1"; status["switch_error"] = ""; status["switch_macs"] = str(len(snap.by_mac))
             except Exception as e:
                 log.warning("switch poll failed: %s", e)
                 status["switch_ok"] = "0"; status["switch_error"] = (str(e) or type(e).__name__)[:200]  # a bare TimeoutError has no text
         if self._unifi:
             try:
-                wifi = self._unifi.clients()
+                wifi = self._connectors["unifi"].collect().extra["wifi"]
                 status["unifi_ok"] = "1"; status["unifi_error"] = ""; status["unifi_clients"] = str(len(wifi))
             except Exception as e:
                 log.warning("unifi poll failed: %s", e)
