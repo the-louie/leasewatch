@@ -426,6 +426,44 @@ class MergeTableTests(unittest.TestCase):
                 res = self.run_merge([], {"bad": Batch(sightings=None), "fw1": fw1(arp(A))})
         self.assertEqual(res.rows[A]["ip"], "10.0.0.5")
 
+    def test_held_device_keeps_loc_source_when_controller_says_wired(self):
+        """C2d: holder sw2 failed, the controller lists the device as wired, sw1 offers an edge port: over two polls the
+        port and loc_source stay and no port event is written (the controller must not take over loc_source)."""
+        prev = [row(A, link="wired", sw_port="GE1/0/7", loc_source="sw2")]
+        batches = {"fw1": fw1(arp(A)), "unifi": Batch(attachments=[Attachment(mac=A, source="unifi", observed_at=NOW, link="wired")]),
+                   "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")]), "sw2": ConnectorFailure("sw2", "TimeoutError", NOW)}
+        for poll in (1, 2):
+            with self.subTest(poll=poll):
+                res = self.run_merge(prev, batches, controllers=CTRL)
+                r = res.rows[A]
+                self.assertEqual((r["sw_port"], r["loc_source"], r["link"]), ("GE1/0/7", "sw2", "wired"))
+                self.assertEqual([e for e in res.events if e[1] == "port"], [])
+                prev = list(res.rows.values())
+
+    def test_wrong_typed_fields_are_coerced_not_fatal(self):
+        """C2d item 1: a valid MAC with ip=None, vendor=5, presence="yes", signal="\u221261" merges with coerced values."""
+        sig = Sighting(mac=A, source="", kind="arp", presence="yes", observed_at="x", ip=None, vendor=5, network=" Clients ")
+        att = Attachment(mac=A, source="", observed_at=NOW, link="wifi", ssid="HomeNet", ap="ap-hall", signal="\u221261", vlan="20",
+                         uplink=0, present=1)
+        out = normalise_batch("weird", Batch(sightings=[sig], attachments=[att]))
+        s, a = out.sightings[0], out.attachments[0]
+        self.assertEqual((s.ip, s.vendor, s.presence, s.observed_at, s.network, s.hostname), ("", "5", True, 0, "Clients", ""))
+        self.assertEqual((a.signal, a.vlan, a.uplink, a.present), (-61, 20, False, True))
+        self.assertEqual(out.stats, {"dropped": 0})
+        res = self.run_merge([], {"weird": Batch(sightings=[sig], attachments=[att])}, controllers=CTRL | {"weird"})
+        r = res.rows[A]
+        self.assertEqual((r["ip"], r["vendor"], r["online"], r["wifi_signal"], r["link"]), ("", "5", 1, -61, "wifi"))
+
+    def test_empty_network_ranks_last_in_hostname_fallback(self):
+        """C2d item 2: between two ARP rows, the one without a network gives way, whatever the firewall's row order."""
+        for order in ([0, 1], [1, 0]):
+            rows = [arp(A, "10.0.0.5", host="", net="", vendor=""), arp(A, "10.0.0.5", host="", net="Clients", vendor="Acme")]
+            rows[0] = replace(rows[0], hostname="from-empty-net")
+            rows[1] = replace(rows[1], hostname="from-clients")
+            with self.subTest(order=order):
+                res = self.run_merge([], {"fw1": fw1(*[rows[i] for i in order])})
+                self.assertEqual((res.rows[A]["hostname"], res.rows[A]["vlan"]), ("from-clients", "Clients"))
+
     def test_stats_and_history_values(self):
         res = self.run_merge([row(A, hostname="pc", lease_type="dynamic")], {"fw1": fw1(S(A, "10.0.0.6", "pc"), arp(A, "10.0.0.6"), arp(B, "10.0.0.9"))})
         self.assertEqual(res.stats, {"devices": 2, "new": 1, "changed": 1})

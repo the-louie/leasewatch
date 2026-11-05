@@ -19,8 +19,8 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
     vendor                dhcp, arp, client, scan       the first non-empty value
     lease_type            dhcp                          the chosen lease only
 
-"First" is by the sort keys (empty IP last, network, IP, static before dynamic, hostname, vendor, interface), so
-the result never depends on the order the sources return rows in.
+"First" is by the sort keys (empty IP last, then empty network last, network, IP, static before dynamic, hostname,
+vendor, interface), so the result never depends on the order the sources return rows in.
 
 Attachments: link must be "wired" or "wifi" (anything else is ignored, logged once per instance and value). A
 controller (ConnectorInfo.roles has "controller") sends its whole client list: "wifi" places a device on Wi-Fi,
@@ -131,9 +131,9 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     for s in sightings:
         by_mac.setdefault(s.mac, []).append(s)
     out: dict[str, Merged] = {}
-    # an empty IP sorts last (it cannot be where the device is), a static lease before a dynamic one
+    # an empty IP or network sorts last (it cannot be where the device is), a static lease before a dynamic one
     # vendor and iface too: every field the merge takes from a sighting is a key, so ties never depend on row order
-    pick = lambda s: (s.ip == "", s.vlan, s.ip, s.lease_type != "static", s.hostname, s.vendor, s.iface)
+    pick = lambda s: (s.ip == "", s.vlan == "", s.vlan, s.ip, s.lease_type != "static", s.hostname, s.vendor, s.iface)
     for mac, ss in by_mac.items():
         ss = sorted(ss, key=lambda s: (s.source,) + pick(s))
         dhcp = [s for s in ss if s.source == "dhcp"]
@@ -155,12 +155,42 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     return out
 
 
+_STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind"),
+               Attachment: ("link", "device", "port", "via", "ssid", "ap", "radio", "alias")}
+_BOOL_FIELDS = {Sighting: ("presence",), Attachment: ("uplink", "present")}
+_OPT_INT_FIELDS = {Sighting: (), Attachment: ("vlan", "signal")}
+
+
+def _int(v: object) -> int | None:
+    """int(v) for a number or a numeric string ("-61", "\u221261" with a Unicode minus), else None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        return int(float(str(v).strip().replace("\u2212", "-")))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachment:
+    """A copy with every field of its declared type: a third-party connector's None or number in a str field would
+    otherwise raise deep in the merge (sort keys, .strip(), the SQL write) and fail the whole poll. `link` keeps its
+    value after the str conversion: anything but "wired"/"wifi" is ignored and logged later, as before."""
+    t = type(r)
+    ch: dict = {"mac": mac, "source": name, "observed_at": _int(r.observed_at) or 0}
+    ch.update({f: "" if getattr(r, f) is None else str(getattr(r, f)).strip() for f in _STR_FIELDS[t]})
+    ch.update({f: bool(getattr(r, f)) for f in _BOOL_FIELDS[t]})
+    ch.update({f: _int(getattr(r, f)) for f in _OPT_INT_FIELDS[t]})
+    return r if all(getattr(r, f) == v and type(getattr(r, f)) is type(v) for f, v in ch.items()) else replace(r, **ch)
+
+
 def normalise_batch(name: str, b: Batch) -> Batch:
     """The host's part of the record contract, for one instance's batch: `source` set to the instance name, `mac`
     normalised, records whose MAC fails norm_mac dropped (stats["dropped"], one WARNING per instance per process).
     Never raises: one connector's malformed batch must not fail the poll for the others, so a record of the wrong
     type, a MAC that is not a str, and a sightings/attachments field that is not a list (counted as one) are
-    dropped the same way. Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
+    dropped the same way. A record with a valid MAC but a wrong-typed field is kept with its fields coerced (str
+    fields: None -> "", else str().strip(); flags -> bool; observed_at -> int or 0; vlan/signal -> int or None).
+    Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
     dropped = 0
 
     def fix(records: object, kind: type) -> list:
@@ -172,7 +202,7 @@ def normalise_batch(name: str, b: Batch) -> Batch:
         for r in records:
             mac = norm_mac(r.mac) if isinstance(r, kind) and isinstance(r.mac, str) else ""
             if mac:
-                out.append(r if (mac, name) == (r.mac, r.source) else replace(r, mac=mac, source=name))
+                out.append(_coerce(r, mac, name))
             else:
                 dropped += 1
         return out
@@ -328,7 +358,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 upd.update(sw_port="", sw_via="")
         elif w is not None:  # the controller says wired now: drop the old Wi-Fi details
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
-            upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
+            if not held:  # the failed holder switch keeps the device: taking loc_source would unlock a port move next poll
+                upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
         # its last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
         if ctrl_ok and not ctrl_failed and on_wire and cur["wifi_ssid"] and mac not in wifi:

@@ -21,6 +21,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - The database gets a `schema_version` and is migrated automatically at the first start (a `seen` table and the `loc_source` column). The migration is one-way: back up `DATA_DIR` before the upgrade if you may go back to 1.0.
 - SNMP errors never contain the switch address; an error from a per-VLAN walk names the VLAN.
 - The startup line names each instance and its type, without URLs.
+- hostname/vendor fallback between several rows of one MAC is now deterministic (empty IP or network ranks last); 1.0 depended on the firewall's row order.
 
 ### Deprecated
 
