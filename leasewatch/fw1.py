@@ -101,13 +101,14 @@ def kea_leases(rows: list[dict]) -> list[dict]:
 
 def dnsmasq_leases(rows: list[dict]) -> list[dict]:
     """dnsmasq rows (/api/dnsmasq/leases/search) in the common shape. They use the Kea key names but have no "state"
-    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname or client id, and
-    include IPv6 leases, which leasewatch does not track."""
+    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname, and include IPv6
+    leases, which leasewatch does not track. Their client id ("*" when empty too) is not read: kea_leases keeps
+    no client id, as Sighting.client_id is not used by this backend."""
     out = []
     for l in rows:
         if not isinstance(l, dict) or ":" in _s(l.get("address")):
             continue
-        out.append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
+        out.append({**l, "hostname": ""} if _s(l.get("hostname")) == "*" else l)
     return kea_leases(out)
 
 

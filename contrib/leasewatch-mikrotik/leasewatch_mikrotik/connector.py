@@ -30,7 +30,7 @@ log = logging.getLogger("leasewatch.contrib.mikrotik")
 
 MAX_BODY = 32 * 1024 * 1024  # as fw1: a lease/ARP list is a few MB at most
 MAX_ERROR_BODY = 64 * 1024  # an error answer is one small JSON object
-MAX_DETAIL = 120  # characters of RouterOS's error text kept in a message
+MAX_ERROR_TEXT = 300  # characters of an error text kept, cut only after redaction and host masking
 REQUEST_TIMEOUT = 30  # seconds per request; RouterOS itself cuts a command after 60 s
 
 PATH_SERVERS = "/rest/ip/dhcp-server?.proplist=name,interface"
@@ -41,12 +41,17 @@ PATH_PROBE = "/rest/system/resource?.proplist=version"
 
 # ARP states in which RouterOS sets `complete` (MikroTik ARP docs); used only when `complete` itself is absent
 COMPLETE_STATES = frozenset({"reachable", "stale", "delay", "probe", "permanent"})
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+# as db.py's _CTRL, plus tab and newline: also the Unicode line/paragraph separators and the bidi and zero-width
+# controls, which split or reorder a line in a viewer as a newline would
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]+")
 
 
 def _s(v: Any) -> str:
-    """RouterOS sends every value as a string; a null or a number from a changed firmware must not crash the poll."""
-    return "" if v is None else str(v).strip()
+    """RouterOS sends every value as a string; a null or a number from a changed firmware must not crash the poll.
+    A boolean, list or object is no value at all: "" (not "[]"), so it never shadows the configured value."""
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        return ""
+    return str(v).strip()
 
 
 def flag(row: Mapping[str, Any], key: str) -> bool | None:
@@ -178,9 +183,11 @@ def make_host_mask(url: str) -> Callable[[str], str]:
 
 
 def _clean(text: str) -> str:
-    """One line of at most MAX_DETAIL characters: control characters out, so a router answer cannot forge log lines."""
+    """One line of at most MAX_ERROR_TEXT characters: control characters out, so a router answer cannot forge log
+    lines. Only _error calls it, after redaction and masking: a cut first would leave a part of a secret or host
+    that no longer matches."""
     text = _CTRL_RE.sub(" ", text).strip()
-    return text if len(text) <= MAX_DETAIL else text[:MAX_DETAIL] + "..."
+    return text if len(text) <= MAX_ERROR_TEXT else text[:MAX_ERROR_TEXT] + "..."
 
 
 def _http_error_text(e: urllib.error.HTTPError) -> str:
@@ -195,20 +202,21 @@ def _http_error_text(e: urllib.error.HTTPError) -> str:
     except Exception:  # any: the body is a courtesy; a broken or non-JSON one changes nothing
         body = None
     if isinstance(body, dict):
-        parts = [_clean(_s(body.get(k))) for k in ("message", "detail") if isinstance(body.get(k), str)]
-        parts = [p for p in parts if p]
+        # raw: _error redacts, masks, then cleans and cuts the whole text
+        parts = [_s(body.get(k)) for k in ("message", "detail") if isinstance(body.get(k), str)]
+        parts = [p for p in parts if _CTRL_RE.sub("", p).strip()]
         if parts:
             out += ": " + "; ".join(parts)
     return out
 
 
 def _os_error_text(e: BaseException) -> str:
-    """What went wrong at the network or TLS level, without a stack of nested reprs."""
+    """What went wrong at the network or TLS level, without a stack of nested reprs. Raw: _error cleans and cuts."""
     if isinstance(e, ssl.SSLCertVerificationError):
-        return f"TLS certificate not accepted ({_clean(e.verify_message or 'verify failed')}); set VERIFY_TLS=0 for a self-signed certificate"
+        return f"TLS certificate not accepted ({e.verify_message or 'verify failed'}); set VERIFY_TLS=0 for a self-signed certificate"
     if isinstance(e, ssl.SSLError):
         # .reason is set only on errors ssl itself raises; strerror carries the text of a hand-built one
-        return f"TLS error ({_clean(getattr(e, 'reason', None) or e.strerror or type(e).__name__)})"
+        return f"TLS error ({getattr(e, 'reason', None) or e.strerror or type(e).__name__})"
     if isinstance(e, (TimeoutError, socket.timeout)):
         return "timed out"
     if isinstance(e, ConnectionRefusedError):
@@ -216,7 +224,7 @@ def _os_error_text(e: BaseException) -> str:
     if isinstance(e, socket.gaierror):
         return "host name not resolved"
     if isinstance(e, OSError) and e.strerror:
-        return _clean(e.strerror)
+        return str(e.strerror)
     return type(e).__name__
 
 
@@ -247,6 +255,10 @@ class MikrotikConnector(SettingsMixin):
             if not found and not self.settings["url"].lower().startswith("https://"):
                 # Basic auth sends the password with every request; plain http (the www service) would expose it
                 found.append("url must start with https:// (the www-ssl service)")
+            if not found and ("?" in self.settings["url"] or "#" in self.settings["url"]):
+                # every request path is appended to the URL; after a "?" or "#" it would become query or fragment
+                # data and the router would answer with its web page. A path is allowed (a reverse proxy prefix)
+                found.append("url must not contain a query (?) or fragment (#)")
             problems += found
         if ":" in self.settings["user"]:
             problems.append("user must not contain ':' (HTTP Basic auth cannot carry it)")
@@ -256,11 +268,13 @@ class MikrotikConnector(SettingsMixin):
         return problems
 
     def _error(self, path: str, text: str) -> ConnectorError:
-        """The one way out: the path without its query, the host masked, the password redacted (also when the
-        router echoes it), then the host's redactor for the secrets of every instance."""
-        # only the text is masked: a host named "rest" must not mask the path
-        msg = f"mikrotik {path.split('?', 1)[0]}: {self._mask_host(text)}"
-        return ConnectorError(self.ctx.redact(self._redact(msg)))
+        """The one way out, in this order: the password (also when the router echoes it) and, through the host's
+        redactor, the secrets of every instance redacted; then the host masked; then control characters out and
+        the text cut. Redaction before masking: a secret that contains the host name would no longer match once
+        the host is masked. Both before the cut: a secret or host cut in two would not match at all."""
+        text = _clean(self._mask_host(self.ctx.redact(self._redact(text))))
+        # only the text is masked: a host named "rest" must not mask the path, which is a constant of this module
+        return ConnectorError(f"mikrotik {path.split('?', 1)[0]}: {text}")
 
     def _get(self, path: str) -> Any:
         """One GET, its body parsed as JSON. Raises ConnectorError."""
@@ -287,9 +301,11 @@ class MikrotikConnector(SettingsMixin):
             raise self._error(path, text) from None
         except urllib.error.URLError as e:
             reason = e.reason if isinstance(e.reason, BaseException) else None
-            raise self._error(path, _os_error_text(reason) if reason else _clean(_s(e.reason))) from None
+            raise self._error(path, _os_error_text(reason) if reason else _s(e.reason)) from None
         except (http.client.HTTPException, OSError) as e:  # OSError covers ssl.SSLError and TimeoutError
             raise self._error(path, _os_error_text(e)) from None
+        except UnicodeError:  # the IDNA codec refuses the host ("label too long", "label empty"); validate() cannot
+            raise self._error(path, "bad URL (host name not valid)") from None
         if len(raw) > MAX_BODY:
             raise self._error(path, f"response larger than {MAX_BODY // (1024 * 1024)} MiB")
         try:

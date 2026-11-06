@@ -11,6 +11,7 @@ import ipaddress
 import logging
 import os
 import stat
+import time
 from typing import Mapping
 
 from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, Setting,
@@ -19,6 +20,7 @@ from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, Connector
 log = logging.getLogger("leasewatch.contrib.dnsmasq")
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
+RETRY_DELAY = 0.05  # seconds before the one re-read of a file caught mid-rewrite; dnsmasq's rewrite takes far less
 # lines dnsmasq writes besides leases: the server DUID (before the DHCPv6 leases) and per-lease extra data
 EXTRA_KEYWORDS = frozenset({"duid", "vendorclass", "agent-info"})
 
@@ -95,21 +97,51 @@ def _os_problem(e: OSError) -> str:
         return "permission denied"
     if e.errno == errno.ENXIO:  # a UNIX socket fails at open, before fstat could say what it is
         return "not a regular file"
-    return type(e).__name__
+    if e.errno == errno.ELOOP:
+        return "symbolic link loop"
+    if e.errno == errno.ENAMETOOLONG:
+        return "path too long"
+    # strerror never holds the path (the OSError's filename does); it says more than "OSError"
+    return os.strerror(e.errno).lower() if e.errno else type(e).__name__
 
 
-def read_file(path: str) -> str:
-    """The text of the leases file (bounded, regular files only). Raises ConnectorError."""
+def _read_once(path: str) -> tuple[bytes, bool]:
+    """The bytes of the file, and whether it changed while it was read: size or mtime differ before and after the
+    read, or fewer bytes were read than its size. Raises ConnectorError."""
     fd = _open(path)
     try:
+        before = os.fstat(fd)
         with open(fd, "rb", closefd=False) as f:
             raw = f.read(MAX_FILE_BYTES + 1)  # bounded again: the file may have grown since fstat()
+        after = os.fstat(fd)
     except OSError as e:
         raise ConnectorError(f"PATH: {_os_problem(e)}") from None
     finally:
         os.close(fd)
     if len(raw) > MAX_FILE_BYTES:
         raise ConnectorError(f"PATH: larger than {MAX_FILE_BYTES // 1024} KiB")
+    changed = ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+               or len(raw) != after.st_size)
+    return raw, changed
+
+
+def read_file(path: str) -> str:
+    """The text of the leases file (bounded, regular files only). Raises ConnectorError.
+
+    dnsmasq rewrites the file in place: ftruncate to 0, then buffered writes, then fflush (research: lease.c
+    lease_update_file). A read in that window gets a prefix that parses as a shorter but valid list, and on the
+    first poll that list would become the baseline. Such a read is caught by a change during the read, or by a
+    text that does not end with a newline (every line dnsmasq writes does; a stdio buffer boundary rarely falls
+    on a line end). It is read once more after RETRY_DELAY; if that read still changes, or still lacks the final
+    newline and differs from the first, the poll fails for this instance instead of reporting a short list.
+    A file without a final newline that reads the same twice is stable (hand-written or copied) and is used."""
+    raw, changed = _read_once(path)
+    if changed or (raw and not raw.endswith(b"\n")):
+        time.sleep(RETRY_DELAY)
+        again, changed = _read_once(path)
+        if changed or (again and not again.endswith(b"\n") and again != raw):
+            raise ConnectorError("PATH: file changed while reading")
+        raw = again
     # dnsmasq writes ASCII; a stray byte from a hand-edited file must not fail the whole poll
     return raw.decode("utf-8", errors="replace")
 

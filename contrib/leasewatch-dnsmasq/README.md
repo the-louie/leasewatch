@@ -37,7 +37,12 @@ LW_CONNECTOR__DHCP1__NETWORK=LAN
 
 The file may be at most 4 MiB, and must be a regular file (a FIFO, socket or directory is refused without
 blocking). Errors name only the kind of problem (`PATH: not found`, `PATH: permission denied`,
-`PATH: not a regular file`, `PATH: larger than 4096 KiB`).
+`PATH: not a regular file`, `PATH: larger than 4096 KiB`, `PATH: symbolic link loop`, `PATH: path too long`, and for
+other errors the system's short error text), never the path.
+
+dnsmasq rewrites the file in place, so a read can catch it half written. A read during which the file changed, or
+whose text does not end with a newline, is repeated once after 50 ms. If the file is still changing, the poll fails
+for this instance with `PATH: file changed while reading` instead of reporting a short lease list.
 
 ## Where the file is
 

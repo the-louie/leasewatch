@@ -3,6 +3,7 @@ error texts (no host, no secrets), settings and the Batch shape. Synthetic data 
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import socket
@@ -145,6 +146,14 @@ class ParseTest(unittest.TestCase):
         row["host-name"] = None
         s = parse(SERVERS, [row], [], NOW)[0][0]
         self.assertEqual((s.ip, s.hostname), ("5", ""))
+
+    def test_non_string_active_value_does_not_shadow_configured(self) -> None:
+        # a list, object or boolean is not a value: it must fall back to the configured one, not become "[]"
+        for junk in ([], {}, False, True, [1]):
+            row = lease(**{"active-mac-address": junk, "active-address": junk, "active-client-id": junk,
+                           "client-id": "1:2:0:0:0:0:1"})
+            s = parse(SERVERS, [row], [], NOW)[0][0]
+            self.assertEqual((s.mac, s.ip, s.client_id), ("02:00:00:00:00:01", "10.0.0.10", "1:2:0:0:0:0:1"), junk)
 
 
 class FakeRouter:
@@ -339,6 +348,66 @@ class StubTest(unittest.TestCase):
         self.assertEqual(self.error(make(ctx=ctx)), "mikrotik /rest/system/resource: *** here")
 
 
+class ErrorTextTest(unittest.TestCase):
+    """The error pipeline: secrets redacted first, then the host masked, then the text cleaned and cut."""
+
+    def http_error(self, detail: str, url: str = "https://router.example.lan", password: str = PASSWORD,
+                   redact: object = None) -> str:
+        body = json.dumps({"error": 400, "message": "Bad Request", "detail": detail}).encode()
+
+        def factory(**kw: bool) -> StubOpener:
+            return StubOpener(urllib.error.HTTPError(url + "/rest/x", 400, "Bad", {}, io.BytesIO(body)))
+        ctx = HostContext(now=lambda: NOW, opener_factory=factory, **({"redact": redact} if redact else {}))
+        conn = MikrotikConnector("mt1", {"url": url, "user": USER, "password": password}, ctx)
+        with self.assertRaises(ConnectorError) as cm:
+            conn.check()
+        return str(cm.exception)
+
+    def test_secret_containing_the_host_is_redacted_whole(self) -> None:
+        pw = "router.example.lan#2024"
+        text = self.http_error(f'invalid value "{pw}"', password=pw)
+        self.assertIn('invalid value "***"', text)
+        self.assertNotIn("2024", text)
+        text = self.http_error("invalid value 10.0.0.1!secret9", url="https://10.0.0.1", password="10.0.0.1!secret9")
+        self.assertNotIn("secret9", text)
+        # another instance's secret (the host's redactor) is also matched before the host is masked
+        other = "router.example.lan/other-77"
+        text = self.http_error(f"x {other}", redact=lambda t: t.replace(other, "***"))
+        self.assertNotIn("other-77", text)
+
+    def test_cut_never_leaves_part_of_a_secret_or_host(self) -> None:
+        for n in range(90, 420, 7):  # the secret or host at every position around the cut
+            text = self.http_error("x" * n + " " + PASSWORD)
+            self.assertNotIn(PASSWORD[:6], text, n)
+            text = self.http_error("y" * n + " router.example.lan")
+            self.assertNotIn("router.ex", text, n)
+
+    def test_long_host_in_tls_message_masked(self) -> None:
+        host = "edge-router-01." + "site-north." * 6 + "example.lan"  # longer than the old 120-character cut
+        e = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        e.verify_message = f"Hostname mismatch, certificate is not valid for '{host}'."
+        conn = MikrotikConnector("mt1", {"url": "https://" + host, "user": USER, "password": PASSWORD},
+                                 HostContext(opener_factory=lambda **kw: StubOpener(urllib.error.URLError(e))))
+        with self.assertRaises(ConnectorError) as cm:
+            conn.check()
+        self.assertNotIn("edge-router", str(cm.exception))
+        self.assertIn("'<host>'", str(cm.exception))
+        self.assertIn("VERIFY_TLS=0", str(cm.exception))
+
+    def test_unicode_line_and_bidi_controls_removed(self) -> None:
+        for ch in "\u2028\u2029\u202a\u202e\u2066\u2069\u200e\u200f\u061c\u200b\ufeff":
+            self.assertEqual(mc._clean(f"a{ch}b"), "a b", repr(ch))
+        self.assertNotIn("\u202e", self.http_error("a\u2028b\u202ec"))
+
+    def test_idna_error_wrapped(self) -> None:
+        for exc in (UnicodeError("label too long"), UnicodeEncodeError("idna", "x", 0, 1, "label empty")):
+            conn = make(ctx=HostContext(opener_factory=lambda **kw: StubOpener(exc)))
+            with self.assertRaises(ConnectorError) as cm:
+                conn.check()
+            self.assertEqual(str(cm.exception), "mikrotik /rest/system/resource: bad URL (host name not valid)")
+            self.assertIsNone(cm.exception.__cause__)
+
+
 class SettingsTest(unittest.TestCase):
     def test_describe(self) -> None:
         info = MikrotikConnector.describe()
@@ -359,6 +428,12 @@ class SettingsTest(unittest.TestCase):
                          ["url must start with https:// (the www-ssl service)"])
         self.assertIn("url must not contain credentials", make(f"https://{USER}:{PASSWORD}@router.example.lan").validate())
         self.assertIn("url must be a URL (https://<router>)", make("router.example.lan").validate())
+        # every request path is appended to the URL: a query or fragment would swallow it
+        for url in ("https://router.example.lan?x=1", "https://router.example.lan/?x=1", "https://router.example.lan#a",
+                    "https://router.example.lan?"):
+            self.assertEqual(make(url).validate(), ["url must not contain a query (?) or fragment (#)"], url)
+        for url in ("https://router.example.lan/", "https://router.example.lan:8443", "https://10.0.0.1/mt"):
+            self.assertEqual(make(url).validate(), [], url)
 
     def test_bool_and_user_checks(self) -> None:
         conn = MikrotikConnector("mt1", {"url": "https://router.example.lan", "user": "a:b", "password": PASSWORD,

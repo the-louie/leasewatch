@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))  # the package directory, when not started from it
@@ -147,6 +148,65 @@ class FileTest(unittest.TestCase):
         with open(path, "wb") as f:
             f.write(b"1900000000 02:00:00:00:00:01 10.0.0.10 caf\xe9 *\n\xff\xfe\n")
         self.assertEqual(make(path).collect().stats, {"leases": 1, "dropped": 1})
+
+    def test_symlink_loop_and_long_name(self) -> None:
+        loop = os.path.join(self.dir, "loop1")
+        os.symlink(os.path.join(self.dir, "loop2"), loop)
+        os.symlink(loop, os.path.join(self.dir, "loop2"))
+        self.assert_problem(make(loop), "symbolic link loop")
+        self.assert_problem(make(os.path.join(self.dir, "a" * 300)), "path too long")
+
+
+class TornReadTest(unittest.TestCase):
+    """dnsmasq rewrites the file in place (truncate, then buffered writes): a read in between sees a prefix."""
+    FULL = b"1900000000 02:00:00:00:00:01 10.0.0.10 a *\n1900000000 02:00:00:00:00:02 10.0.0.11 b *\n"
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.path = os.path.join(self.dir, "dhcp.leases")
+
+    def write(self, data: bytes) -> None:
+        with open(self.path, "wb") as f:
+            f.write(data)
+
+    def test_prefix_is_retried_and_full_file_used(self) -> None:
+        self.write(self.FULL[:60])  # cut inside the second line, as a stdio buffer boundary falls
+        with mock.patch.object(dc.time, "sleep", side_effect=lambda s: self.write(self.FULL)) as sleep:
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_still_changing_after_retry_fails_the_poll(self) -> None:
+        self.write(self.FULL[:50])
+        with mock.patch.object(dc.time, "sleep", side_effect=lambda s: self.write(self.FULL[:60])):
+            with self.assertRaises(ConnectorError) as cm:
+                make(self.path).collect()
+        self.assertEqual(str(cm.exception), "PATH: file changed while reading")
+
+    def test_size_change_during_read_is_retried(self) -> None:
+        self.write(self.FULL)
+        real, calls = os.fstat, []
+
+        def fstat(fd: int) -> os.stat_result:
+            st = real(fd)
+            calls.append(1)
+            if len(calls) == 3:  # the first read's after-read fstat: the writer appended meanwhile
+                return os.stat_result((*st[:6], st.st_size + 40, *st[7:]))
+            return st
+        with mock.patch.object(dc.os, "fstat", side_effect=fstat), mock.patch.object(dc.time, "sleep") as sleep:
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_stable_file_without_final_newline_is_read(self) -> None:
+        self.write(self.FULL.rstrip(b"\n"))  # a hand-written or copied file; the same on the second read
+        with mock.patch.object(dc.time, "sleep"):
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+
+    def test_complete_file_read_once(self) -> None:
+        self.write(self.FULL)
+        with mock.patch.object(dc.time, "sleep") as sleep:
+            make(self.path).collect()
+        self.assertEqual(sleep.call_count, 0)
 
 
 class SettingsTest(unittest.TestCase):

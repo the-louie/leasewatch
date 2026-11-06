@@ -12,7 +12,7 @@ confirmed or fixed.
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `URL` | yes | | `https://<router>`; must be `https://` (the password is sent with every request) |
+| `URL` | yes | | `https://<router>`; must be `https://` (the password is sent with every request). No `?query` or `#fragment`: the REST paths are appended to it. A path (`https://proxy.example.lan/mt`) is kept as a prefix |
 | `USER` | yes | | RouterOS user (see below) |
 | `PASSWORD` | yes | | That user's password (secret; `PASSWORD_FILE` also works) |
 | `VERIFY_TLS` | no | `1` | Check the router's certificate. Set `0` for a self-signed certificate |
