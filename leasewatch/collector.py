@@ -432,7 +432,7 @@ class Collector:
         state = MergeState(self._no_lease_since, first_run, prev_ok,
                            frozenset(n for n, conn in self._connectors.items()
                                      if "controller" in getattr(conn.describe(), "roles", frozenset())),
-                           producers=frozenset(producers))
+                           producers=frozenset(producers), held_back=bool(waiting))
         with self.db.tx() as c:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             res = merge_batches(prev, batches, self.cfg, now, state)

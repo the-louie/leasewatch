@@ -211,8 +211,8 @@ class DnsmasqWithFirewallTest(ContribFitBase):
             # a later poll without changes: still nothing to mail
             col.run_once()
         mail.assert_not_called()
-        # no "new" event; the late leases still add hostname/lease_type change events to the baseline row of fw1's device
-        self.assertEqual(db.q("SELECT COUNT(*) n FROM events WHERE kind='new'")[0]["n"], 0)
+        # no event at all: the late leases only complete the baseline row of fw1's device (B-09)
+        self.assertEqual(db.q("SELECT COUNT(*) n FROM events")[0]["n"], 0)
 
         both, lease_only = self.device(db, MAC_FW), self.device(db, MAC_LEASE)
         self.assertEqual((both["online"], both["hostname"], both["ip"], both["baseline"]), (1, "alex-laptop", "10.0.0.5", 1))

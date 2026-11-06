@@ -12,6 +12,10 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
 - **OPNsense dnsmasq:** `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` reads the DHCPv4 leases of the dnsmasq DHCP server (`/api/dnsmasq/leases/search`, OPNsense 25.1.6+). IPv6 leases are skipped; reservations without an active lease are not listed. The privilege *Services: Dnsmasq DNS/DHCP: Settings* also grants write access: OPNsense has no read-only one.
 
+### Changed
+
+- **Baseline:** while the baseline waits for a sighting producer, no change events (ip, hostname, network, lease type, port, Wi-Fi, back) and no history rows are written, so a late producer no longer logs its details as changes (e.g. "hostname - -> laptop"). Devices are still recorded and updated; the poll that takes the baseline writes one history row per device with its complete values.
+
 ### Fixed
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.

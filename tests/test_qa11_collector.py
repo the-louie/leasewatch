@@ -526,6 +526,45 @@ class BaselineWaitTests(Base):
         self.assertNotEqual(db.get_meta("first_run_done", ""), "1")
         self.assertEqual(sent, [])
 
+    # B-09: while the baseline waits, a late producer's details are no change: no events, no history rows; the poll
+    # that takes the baseline writes one history row per device with the complete picture
+    def test_late_details_during_the_wait_write_no_events_or_history(self):
+        col, db = self.collector(self.ENV)
+        sent = []
+        col._connectors["fx"].on_collect = self.down
+        with self.assertLogs("leasewatch.collector", "WARNING"):
+            self.poll(col, sent)
+        self.assertEqual(db.q("SELECT COUNT(*) n FROM history")[0]["n"], 0)
+
+        def late(hostname: str = "alex-laptop") -> Batch:
+            return Batch(sightings=[Sighting(mac=MAC, source="fx", kind="dhcp", presence=False, observed_at=0,
+                                             ip="10.0.0.5", hostname=hostname, network="LAN", lease_type="dynamic")])
+        col._connectors["fx"].on_collect = late
+        self.poll(col, sent)
+        self.assertEqual(db.get_meta("first_run_done", ""), "1")
+        self.assertEqual([dict(r) for r in db.q("SELECT kind, detail FROM events")], [])
+        self.assertEqual([tuple(r) for r in db.q("SELECT mac, ip, hostname, vlan, lease_type FROM history")],
+                         [(MAC, "10.0.0.5", "alex-laptop", "LAN", "dynamic")])
+        dev = dict(db.q("SELECT hostname, lease_type, vlan, baseline FROM devices WHERE mac=?", (MAC,))[0])
+        self.assertEqual(dev, {"hostname": "alex-laptop", "lease_type": "dynamic", "vlan": "LAN", "baseline": 1})
+        # after the baseline a real change is an event and a history row again
+        col._connectors["fx"].on_collect = lambda: late("alex-laptop-2")
+        self.poll(col, sent)
+        self.assertEqual([tuple(r) for r in db.q("SELECT kind, detail FROM events")],
+                         [("hostname", "alex-laptop -> alex-laptop-2")])
+        self.assertEqual(db.q("SELECT COUNT(*) n FROM history")[0]["n"], 2)
+        self.assertEqual(sent, [])
+
+    def test_single_producer_first_poll_writes_one_history_row_per_device(self):
+        env = {k: v for k, v in self.ENV.items() if not k.startswith("LW_CONNECTOR__FX")}
+        col, db = self.collector({**env, "LW_CONNECTORS": "fw1"}, rows=[arp(MAC, "10.0.0.5"), arp("02:00:00:00:00:09", "10.0.0.9")])
+        self.poll(col, [])
+        self.assertEqual(sorted(tuple(r) for r in db.q("SELECT mac, ip FROM history")),
+                         [(MAC, "10.0.0.5"), ("02:00:00:00:00:09", "10.0.0.9")])
+        self.client.rows = [arp(MAC, "10.0.0.7"), arp("02:00:00:00:00:09", "10.0.0.9")]
+        self.poll(col, [])
+        self.assertEqual([tuple(r) for r in db.q("SELECT kind, detail FROM events")], [("ip", "10.0.0.5 -> 10.0.0.7")])
+
     def test_empty_very_first_poll_still_fails(self):
         col, db = self.collector(self.ENV)
         col._connectors["fx"].on_collect = self.down

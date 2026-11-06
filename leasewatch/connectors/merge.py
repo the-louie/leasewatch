@@ -105,6 +105,7 @@ class MergeState:
     prev_ok: bool = True
     controllers: frozenset[str] = frozenset()
     producers: frozenset[str] | None = None
+    held_back: bool = False  # first_run, and the baseline is not taken this poll (a producer has not answered yet)
 
 
 @dataclass
@@ -350,6 +351,13 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
+    if state.first_run:
+        # B-09 (owner decision 2026-11-06): until the baseline is taken, a producer answering late only completes the
+        # first picture (e.g. "hostname - -> laptop"), so it is no change: no events, and no history until the poll
+        # that takes the baseline writes one row per device with its complete values
+        res.events = []
+        res.history = [] if state.held_back else [
+            (mac, {k: row[k] for k in ("ip", "hostname", "vlan", "lease_type")}) for mac, row in rows.items()]
     res.rows = {mac: row for mac, row in rows.items()
                 if mac in merged or any(row[k] != before[mac][k] for k in UPDATE_COLUMNS)}
     res.stats = {"devices": len(merged), "new": len(res.new), "changed": changes}
