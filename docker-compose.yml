@@ -13,8 +13,10 @@ services:
       VIRTUAL_HOST: leases.example.lan
       VIRTUAL_PORT: "8080"
       TZ: UTC  # your zone (e.g. Europe/Stockholm): used for log and CSV timestamps; the UI uses the browser's zone
+      # LW_CONNECTORS_DIR: /connectors  # connectors that are not built in (e.g. a copy of contrib/leasewatch-dnsmasq in ./connectors)
     volumes:
       - ./data:/data
+      # - ./connectors:/connectors:ro
     networks:
       - nginx-proxy
     read_only: true

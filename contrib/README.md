@@ -13,20 +13,34 @@ Each subdirectory is an independent package with its own distribution name:
 
 ```
 contrib/<dist-name>/
-    pyproject.toml        # metadata, plus the connector entry point (used from 1.2's loader)
+    pyproject.toml        # metadata, plus the connector entry point
     <package>/            # the connector code, e.g. leasewatch_dnsmasq/
         __init__.py
     README.md             # what it reads, its settings, an example LW_CONNECTOR__<NAME>__<KEY> block
     tests/                # unittest files (test_*.py); synthetic data only, no network
 ```
 
-The entry point in `pyproject.toml` is a placeholder until the loader exists. Write it commented out:
+`pyproject.toml` declares the connector type as an entry point; leasewatch's loader reads it both from an
+installed distribution and from `LW_CONNECTORS_DIR`:
 
 ```toml
-# used from 1.2's loader
-# [project.entry-points."leasewatch.connectors.v1"]
-# <type> = "<package>.connector:<ClassName>"
+[project.entry-points."leasewatch.connectors.v1"]
+<type> = "<package>.connector:<ClassName>"
 ```
+
+## Using a package
+
+In the container, copy the package directory into a directory on the host, mount that read-only and point
+`LW_CONNECTORS_DIR` at it (one subdirectory per package, as here):
+
+```
+mkdir -p connectors && cp -r contrib/leasewatch-dnsmasq connectors/
+docker run ... -v ./connectors:/connectors:ro -e LW_CONNECTORS_DIR=/connectors leasewatch:local
+```
+
+`docker-compose.yml` has the same two lines, commented out. Outside a container, `pip install contrib/<dist-name>`
+installs it as a distribution instead (the build needs `setuptools`). Use one way per package: a type declared
+twice is refused.
 
 ## What a connector may import from leasewatch
 

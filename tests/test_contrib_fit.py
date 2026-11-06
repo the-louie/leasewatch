@@ -1,8 +1,8 @@
 """The contrib connectors (dnsmasq_leases, mikrotik) inside the real Collector, web handler included.
 
-There is no loader for contrib packages yet, so each test registers the contrib classes in the connector registry
-for its own duration (as test_instances.py does with its fakes). Synthetic data only; the RouterOS REST API is a
-local stub on port 0, reached over plain HTTP through the host's opener_factory hook.
+Each test sets LW_CONNECTORS_DIR to the repository's contrib/ directory, so the real loader imports both packages
+through the entry points in their pyproject.toml; nothing patches the registry. Synthetic data only; the RouterOS
+REST API is a local stub on port 0, reached over plain HTTP through the host's opener_factory hook.
 """
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _contrib import use_contrib  # noqa: E402
+from _contrib import CONTRIB  # noqa: E402
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
 
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import registry  # noqa: E402
+from leasewatch.connectors import _reset_registry, load_problems, registry, type_origins  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
 from leasewatch.web import serve  # noqa: E402
@@ -120,15 +120,19 @@ class RouterStub:
 
 class ContribFitBase(unittest.TestCase):
     def setUp(self) -> None:
-        use_contrib(self, "leasewatch-dnsmasq")
-        use_contrib(self, "leasewatch-mikrotik")
-        from leasewatch_dnsmasq import connector as dnsmasq
-        from leasewatch_mikrotik import connector as mikrotik
-        # the registry is a process global: patch.dict restores it when the test ends
-        reg = mock.patch.dict(registry(), {"dnsmasq_leases": dnsmasq.DnsmasqLeasesConnector,
-                                           "mikrotik": mikrotik.MikrotikConnector})
-        reg.start()
-        self.addCleanup(reg.stop)
+        # LW_CONNECTORS_DIR stays set for the whole test: the collector looks the types up in registry() on every
+        # poll, and a changed value rebuilds it. The environment and the registry (a process global, whose
+        # contrib modules sit in sys.modules) are restored in the cleanup.
+        saved = clean_env({"LW_CONNECTORS_DIR": CONTRIB})
+        self.addCleanup(_reset_registry)
+        self.addCleanup(restore, saved)
+        self.assertEqual(load_problems(), [])
+        reg = registry()
+        self.assertEqual((reg["dnsmasq_leases"].__module__, reg["mikrotik"].__module__),
+                         ("leasewatch_dnsmasq.connector", "leasewatch_mikrotik.connector"))
+        self.assertEqual({t: (o.kind, o.entry) for t, o in type_origins().items() if t in ("dnsmasq_leases", "mikrotik")},
+                         {"dnsmasq_leases": ("LW_CONNECTORS_DIR", "leasewatch-dnsmasq"),
+                          "mikrotik": ("LW_CONNECTORS_DIR", "leasewatch-mikrotik")})
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
@@ -150,7 +154,7 @@ class ContribFitBase(unittest.TestCase):
 
     def collector(self, env: dict) -> tuple[Collector, Database]:
         saved = clean_env({"DATA_DIR": self.tmp, "POLL_SECONDS": "15", "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
-                           **env})
+                           "LW_CONNECTORS_DIR": CONTRIB, **env})
         try:
             cfg = Config()
         finally:

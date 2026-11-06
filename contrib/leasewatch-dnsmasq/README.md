@@ -78,6 +78,20 @@ services:
 The file must be readable by the container's user. For a file on another host (e.g. OpenWrt), copy it to the
 leasewatch host on a schedule and point `PATH` at the copy.
 
+## Installing
+
+The package declares the entry point `dnsmasq_leases` in the group `leasewatch.connectors.v1`. In the container, copy this
+directory into a plugin directory and mount it read-only:
+
+```
+mkdir -p connectors && cp -r contrib/leasewatch-dnsmasq connectors/
+docker run ... -v ./connectors:/connectors:ro -e LW_CONNECTORS_DIR=/connectors leasewatch:local
+```
+
+(or uncomment the `LW_CONNECTORS_DIR` and `./connectors` lines in `docker-compose.yml`). Outside a container,
+`pip install contrib/leasewatch-dnsmasq` installs it instead (the build needs `setuptools`). The start log lists the type
+(`connector types: ...; dnsmasq_leases 0.1 (leasewatch-dnsmasq 0.1.0, LW_CONNECTORS_DIR /connectors)`).
+
 ## Tests
 
 ```

@@ -87,6 +87,20 @@ group needs the read and rest-api policies)`, other HTTP codes with RouterOS's `
 not accepted (...)`, `timed out`, `connection refused (is the www-ssl service enabled?)`, `response is not JSON`.
 The router's host name or address is shown as `<host>`; the password is never shown.
 
+## Installing
+
+The package declares the entry point `mikrotik` in the group `leasewatch.connectors.v1`. In the container, copy this
+directory into a plugin directory and mount it read-only:
+
+```
+mkdir -p connectors && cp -r contrib/leasewatch-mikrotik connectors/
+docker run ... -v ./connectors:/connectors:ro -e LW_CONNECTORS_DIR=/connectors leasewatch:local
+```
+
+(or uncomment the `LW_CONNECTORS_DIR` and `./connectors` lines in `docker-compose.yml`). Outside a container,
+`pip install contrib/leasewatch-mikrotik` installs it instead (the build needs `setuptools`). The start log lists the type
+(`connector types: ...; mikrotik 0.1 (leasewatch-mikrotik 0.1.0, LW_CONNECTORS_DIR /connectors)`).
+
 ## Tests
 
 ```
