@@ -163,13 +163,13 @@ class ParseTests(Base):
 class ValidateTests(Base):
     def test_messages(self):
         p = self.cfg({"LW_CONNECTORS": "fw1,swrack,x", **FW1, "LW_CONNECTOR__FW1__URL": "ftp://fw1.example.lan",
-                      "LW_CONNECTOR__FW1__DHCP_BACKEND": "dnsmasq", "LW_CONNECTOR__FW1__TIMEOUT": "0",
+                      "LW_CONNECTOR__FW1__DHCP_BACKEND": "dhcpd", "LW_CONNECTOR__FW1__TIMEOUT": "0",
                       "LW_CONNECTOR__SWRACK__TYPE": "snmp_switch", "LW_CONNECTOR__SWRACK__AUTH_KEY": "sekret-a",
                       "LW_CONNECTOR__SWRACK__PRIV_KEY": "sekret-p",
                       "LW_CONNECTOR__X__TYPE": "fake", "LW_CONNECTOR__X__PORT": "70000", "LW_CONNECTOR__X__TIMEOUT": "abc",
                       "LW_CONNECTOR__X__TOKEN": "sekret-t"}).validate()
         for msg in ("connector fw1 (opnsense): TIMEOUT must be at least 1",
-                    "connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea",
+                    "connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea, dnsmasq",
                     "connector fw1 (opnsense): url must be a URL (https://<opnsense>)",
                     "connector swrack (snmp_switch): HOST is required",
                     "connector x (fake): TIMEOUT must be an integer",

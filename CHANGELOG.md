@@ -8,6 +8,11 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 - **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
 - **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
+- **OPNsense dnsmasq:** `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` reads the DHCPv4 leases of the dnsmasq DHCP server (`/api/dnsmasq/leases/search`, OPNsense 25.1.6+). IPv6 leases are skipped; reservations without an active lease are not listed. The privilege *Services: Dnsmasq DNS/DHCP: Settings* also grants write access: OPNsense has no read-only one.
+
+### Fixed
+
+- **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 
 ## 1.1.0 (2026-11-06)
 

@@ -172,6 +172,17 @@ class KeaTests(StubCase):
         out, _, _ = self.run_kea([{**self.LEASE, "lease_type": "static", "is_reserved": ""}])
         self.assertEqual(out[0].lease_type, "static")
 
+    def test_kea_list_is_reserved_without_lease_type(self):
+        # OPNsense 26.1.5-26.7.3 sends is_reserved as a list and no lease_type; "[]" used to read as reserved
+        base = {k: v for k, v in self.LEASE.items() if k != "lease_type"}
+        cases = [([], "dynamic"), (["hwaddr"], "static"), (["client_id"], "static"), (["hwaddr", "client_id"], "static"),
+                 ("1", "static"), ("0", "dynamic"), ("", "dynamic"), ("true", "static"), ("yes", "static"),
+                 ("false", "dynamic"), (None, "dynamic")]
+        for value, want in cases:
+            self.assertEqual(kea_leases([{**base, "is_reserved": value}])[0]["type"], want, value)
+        self.assertEqual(kea_leases([base])[0]["type"], "dynamic")
+        self.assertEqual(kea_leases([{**base, "is_reserved": [], "lease_type": "static"}])[0]["type"], "static")
+
     def test_kea_reservation_without_lease_is_listed(self):
         res = [{"subnet": "10.0.110.0/24", "ip_address": "10.0.110.20", "hw_address": "02:00:00:00:01:02", "hostname": "nas"},
                {"subnet": "10.0.110.0/24", "ip_address": "10.0.110.5", "hw_address": "02:00:00:00:01:01", "hostname": "x"}]
@@ -214,6 +225,77 @@ class KeaTests(StubCase):
         _, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="isc").sightings()
         self.assertNotIn(KEA_RES, [p for _, p, _, _ in fw.requests])
         self.assertNotIn("reservations", stats)
+
+
+DNSMASQ_LEASES = "/api/dnsmasq/leases/search"
+
+
+class DnsmasqTests(StubCase):
+    # shaped from /api/dnsmasq/leases/search: Kea key names, no "state", "*" for an empty hostname/client id
+    LEASE = {"expire": 1767225600, "hwaddr": "02:00:00:00:02:01", "iaid": "", "address": "10.0.110.15",
+             "hostname": "alexs-ipad", "client_id": "01:02:00:00:00:02:01", "if": "vlan0110", "if_name": "opt3",
+             "if_descr": "Clients", "mac_info": "Acme", "is_reserved": [], "sort_address": "x"}
+    V6 = {"expire": 0, "hwaddr": "", "iaid": "33554433", "address": "fd00::15", "hostname": "*", "client_id": "*",
+          "if": "vlan0110", "if_name": "opt3", "if_descr": "Clients", "mac_info": "", "is_reserved": []}
+
+    def run_dm(self, leases, arp=(), ignore=()):
+        fw = self.stub({DNSMASQ_LEASES: js({"total": len(leases), "rowCount": len(leases), "current": 1, "rows": leases}),
+                        ARP: js(list(arp))})
+        out, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings(ignore)
+        return out, stats, fw
+
+    def test_dnsmasq_row_mapped(self):
+        out, stats, _ = self.run_dm([self.LEASE])
+        self.assertEqual([(s.mac, s.ip, s.hostname, s.vendor, s.iface, s.vlan, s.source, s.lease_type, s.online) for s in out],
+                         [("02:00:00:00:02:01", "10.0.110.15", "alexs-ipad", "Acme", "opt3", "Clients", "dhcp", "dynamic", False)])
+        self.assertEqual(stats, {"leases": 1, "arp": 0})
+
+    def test_dnsmasq_ipv6_rows_dropped(self):
+        v6_with_mac = {**self.V6, "hwaddr": "02:00:00:00:02:02"}  # a DUID-LL client id gives an IPv6 row a MAC
+        out, _, _ = self.run_dm([self.LEASE, self.V6, v6_with_mac])
+        self.assertEqual([s.ip for s in out], ["10.0.110.15"])
+
+    def test_dnsmasq_star_is_empty(self):
+        rows = fw1.dnsmasq_leases([{**self.LEASE, "hostname": "*", "client_id": "*"}])
+        self.assertEqual((rows[0]["hostname"], rows[0]["mac"]), ("", "02:00:00:00:02:01"))
+        self.assertEqual(fw1.dnsmasq_leases([{**self.LEASE, "client_id": "*"}])[0]["hostname"], "alexs-ipad")
+        out, _, _ = self.run_dm([{**self.LEASE, "hostname": "*"}])
+        self.assertEqual(out[0].hostname, "")
+
+    def test_dnsmasq_lease_type_and_list_is_reserved(self):
+        for extra, want in (({"is_reserved": []}, "dynamic"), ({"is_reserved": ["hwaddr"]}, "static"),
+                            ({"is_reserved": ["client_id"]}, "static"), ({"is_reserved": "1"}, "static"),
+                            ({"is_reserved": "0"}, "dynamic"), ({}, "dynamic"),
+                            ({"is_reserved": ["hwaddr"], "lease_type": "dynamic"}, "dynamic"),
+                            ({"is_reserved": [], "lease_type": "static"}, "static")):
+            row = {k: v for k, v in self.LEASE.items() if k != "is_reserved"}
+            out, _, _ = self.run_dm([{**row, **extra}])
+            self.assertEqual(out[0].lease_type, want, extra)
+
+    def test_dnsmasq_ignore_matches_device_identifier_and_description(self):
+        for ign in (("vlan0110",), ("opt3",), ("clients",)):
+            out, _, _ = self.run_dm([self.LEASE], ignore=ign)
+            self.assertEqual(out, [], ign)
+        out, _, _ = self.run_dm([self.LEASE], ignore=("opt4",))
+        self.assertEqual(len(out), 1)
+
+    def test_dnsmasq_calls_only_lease_search_and_arp(self):
+        arp = [{"mac": "02:00:00:00:02:05", "ip": "10.0.110.7", "intf": "vlan0110", "intf_description": "Clients"}]
+        _, stats, fw = self.run_dm([self.LEASE], arp)
+        self.assertEqual(sorted(p for _, p, _, _ in fw.requests), sorted([DNSMASQ_LEASES, ARP]))
+        self.assertNotIn("reservations", stats)
+
+    def test_dnsmasq_errors_are_fw1_errors(self):
+        fw = self.stub({DNSMASQ_LEASES: (403, {}, b"{}"), ARP: js([])})
+        with self.assertRaisesRegex(Fw1Error, "HTTP 403"):
+            Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings()
+        fw = self.stub({DNSMASQ_LEASES: js({"total": 1}), ARP: js([])})
+        with self.assertRaisesRegex(Fw1Error, "unexpected response shape"):
+            Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings()
+        fw = self.stub({DNSMASQ_LEASES: (302, {"Location": "http://10.0.0.9/"}, b""), ARP: js([])})
+        with self.assertRaisesRegex(Fw1Error, "HTTP 302"):
+            Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings()
+        self.assertEqual([p for _, p, _, _ in fw.requests], [DNSMASQ_LEASES])
 
 
 def unifi_cfg(url):

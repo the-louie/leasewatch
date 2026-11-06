@@ -87,10 +87,10 @@ class DescribeTests(unittest.TestCase):
 
 class ValidateTests(unittest.TestCase):
     def test_opnsense(self):
-        p = OpnsenseConnector("fw1", {"url": "fw1.example.lan", "dhcp_backend": "dnsmasq", "verify_tls": "maybe"}, CTX).validate()
+        p = OpnsenseConnector("fw1", {"url": "fw1.example.lan", "dhcp_backend": "dhcpd", "verify_tls": "maybe"}, CTX).validate()
         self.assertTrue("connector fw1 (opnsense): KEY is required" in p and "connector fw1 (opnsense): SECRET is required" in p, p)
         self.assertTrue(any(x.startswith("url must be a URL") for x in p), p)
-        self.assertTrue("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea" in p, p)
+        self.assertTrue("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea, dnsmasq" in p, p)
         self.assertTrue(any(x.startswith("verify_tls must be a boolean") for x in p), p)
         self.assertEqual(OpnsenseConnector("fw1", {**FW1, "url": "https://user:pw@fw1.example.lan"}, CTX).validate(), ["url must not contain credentials"])
         self.assertEqual(OpnsenseConnector("fw1", {**FW1, "url": "https://[fw1"}, CTX).validate(), ["url is not a valid URL"])

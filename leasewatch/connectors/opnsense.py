@@ -1,4 +1,4 @@
-"""OPNsense firewall as a connector: DHCPv4 leases (ISC or Kea, plus Kea reservations) and the ARP table.
+"""OPNsense firewall as a connector: DHCPv4 leases (ISC, Kea or dnsmasq, plus Kea reservations) and the ARP table.
 
 A thin wrapper around fw1.Fw1Client; the client and its normalised fw1.Sighting stay the internal type for now.
 """
@@ -27,7 +27,8 @@ class OpnsenseConnector(SettingsMixin):
             Setting("key", required=True, secret=True, help="API key"),
             Setting("secret", required=True, secret=True, help="API secret"),
             Setting("verify_tls", default="1", help="check the firewall's certificate"),
-            Setting("dhcp_backend", default="kea", choices=("isc", "kea"), help="DHCPv4 server to read leases from"),
+            Setting("dhcp_backend", default="kea", choices=("isc", "kea", "dnsmasq"),
+                    help="DHCPv4 server to read leases from (dnsmasq: leases only, no reservation search)"),
             Setting("ignore_interfaces", default="wan,lo0", help="comma-separated identifiers, devices or descriptions"),
             Setting("proxy", default="0", help="honour http(s)_proxy for this connection"),
         ),

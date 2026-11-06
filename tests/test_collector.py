@@ -195,8 +195,10 @@ class FixRegressionTests(unittest.TestCase):
         self.assertEqual(notify._send.__name__, "_send")
 
     def test_dhcp_backend_is_validated(self):
+        os.environ["LW_CONNECTOR__FW1__DHCP_BACKEND"] = "dhcpd"
+        self.assertIn("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea, dnsmasq", Config().validate())
         os.environ["LW_CONNECTOR__FW1__DHCP_BACKEND"] = "dnsmasq"
-        self.assertIn("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea", Config().validate())
+        self.assertFalse([p for p in Config().validate() if "DHCP_BACKEND" in p])
 
 
 class ReviewFixTests(unittest.TestCase):

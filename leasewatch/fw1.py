@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
-Only read-only endpoints are used: the DHCPv4 lease list (ISC or Kea, the instance's dhcp_backend setting), under
-Kea also the reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting),
+under Kea also the reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
@@ -52,6 +52,14 @@ class Sighting:
     online: bool
 
 
+def _reserved(v: Any) -> bool:
+    """is_reserved was a "1"/"0" string up to OPNsense 26.1.4 and is a list of matched keys (e.g. ["hwaddr"]) from
+    26.1.5; str() of an empty list is "[]", which would read as reserved."""
+    if isinstance(v, (list, tuple)):
+        return len(v) > 0
+    return _s(v).lower() not in ("", "0", "false", "no")
+
+
 def norm_mac(mac: str) -> str:
     mac = (mac or "").strip().lower().replace("-", ":")
     return mac if MAC_RE.match(mac) else ""
@@ -81,7 +89,7 @@ def kea_leases(rows: list[dict]) -> list[dict]:
             continue
         lease_type = _s(l.get("lease_type")).lower()
         if not lease_type:
-            lease_type = "static" if _s(l.get("is_reserved")).lower() not in ("", "0", "false", "no") else "dynamic"
+            lease_type = "static" if _reserved(l.get("is_reserved")) else "dynamic"
         out.append({
             "mac": _s(l.get("hwaddr")) or _s(l.get("mac")), "address": _s(l.get("address")),
             "hostname": _s(l.get("hostname")).rstrip("."), "man": _s(l.get("mac_info")) or _s(l.get("man")),
@@ -89,6 +97,18 @@ def kea_leases(rows: list[dict]) -> list[dict]:
             "type": lease_type, "status": "",
         })
     return out
+
+
+def dnsmasq_leases(rows: list[dict]) -> list[dict]:
+    """dnsmasq rows (/api/dnsmasq/leases/search) in the common shape. They use the Kea key names but have no "state"
+    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname or client id, and
+    include IPv6 leases, which leasewatch does not track."""
+    out = []
+    for l in rows:
+        if not isinstance(l, dict) or ":" in _s(l.get("address")):
+            continue
+        out.append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
+    return kea_leases(out)
 
 
 def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
@@ -195,7 +215,8 @@ class Fw1Client:
     # --- raw ---------------------------------------------------------------
     def leases_raw(self) -> list[dict]:
         # dhcp_backend comes from the instance's dhcp_backend setting (default kea); this class's own "isc" default only applies when built directly
-        path = "/api/kea/leases4/search" if self.dhcp_backend == "kea" else "/api/dhcpv4/leases/searchLease"
+        path = {"kea": "/api/kea/leases4/search", "dnsmasq": "/api/dnsmasq/leases/search"}.get(
+            self.dhcp_backend, "/api/dhcpv4/leases/searchLease")
         r = self._call(path, {"current": 1, "rowCount": LEASE_ROWS})
         if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
             raise Fw1Error("fw1 leases: unexpected response shape")
@@ -252,7 +273,8 @@ class Fw1Client:
 
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
-        lease_rows = kea_leases(leases) if self.dhcp_backend == "kea" else isc_leases(leases)
+        parse = {"kea": kea_leases, "dnsmasq": dnsmasq_leases}.get(self.dhcp_backend, isc_leases)
+        lease_rows = parse(leases)
         if reservations:
             # an active lease already carries what its reservation says; only lease-less reservations are added
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
