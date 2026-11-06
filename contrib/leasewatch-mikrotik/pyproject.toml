@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leasewatch-mikrotik"
+version = "0.1.0"
+description = "leasewatch connector: DHCPv4 leases and ARP from MikroTik RouterOS 7 (REST API)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+packages = ["leasewatch_mikrotik"]
+
+# used from 1.2's loader
+# [project.entry-points."leasewatch.connectors.v1"]
+# mikrotik = "leasewatch_mikrotik.connector:MikrotikConnector"

@@ -7,6 +7,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ### Added
 
 - **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
+- **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
 
 ## 1.1.0 (2026-11-06)
 
