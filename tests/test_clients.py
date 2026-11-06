@@ -280,6 +280,11 @@ class DnsmasqTests(StubCase):
         out, _, _ = self.run_dm([{**self.LEASE, "expire": 1700000000}])  # the caller supplies the current time
         self.assertEqual(out, [])
 
+    def test_dnsmasq_non_finite_expire_keeps_the_lease(self):
+        # JSON allows 1e999/Infinity; int() of it raises OverflowError, which must not escape the client
+        rows = [{**self.LEASE, "expire": v, "hwaddr": f"02:00:00:00:03:0{i}"} for i, v in enumerate((float("inf"), float("-inf"), float("nan")))]
+        self.assertEqual(len(fw1.dnsmasq_leases(rows, NOW_DM)), 3)
+
     def test_dnsmasq_lease_type_and_list_is_reserved(self):
         for extra, want in (({"is_reserved": []}, "dynamic"), ({"is_reserved": ["hwaddr"]}, "static"),
                             ({"is_reserved": ["client_id"]}, "static"), ({"is_reserved": "1"}, "static"),

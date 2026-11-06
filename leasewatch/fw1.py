@@ -113,7 +113,7 @@ def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
             continue
         try:
             expire = int(l.get("expire") or 0)
-        except (TypeError, ValueError):  # a malformed expiry says nothing about the lease; keep it as before
+        except (TypeError, ValueError, OverflowError):  # a malformed or non-finite expiry says nothing about the lease; keep it as before
             expire = 0
         if expire and expire <= now:
             continue
