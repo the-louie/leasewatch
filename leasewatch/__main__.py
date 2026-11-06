@@ -201,6 +201,20 @@ def startup_line(cfg: Config, version: str) -> str:
     return f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {'on' if cfg.mail_enabled else 'off'}"
 
 
+def types_line() -> str:
+    """The INFO line after startup_line(): every loaded connector type and where it comes from (no settings, and no
+    path other than the configured LW_CONNECTORS_DIR)."""
+    from .connectors import registry, type_origins
+    from .connectors.loader import BUILTIN, DIR
+    reg, origins = registry(), type_origins()
+    parts = [f"{', '.join(sorted(t for t in reg if origins.get(t) and origins[t].kind == BUILTIN))} (built-in)"]
+    for o, t in sorted(((o, t) for t, o in origins.items() if o.kind != BUILTIN and t in reg),
+                       key=lambda ot: (ot[0].kind == DIR, ot[1])):  # entry points, then the dir, as they are loaded
+        where = f"LW_CONNECTORS_DIR {o.location}" if o.kind == DIR else o.kind
+        parts.append(f"{t} {o.type_version} ({f'{o.dist} {o.version}'.strip()}, {where})")
+    return "connector types: " + "; ".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in SUBCOMMANDS:
@@ -265,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     log.info("%s", startup_line(cfg, __version__))
+    log.info("%s", types_line())
     srv.serve_forever()
     srv.server_close()
     t.join(10)  # let a poll in flight commit before the interpreter goes away

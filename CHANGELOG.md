@@ -6,6 +6,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Added
 
+- **Third-party connectors:** connector types are loaded from installed packages (entry point group `leasewatch.connectors.v1`) and from `LW_CONNECTORS_DIR` (no default; one package per subdirectory with its `pyproject.toml`, mounted read-only). A duplicate type name is refused (a built-in type always stays); a package that fails to load stops the start only when an instance uses its type. The start log lists the loaded types and their origin. A `<KEY>_FILE` secret of a third-party type is now read like a built-in one.
 - **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
 - **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
 - **OPNsense dnsmasq:** `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` reads the DHCPv4 leases of the dnsmasq DHCP server (`/api/dnsmasq/leases/search`, OPNsense 25.1.6+). IPv6 leases are skipped; reservations without an active lease are not listed. The privilege *Services: Dnsmasq DNS/DHCP: Settings* also grants write access: OPNsense has no read-only one.

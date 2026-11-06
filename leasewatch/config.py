@@ -12,7 +12,8 @@ from encodings.idna import nameprep
 from typing import Mapping
 from urllib.parse import urlparse
 
-from .connectors import _URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, registry, secret_keys, url_has_credentials
+from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, load_problems, registry, secret_keys,
+                         url_has_credentials)
 
 ENV_PREFIX = "LW_CONNECTOR__"
 MAX_SECRET_FILE = 64 * 1024  # bytes of a <KEY>_FILE; a secret is a few hundred at most
@@ -218,12 +219,15 @@ class Config:
     connectors_listed: bool = field(default=False, init=False, repr=False)  # LW_CONNECTORS was set (not empty)
 
     def __post_init__(self) -> None:
+        # B-08.1: load the third-party types first, so parse_instances() -> secret_keys() knows a plugin type's
+        # secret keys and reads its <KEY>_FILE instead of calling it an unknown setting
+        registry()
         self.connector_specs, problems = parse_instances(os.environ)
         self.connectors_listed = bool(_env("LW_CONNECTORS"))
         if not self.connectors_listed:
             problems.append("LW_CONNECTORS is not set: list the connector instances, e.g. LW_CONNECTORS=fw1 with "
                             f"{ENV_PREFIX}FW1__TYPE=opnsense (see .env.example)")
-        self.connector_problems = removed_problems(os.environ) + problems
+        self.connector_problems = removed_problems(os.environ) + load_problems() + problems
 
     @property
     def instances(self) -> list[InstanceSpec]:

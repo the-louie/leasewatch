@@ -11,12 +11,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from leasewatch.config import REMOVED_VARS  # noqa: E402
 
-# Every name read through _env/_env_int in leasewatch/config.py, plus LOG_LEVEL (__main__.py).
+# Every name read through _env/_env_int in leasewatch/config.py, plus LOG_LEVEL (__main__.py) and
+# LW_CONNECTORS_DIR (connectors/__init__.py: a developer's own plugin dir must not reach the tests).
 # Derived with: grep -oE '_env(_int)?\("[A-Z0-9_]+"' leasewatch/config.py. Keep in sync when a setting is added.
 CONFIG_VARS = (
     "ALLOWED_HOSTS", "DATA_DIR", "LEASE_TYPE_MODE", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE",
     "MAILGUN_DOMAIN", "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PUBLIC_URL",
-    "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS",
+    "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS", "LW_CONNECTORS_DIR",
 )
 # the removed 1.0 source variables: a shell that still exports one would make every Config() refuse to start
 REMOVED = tuple(k for names, *_ in REMOVED_VARS for k in names)

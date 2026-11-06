@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import ssl
+import sys
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -402,16 +405,63 @@ class InstanceSpec:
             return 60  # reported by instance_problems()
 
 
-_REGISTRY: dict[str, type] | None = None
+# The loaded types, cached process-wide with the key they were loaded under: (LW_CONNECTORS_DIR, sys.path). A
+# changed key (a test's own dir or fake dist-info, never production) rebuilds it, so no test patches the registry.
+_LOADED = None  # loader.LoadResult
+_KEY: tuple | None = None
+_BUILDING = False
+_LOCK = threading.RLock()
+
+
+def _key() -> tuple:
+    return (os.environ.get("LW_CONNECTORS_DIR", "").strip(), tuple(sys.path))
+
+
+def _loaded():  # -> loader.LoadResult (not imported here: loader imports this module)
+    global _LOADED, _KEY, _BUILDING
+    with _LOCK:
+        if _LOADED is not None and _KEY == _key():
+            return _LOADED
+        if _BUILDING:  # a plugin calling registry() while it is imported would otherwise recurse into the loader
+            raise RuntimeError("registry() used while the connector types are being loaded")
+        from . import loader
+        _BUILDING = True
+        try:
+            if _LOADED is not None:
+                loader.unload(_LOADED)  # drops the previous load's LW_CONNECTORS_DIR modules from sys.modules
+                _LOADED = None
+            result = loader.load(os.environ)
+        finally:
+            _BUILDING = False
+        # the key after the load: a plugin that edits sys.path while importing must not force a rebuild per call
+        _LOADED, _KEY = result, _key()
+        return _LOADED
+
+
+def _reset_registry() -> None:
+    """Forget the loaded types (and their LW_CONNECTORS_DIR modules); the next registry() call loads again."""
+    global _LOADED, _KEY
+    with _LOCK:
+        if _LOADED is not None:
+            from . import loader
+            loader.unload(_LOADED)
+        _LOADED, _KEY = None, None
 
 
 def registry() -> dict[str, type]:
-    """type -> connector class. Built on first use (the built-in modules import this one) and cached in _REGISTRY."""
-    global _REGISTRY
-    if _REGISTRY is None:
-        from .builtin import BUILTIN
-        _REGISTRY = {cls.describe().type: cls for cls in BUILTIN}
-    return _REGISTRY
+    """type -> connector class: the built-ins plus the third-party types (see loader.py). Loaded on first use (the
+    built-in modules import this one) and again when LW_CONNECTORS_DIR or sys.path has changed."""
+    return _loaded().types
+
+
+def load_problems() -> list[str]:
+    """Loading problems that stop the start whatever the instances use (e.g. LW_CONNECTORS_DIR is not a directory)."""
+    return list(_loaded().problems)
+
+
+def type_origins() -> dict:
+    """type -> loader.Origin for every registered type."""
+    return dict(_loaded().origins)
 
 
 def secret_keys(type_: str) -> frozenset[str]:
@@ -440,6 +490,8 @@ def instance_problems(spec: InstanceSpec, conn: Connector | None = None) -> list
     if not spec.type:
         return [f"connector {spec.name}: TYPE is required"]
     cls = registry().get(spec.type)
+    if cls is None and spec.type in _loaded().broken:  # declared but refused or failed: say why, not "unknown"
+        return [f"connector {spec.name} ({spec.type}): cannot be loaded: {_loaded().broken[spec.type]}"]
     if cls is None:
         return [f"connector {spec.name}: unknown type {spec.type!r} (known: {', '.join(sorted(registry()))})"]
     info = cls.describe()
