@@ -24,15 +24,18 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from . import API_VERSION, Connector, ConnectorInfo
+from . import API_VERSION, Connector, ConnectorInfo, Setting
 
 log = logging.getLogger("leasewatch.connectors.loader")
 
 GROUP = f"leasewatch.connectors.v{API_VERSION}"
-TYPE_RE = re.compile(r"^[a-z0-9_]+$")
-_GROUP_RE = re.compile(r"^leasewatch\.connectors\.v(\d+)$")
+# \Z, not $: "$" also matches before a trailing newline, and such a name would reach the log lines
+TYPE_RE = re.compile(r"\A[a-z0-9_]+\Z")
+# ASCII digits without a leading zero and at most 9 of them: "v01" or "v\u0661" is not API 1, and int() of a
+# 5000-digit number raises; a group that does not match is simply not a leasewatch group
+_GROUP_RE = re.compile(r"\Aleasewatch\.connectors\.v([1-9][0-9]{0,8})\Z", re.ASCII)
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
-_VALUE_RE = re.compile(rf"^({_IDENT}(?:\.{_IDENT})*):({_IDENT}(?:\.{_IDENT})*)$")
+_VALUE_RE = re.compile(rf"\A({_IDENT}(?:\.{_IDENT})*):({_IDENT}(?:\.{_IDENT})*)\Z")
 
 BUILTIN, ENTRY_POINT, DIR = "built-in", "entry point", "LW_CONNECTORS_DIR"
 
@@ -75,6 +78,8 @@ class _Decl:
     origin: Origin
     ep: importlib.metadata.EntryPoint | None = None
     path: str = ""  # the distribution's directory (dir origin)
+    # set when a rule refuses it before import: it still counts as a declaration in the duplicate check
+    refused: str = ""
 
 
 class _Refused(Exception):
@@ -92,13 +97,24 @@ def load(environ: Mapping[str, str], path: list[str] | None = None) -> LoadResul
     # finders cache directory listings: a package written since the last scan (a test, a fresh mount) must be seen
     importlib.invalidate_caches()
     other: dict[str, str] = {}
+    packages: dict[str, tuple[str, bool]] = {}  # dir package -> (dist dir, imported) in this load
     try:
         decls = _entry_point_decls(sys.path if path is None else path, other)
         raw = (environ.get("LW_CONNECTORS_DIR") or "").strip()
         if raw:
             decls += _dir_decls(raw, res, other)
-        _import_all(_without_conflicts(decls, res), res)
-    except Exception as e:  # a loader bug must not take the built-ins (and the firewall connector) with it
+        _import_all(_unshadowed(_without_conflicts(decls, res), res), res, packages)
+    except BaseException as e:
+        # what was registered or imported before the failure must not stay: the log promises built-ins only, and a
+        # dir package left in sys.modules would be refused as a shadow by every later load
+        _drop(packages)
+        for t in [t for t in res.types if t not in res.origins or res.origins[t].kind != BUILTIN]:
+            res.types.pop(t)
+            res.origins.pop(t, None)
+        res.modules = []
+        if not isinstance(e, Exception):  # Ctrl-C still stops the host
+            raise
+        # a loader bug must not take the built-ins (and the firewall connector) with it
         log.error("connector loading failed, only the built-in types are available", exc_info=True)
         res.problems.append(f"connector loading failed ({type(e).__name__})")
     for type_, why in other.items():
@@ -109,8 +125,14 @@ def load(environ: Mapping[str, str], path: list[str] | None = None) -> LoadResul
 
 def unload(result: LoadResult) -> None:
     """Drop the modules a previous load imported from LW_CONNECTORS_DIR, so the next load imports them afresh."""
-    for name in result.modules:
-        sys.modules.pop(name, None)  # sys.modules is process global: only the dir plugins' own entries go
+    # by package, not by the list: a submodule the plugin imported after the load (e.g. in collect()) goes too
+    _drop({n.split(".")[0] for n in result.modules})
+
+
+def _drop(packages) -> None:
+    """Remove every sys.modules entry of these dir packages (process global: only the dir plugins' own entries)."""
+    for name in [n for n in sys.modules if n.split(".")[0] in packages]:
+        del sys.modules[name]
 
 
 def _scan_path(path: list) -> list[str]:
@@ -123,39 +145,49 @@ def _scan_path(path: list) -> list[str]:
 
 
 def _other_api(dist: str, group: str, api: str, type_: str, other: dict[str, str]) -> None:
-    log.warning("%s declares connector type %s for connector API %s (group %s); this host has connector API %d, "
+    # %r: the name is not checked against TYPE_RE here, and a newline in it would forge a log line
+    log.warning("%s declares connector type %r for connector API %s (group %s); this host has connector API %d, "
                 "so it is not loaded", dist, type_, api, group, API_VERSION)
-    other.setdefault(type_, f"provided by {dist} for connector API {api}; this host has {API_VERSION}")
+    if TYPE_RE.match(type_):  # no instance can use any other name
+        other.setdefault(type_, f"provided by {dist} for connector API {api}; this host has {API_VERSION}")
 
 
 def _entry_point_decls(path: list, other: dict[str, str]) -> list[_Decl]:
     decls: list[_Decl] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for dist in importlib.metadata.distributions(path=_scan_path(path)):
+        name = "?"
         try:
             name = str(dist.metadata.get("Name") or "?")
             version = str(dist.version or "")
             eps = list(dist.entry_points)
         except Exception as e:  # broken metadata of some unrelated distribution
-            log.warning("an installed distribution's metadata cannot be read (%s)", type(e).__name__)
+            log.warning("installed distribution %r: metadata cannot be read (%s)", name, type(e).__name__)
             continue
         for ep in eps:
             m = _GROUP_RE.match(ep.group)
             if not m:
                 continue
-            if int(m.group(1)) != API_VERSION:
+            # the same distribution reached twice (a path listed twice, or one name spelled "lw_b" and "lw-b" by two
+            # build backends) is one declaration; checked first, so the other-API warning is logged once too
+            key = (re.sub(r"[-_.]+", "-", name).lower(), ep.group, ep.name, ep.value)
+            if key in seen:
+                continue
+            seen.add(key)
+            if m.group(1) != str(API_VERSION):
                 _other_api(name, ep.group, m.group(1), ep.name, other)
                 continue
-            # the same distribution reached twice (a path listed twice) is one declaration
-            if (name, ep.name, ep.value) in seen:
-                continue
-            seen.add((name, ep.name, ep.value))
             vm = _VALUE_RE.match(ep.value.replace(" ", ""))
-            if not TYPE_RE.match(ep.name) or not vm:
+            if not TYPE_RE.match(ep.name):
                 log.warning("%s: entry point %r = %r is not <type> = module:Class with a type of a-z, 0-9 and _; "
                             "ignored", name, ep.name, ep.value)
                 continue
-            decls.append(_Decl(ep.name, vm.group(1), vm.group(2), Origin(ENTRY_POINT, name, version), ep=ep))
+            origin = Origin(ENTRY_POINT, name, version)
+            if not vm:  # a valid name still claims the type: it must count in the duplicate check
+                why = f"entry point value {ep.value!r} is not module:Class"
+                decls.append(_Decl(ep.name, "", "", origin, refused=why))
+                continue
+            decls.append(_Decl(ep.name, vm.group(1), vm.group(2), origin, ep=ep))
     return decls
 
 
@@ -202,7 +234,7 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
         try:
             with open(pyproject, "rb") as f:
                 data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, RecursionError) as e:  # deep nesting
             res.problems.append(f"{bad} ({type(e).__name__})")
             continue
         project = data.get("project")
@@ -213,7 +245,6 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
             continue
         dist, version = str(project.get("name") or entry), str(project.get("version") or "")
         origin = Origin(DIR, dist, version, root, entry)
-        found: list[_Decl] = []
         for group, table in groups.items():
             m = _GROUP_RE.match(str(group))
             if not m:
@@ -222,26 +253,40 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
                 res.problems.append(f"{bad} ({group} is not a table)")
                 continue
             for type_, value in table.items():
-                if int(m.group(1)) != API_VERSION:
+                if m.group(1) != str(API_VERSION):
                     _other_api(f"LW_CONNECTORS_DIR {entry}", group, m.group(1), type_, other)
                     continue
-                vm = _VALUE_RE.match(value) if isinstance(value, str) else None
+                # spaces around ":" as the entry-point path (and pip) accept them: one declaration serves both
+                vm = _VALUE_RE.match(value.replace(" ", "")) if isinstance(value, str) else None
                 if not TYPE_RE.match(type_) or not vm:
                     res.problems.append(f"LW_CONNECTORS_DIR {entry}: entry point {type_!r} is not <type> = "
                                         "\"module:Class\" with a type of a-z, 0-9 and _")
                     continue
-                found.append(_Decl(type_, vm.group(1), vm.group(2), origin, path=base))
-        for pkg in sorted({d.module.split(".")[0] for d in found}):
-            if _shadows(pkg, base):
-                res.problems.append(f"LW_CONNECTORS_DIR {entry}: package {pkg} would shadow another module")
-                for d in found:
-                    if d.module.split(".")[0] == pkg:
-                        res.broken[d.type] = f"package {pkg} would shadow another module (from {origin.label()})"
-                found = [d for d in found if d.module.split(".")[0] != pkg]
-        decls += found
+                decls.append(_Decl(type_, vm.group(1), vm.group(2), origin, path=base))
     for p in res.problems:
         log.warning("%s", p)
     return decls
+
+
+def _unshadowed(decls: list[_Decl], res: LoadResult) -> list[_Decl]:
+    """Refuses the dir declarations whose package would shadow another module. Run after the duplicate check: a type
+    also declared elsewhere (e.g. the same package installed with pip and mounted) is refused as "provided twice",
+    which says what to remove, and its declaration never reaches this check."""
+    out = []
+    shadows: dict[tuple[str, str], bool] = {}
+    for d in decls:
+        pkg = d.module.split(".")[0]
+        if d.path and not d.refused:
+            if (d.path, pkg) not in shadows:
+                shadows[(d.path, pkg)] = _shadows(pkg, d.path)
+                if shadows[(d.path, pkg)]:
+                    res.problems.append(f"LW_CONNECTORS_DIR {d.origin.entry}: package {pkg} would shadow another "
+                                        "module")
+                    log.warning("%s", res.problems[-1])
+            if shadows[(d.path, pkg)]:
+                d = replace(d, refused=f"package {pkg} would shadow another module")
+        out.append(d)
+    return out
 
 
 def _without_conflicts(decls: list[_Decl], res: LoadResult) -> list[_Decl]:
@@ -282,46 +327,63 @@ def _class_problem(type_: str, obj: object) -> tuple[str, ConnectorInfo | None]:
         return f"describe() names type {info.type!r}, not {type_!r}", None
     if info.api_version != API_VERSION:
         return f"written for connector API {info.api_version}, this host has {API_VERSION}", None
+    # the host iterates these (secret keys, known settings, "sighting" check): a wrong shape would be a traceback in
+    # Config() instead of this type-level problem
+    if not isinstance(info.settings, (tuple, list)) or not all(isinstance(s, Setting) for s in info.settings):
+        return "describe() settings is not a tuple of Setting", None
+    for name in ("produces", "roles"):
+        value = getattr(info, name)
+        if not isinstance(value, (set, frozenset)) or not all(isinstance(v, str) for v in value):
+            return f"describe() {name} is not a set of str", None
     return "", info
 
 
-def _import_dir(d: _Decl, packages: dict[str, str]) -> object:
+def _import_dir(d: _Decl, packages: dict[str, tuple[str, bool]]) -> object:
     pkg = d.module.split(".")[0]
     if pkg not in packages:
         spec = importlib.machinery.PathFinder.find_spec(pkg, [d.path])  # the dist dir only: never cwd or sys.path
-        if spec is None or spec.loader is None:
+        if spec is None:
             raise _Refused(f"package {pkg} not found")
+        if spec.loader is None:  # a directory without __init__.py is found as a namespace package
+            raise _Refused(f"package {pkg} has no __init__.py")
         module = importlib.util.module_from_spec(spec)
         # registered before it runs, so the package's own absolute and relative imports find it (the import system
         # does the same); a failure removes it again below
         sys.modules[pkg] = module
-        packages[pkg] = d.path
+        packages[pkg] = (d.path, True)
         try:
             spec.loader.exec_module(module)
         except BaseException:
-            packages[pkg] = ""  # a second type from the same package must not use it half-initialised
+            # a second type from the same package must not use it half-initialised
+            packages[pkg] = (d.path, False)
             raise
-    elif not packages[pkg]:
+    # the path first: a clash between two entries is what the operator must fix, even when the first one failed
+    elif packages[pkg][0] != d.path:
+        raise _Refused(f"package {pkg} is already loaded from another LW_CONNECTORS_DIR entry" if packages[pkg][1] else
+                       f"package {pkg} is also in another LW_CONNECTORS_DIR entry, where it failed to import")
+    elif not packages[pkg][1]:
         raise _Refused(f"package {pkg} failed to import")
-    elif packages[pkg] != d.path:
-        raise _Refused(f"package {pkg} is already loaded from another LW_CONNECTORS_DIR entry")
     obj: object = importlib.import_module(d.module)
     for part in d.attr.split("."):
         obj = getattr(obj, part)
     return obj
 
 
-def _import_all(decls: list[_Decl], res: LoadResult) -> None:
-    packages: dict[str, str] = {}  # dir package -> the dist dir it was imported from in this load
+def _import_all(decls: list[_Decl], res: LoadResult, packages: dict[str, tuple[str, bool]]) -> None:
+    """packages: filled with the dir packages imported in this load, so load() can drop them after a failure."""
     used: set[str] = set()
     for d in decls:
         err: BaseException | None = None
         try:
+            if d.refused:
+                raise _Refused(d.refused)
             obj = d.ep.load() if d.ep is not None else _import_dir(d, packages)
             why, info = _class_problem(d.type, obj)
         except _Refused as e:
             why = str(e)
-        except (Exception, SystemExit) as e:  # a plugin's import must never stop the host; Ctrl-C still does
+        except KeyboardInterrupt:  # Ctrl-C still stops the host (load() drops what was imported)
+            raise
+        except BaseException as e:  # a plugin's import must never stop the host: SystemExit, CancelledError, ...
             why, err = f"{type(e).__name__} in {d.module}", e
         if why:
             res.broken[d.type] = f"{why} (from {d.origin.label()})"
@@ -332,10 +394,5 @@ def _import_all(decls: list[_Decl], res: LoadResult) -> None:
         res.origins[d.type] = replace(d.origin, type_version=info.version)
         if d.ep is None:
             used.add(d.module.split(".")[0])
-    for pkg in packages:
-        names = [n for n in sys.modules if n == pkg or n.startswith(pkg + ".")]
-        if pkg in used:
-            res.modules += names
-        else:  # nothing registered from it: no half-imported package stays behind
-            for n in names:
-                del sys.modules[n]
+    res.modules += [n for n in sys.modules if n.split(".")[0] in used]
+    _drop(set(packages) - used)  # nothing registered from it: no half-imported package stays behind

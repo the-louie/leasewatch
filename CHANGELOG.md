@@ -18,9 +18,26 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Removed
 
-- **API:** the deprecated 1.0 objects `meta.switch` and `meta.unifi` in `/api/status`, `/api/stats` and `/api/devices`; use `meta.connectors` (one entry per instance). The collector no longer writes the meta keys behind them (`switch_ok`, `switch_error`, `switch_macs`, `unifi_ok`, `unifi_error`, `unifi_clients`), and the page no longer falls back to them. Instance names `switch` and `unifi` have no special meaning any more.
+- **API:** the deprecated 1.0 objects `meta.switch` and `meta.unifi` in `/api/status`, `/api/stats` and `/api/devices`, and the `switch` and `unifi` keys of the `/healthz` body; use `meta.connectors` (one entry per instance). The collector no longer writes the meta keys behind them (`switch_ok`, `switch_error`, `switch_macs`, `unifi_ok`, `unifi_error`, `unifi_clients`), and the page no longer falls back to them. Instance names `switch` and `unifi` have no special meaning any more.
 
 ### Fixed
+- `check <name>`, `collect <name>` and `snmp-detect <name>` now exit 2 on a config problem that belongs to no instance (e.g. `LW_CONNECTOR__FW1_SECRET` with one underscore, an invalid name in `LW_CONNECTORS`) and on a load problem, as the server does.
+- `check` and `collect` keep the instance name and the client's `fw1 <path>:` label when the instance is named like its host; only the error text is host-masked. `check` now masks the host in problem texts too.
+- `collect` shows device data unmasked again (a switch's own redact no longer masks its host and user in records), and prints only the declared record fields.
+- `collect --json` no longer crashes on stats keys that are not strings or values whose `str()` raises, and never prints NaN/Infinity.
+- `check` and `collect` no longer hang on a `close()` that blocks after a timed-out probe, build each named instance only once, and tolerate a connector `redact()` that returns a non-string.
+- The `connector types:` start-log line escapes control characters from package metadata.
+- While the baseline waits, a producer whose check keeps failing is still collected every poll once 10 minutes have passed, so the baseline can be taken.
+- A connector that calls sys.exit() while it is built only disables its instance; the service keeps running.
+- A connector can call device_names() in its constructor.
+- The 'changed' count in the poll log line is 0 while the baseline waits, which matches the events and history written.
+- Connector loader: a plugin whose describe() has malformed settings, produces or roles is now refused as a broken type; Config() no longer stops with a traceback.
+- Connector loader: a deeply nested pyproject.toml or an oversized API group number is now reported against that one entry; it no longer drops every third-party type.
+- Connector loader: after a loader failure or Ctrl-C during plugin import, only the built-ins stay registered and no half-imported LW_CONNECTORS_DIR package stays in sys.modules; any other BaseException from a plugin import is now a plugin failure.
+- Connector loader: a type that is pip-installed and also mounted in LW_CONNECTORS_DIR is refused as 'provided twice … remove one'; a shadowing or malformed declaration still counts in the duplicate check.
+- Connector loader: the group must be exactly leasewatch.connectors.v<N> (ASCII, no leading zero); type names with a trailing newline are refused; spaces around ':' in a LW_CONNECTORS_DIR entry point are accepted as pip accepts them.
+- Connector loader: clearer messages for a missing __init__.py, a package name repeated across LW_CONNECTORS_DIR entries, and unreadable distribution metadata (now names the distribution); the other-API warning is logged once per distribution, and dist names spelled 'lw_b'/'lw-b' count as one distribution.
+- registry() now also rebuilds when the working directory changes, so a relative LW_CONNECTORS_DIR follows os.chdir; unload drops submodules a plugin imported after the load.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

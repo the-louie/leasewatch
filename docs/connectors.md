@@ -122,8 +122,8 @@ the documented string key `"strategy"`.
 | Key | Who sets it | What the host does with it |
 |---|---|---|
 | `leases`, `arp`, `reservations` | sighting producers | Summed over all producers and shown as the last poll's raw counts. |
-| `macs` | switch | Shown as the switch count of the instance named `switch` (1.0 status alias). |
-| `clients` | controller | Shown as the client count of the instance named `unifi` (1.0 status alias). |
+| `macs` | switch | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
+| `clients` | controller | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
 | `strategy` (`str`) | switch | Copied to the instance's status (`conn.<name>.strategy`). |
 | `dropped` | you and the host | Records you skipped as unusable. The host adds the records it dropped itself. **A batch with `dropped > 0` is not a complete list**: for a controller, and for the switch that holds a device, it counts as failed in the merge (see below). |
 
@@ -413,23 +413,27 @@ Mix `ConnectorContractTests` into a `unittest.TestCase` and fill in its hooks:
 | `valid_settings()` | yes | Settings that work against a fake (a fixture file, a local server on port 0). Never the network. |
 | `failing_settings()` | no | Settings for which `check()` or `collect()` raises `ConnectorError` (a missing file, a wrong password). `None` (the default) skips that test. |
 | `make_context()` | no | The `HostContext` to lend; default `HostContext()`. Set `now=` for fixed times, `opener_factory=` to send requests to a fake server. |
-| `make_connector(settings)` | no | How an instance is built; default `connector_class(instance_name, settings, make_context())`. |
+| `make_connector(settings)` | no | How an instance is built; default as the host builds it: `connector_class(instance_name, settings without TYPE and TIMEOUT, make_context())` with `ctx.timeout` set from `TIMEOUT`. |
 | `instance_name` | no | Default `"contract"`. |
 
 What it checks (all tests are named `test_contract_*`):
 
 - `describe()`: the type matches `[a-z0-9_]+`, `api_version == API_VERSION`, `produces` is a non-empty subset of
-  `{"sighting", "attachment"}`, `roles` a subset of `{"controller"}`, the setting keys are unique, lower case and
-  not host keys.
-- `__init__` and `validate()` open no network connection.
+  `{"sighting", "attachment"}`, `roles` a subset of `{"controller"}`, the setting keys are unique, match
+  `[a-z0-9_]+` and are not host keys, every `kind` is `str` or `int`, and no key is `<secret key>_file`.
+- `__init__` and `validate()` open no network connection, send no datagram and look up no name (also when your code
+  catches the error the test raises). `valid_settings()` runs before that guard.
 - `validate()` accepts the valid settings, and the host's own `instance_problems()` names every required key when it
   is missing.
-- The repr shows no secret value.
-- `check()` returns `None`; `collect()` returns a `Batch` with at least one record, only of the declared kinds,
-  `kind` in `dhcp/arp/client/scan`, `link` in `wired/wifi`, a MAC that `norm_mac` accepts and an int
-  `observed_at > 0`.
-- With `failing_settings()`: a `ConnectorError` whose text holds no secret value and no host of a URL setting.
-- `close()` never raises, also twice and after `collect()`.
+- The repr shows no secret value, also not in its repr or JSON escaped form.
+- `check()` returns `None`; `collect()` returns a `Batch` whose `sightings` and `attachments` are lists, with at
+  least one record, only of the declared kinds, `kind` in `dhcp/arp/client/scan`, `link` in `wired/wifi`, a MAC
+  that `norm_mac` accepts and an int (not bool) `observed_at > 0`.
+- With `failing_settings()`: a `ConnectorError` whose text holds no secret value (escaped forms included) and no
+  host of a URL setting, in any spelling `make_host_mask()` masks (whole occurrences only: `10.0.0.15` is not
+  `10.0.0.1`). Give the fixture a host that is no word of your messages: a host `fw1` would match a `fw1` label.
+- `close()` never raises, also twice and after `collect()` (a `check()` or `collect()` failure there is left to the
+  check-and-collect test).
 
 Also test your parser on its own: keep it a pure function (text in, records out), as `parse_leases()` in
 leasewatch-dnsmasq and `parse()` in leasewatch-mikrotik. Use synthetic data only in fixtures: locally administered

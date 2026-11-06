@@ -30,11 +30,15 @@ SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect")
 NO_PYSNMP = "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"
 
 
-def _out(line: str = "") -> None:
-    # command output for the operator's terminal, not a log line.
+def _printable(text: str) -> str:
     # sysDescr and walk values come from the switch: an ESC or BEL in them would retitle the terminal or erase lines,
     # so every non-printable character is shown escaped (\x1b)
-    line = "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in line)
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text)
+
+
+def _out(line: str = "") -> None:
+    # command output for the operator's terminal, not a log line
+    line = _printable(line)
     # an ASCII-only stdout (PYTHONIOENCODING=ascii) would raise UnicodeEncodeError on a device's non-ASCII byte
     enc = getattr(sys.stdout, "encoding", None) or "utf-8"
     try:
@@ -120,14 +124,13 @@ def _detect_connector(args: object) -> tuple[object | None, list[str], str]:
         return None, [], "give an instance name or --host"
     from .connectors import build_instance, instance_problems, instances_context, registry
     cfg = Config()
-    # a removed 1.0 variable is global: the server refuses to start with it whatever the instances are called, so it
-    # always counts, and blocks the probe as it blocks the server. Not matched by text below: its hint names the
-    # instance "switch", which would make only an instance of that name pick it up
-    removed = removed_problems(os.environ)
+    # a global problem (a removed 1.0 variable, a load problem, a malformed variable) stops the server whatever the
+    # instances are called, so it always counts, and blocks the probe as it blocks the server, as `check` does
+    glob = _global_problems(cfg)
     # the server checks these too: an unreadable AUTH_KEY_FILE, TIMEOUT=x, or a parse problem with one of the
     # instance's own variables (two spellings of a key, a name left out of LW_CONNECTORS). Another instance's
     # problems stay out: they do not stop this switch from answering. The name listed twice stops the server
-    own = removed + _own_problems(cfg, args.instance, removed)
+    own = glob + _own_problems(cfg, args.instance, glob)
     named = next((s for s in cfg.instances if s.name == args.instance), None)
     if named is not None and named.type not in registry():  # a TYPE typo: name it as the server would
         return None, own, f"config: {instance_problems(named)[0]}"
@@ -142,10 +145,15 @@ def _detect_connector(args: object) -> tuple[object | None, list[str], str]:
     return conn, own + instance_problems(spec, conn), ""
 
 
-def _own_problems(cfg: Config, name: str, removed: list[str]) -> list[str]:
-    """cfg.connector_problems that belong to the instance `name` (its own variables, its LW_CONNECTORS entry)."""
-    return [p for p in cfg.connector_problems if p not in removed and (
-        p.startswith((f"connector {name} ", f"LW_CONNECTORS: {name} ")) or f"{ENV_PREFIX}{name.upper()}__" in p.upper())]
+def _belongs(problem: str, name: str) -> bool:
+    return (problem.startswith((f"connector {name} ", f"LW_CONNECTORS: {name} "))
+            or f"{ENV_PREFIX}{name.upper()}__" in problem.upper())
+
+
+def _own_problems(cfg: Config, name: str, exclude: list[str]) -> list[str]:
+    """cfg.connector_problems that belong to the instance `name` (its own variables, its LW_CONNECTORS entry), less
+    `exclude` (the global ones, already counted)."""
+    return [p for p in cfg.connector_problems if p not in exclude and _belongs(p, name)]
 
 
 def snmp_detect_cmd(argv: list[str]) -> int:
@@ -207,28 +215,44 @@ def snmp_detect_cmd(argv: list[str]) -> int:
 
 def _global_problems(cfg: Config) -> list[str]:
     """The config problems that stop the server whatever the instance: a removed 1.0 variable, a load problem,
-    LW_CONNECTORS unset (all part of cfg.connector_problems, which Config() fills once)."""
+    LW_CONNECTORS unset, and any problem that belongs to no instance (LW_CONNECTOR__FW1_SECRET with one underscore,
+    an invalid name in LW_CONNECTORS). All part of cfg.connector_problems, which Config() fills once."""
     from .connectors import load_problems
     loaded = load_problems()
+    removed = removed_problems(os.environ)
+    # every name a problem can be about: the listed instances and the names in LW_CONNECTOR__<NAME>__ variables (an
+    # orphan's "zz is not in LW_CONNECTORS" is zz's problem, not this one's)
+    names = {s.name for s in cfg.instances} | {
+        n.lower() for k in os.environ if k.startswith(ENV_PREFIX)
+        for n, sep, _ in (k[len(ENV_PREFIX):].partition("__"),) if n and sep}
+    # removed and "not set" first: their hints name an example instance ("switch", FW1), which _belongs would match
     return [p for p in cfg.connector_problems
-            if p in removed_problems(os.environ) or p in loaded or p.startswith("LW_CONNECTORS is not set")]
+            if p in removed or p in loaded or p.startswith("LW_CONNECTORS is not set")
+            or not any(_belongs(p, n) for n in names)]
 
 
 def _redactor(ctx: object, conn: object | None, spec: object, hosts: bool = True) -> Callable[[str], str]:
-    """The host's redact (every secret setting of every instance, as the collector uses it), then the instance's own
-    redact() if it has one (a switch masks its host and user), then (hosts=True, for error and problem texts only) the
-    host of the instance's URL/HOST setting."""
-    from .connectors import make_host_mask
+    """The host's redact (every secret setting of every instance, as the collector uses it), then (hosts=True, for
+    error and problem texts only) the instance's own redact() if it has one (a switch masks its host and user) and the
+    host of the instance's URL/HOST setting. hosts=False is for device data, which the collector merges unmasked."""
+    from .connectors import make_host_mask, mask_url_host
+    if not hosts:
+        return ctx.redact
     own = getattr(conn, "redact", None)
-    masks = [make_host_mask(v) for k, v in spec.settings.items() if k in ("url", "host") and v.strip()] if hosts else []
+    # a URL's host is masked by the connectors' own rule: the client's "fw1 <path>: " label before the first ": "
+    # stays, so a host named like that label (or like the instance) does not hide it
+    masks = [(lambda t, v=v: mask_url_host(t, v)) if k == "url" and "://" in v else make_host_mask(v)
+             for k, v in spec.settings.items() if k in ("url", "host") and v.strip()]
 
     def redact(text: str) -> str:
         text = ctx.redact(text)
         if callable(own):
             try:
-                text = own(text)
+                out = own(text)
             except Exception:  # a connector's own helper must not turn a report into a traceback; the masks still run
-                pass
+                out = text
+            # a third-party redact() that forgets `return text` gives None: the masks below need a str
+            text = out if isinstance(out, str) else text
         for mask in masks:
             text = mask(text)
         return text
@@ -275,12 +299,27 @@ def _probe_error(phase: str, out: object, timed_out: bool, timeout: int, redact:
     return ""
 
 
-def _close(conn: object) -> None:
+def _close(conn: object, name: str, timeout: int) -> None:
+    """conn.close(), in a daemon thread joined for `timeout` seconds: the check() or collect() abandoned at its
+    deadline may still run and hold what close() waits for, and the command must still end. `name` is the
+    instance's, given by the caller: conn.name is the connector's own attribute and may raise."""
+    log = logging.getLogger("leasewatch")
+
+    def work() -> None:
+        try:
+            conn.close()
+        except Exception as e:  # the report is made; a failing close() is named on stderr, never its text
+            log.warning("connector %s: close() failed (%s)", name, type(e).__name__)
+
+    t = threading.Thread(target=work, name=f"close-{name}", daemon=True)
     try:
-        conn.close()
-    except Exception as e:  # the report is made; a failing close() is named on stderr, never its text
-        logging.getLogger("leasewatch").warning("connector %s: close() failed (%s)", getattr(conn, "name", "?"),
-                                                type(e).__name__)
+        t.start()
+    except RuntimeError:  # out of threads: closing inline is the only way left
+        work()
+        return
+    t.join(timeout)
+    if t.is_alive():
+        log.warning("connector %s: close() did not return within %d s", name, timeout)
 
 
 def check_cmd(argv: list[str]) -> int:
@@ -299,14 +338,25 @@ def check_cmd(argv: list[str]) -> int:
     _out(types_line())
     for type_, why in sorted(broken_types().items()):
         _out(f"plugin: {type_} not loaded: {ctx.redact(why)}")
+    # each named instance is built once, here, and the same connector is checked and closed below
+    built = {n: setup_instance(specs[n], ctx) for n in names if n in specs}
     if names:  # global problems plus the named instances' own; another instance's problem does not count
         problems = _global_problems(cfg) + [p for n in names for p in _own_problems(cfg, n, removed)]
-        problems += [p for n in names if n in specs for p in setup_instance(specs[n], ctx)[1]]
+        problems += [p for n in built for p in built[n][1]]
     else:
         problems = cfg.validate()
     problems = list(dict.fromkeys(problems))
+    # a problem text may echo a URL or HOST (a third-party validate()): masked with every instance's host, as collect
+    # masks its own instance's
+    masks = [_redactor(ctx, None, s) for s in cfg.instances]
+
+    def mask_all(text: str) -> str:
+        text = ctx.redact(text)
+        for f in masks:
+            text = f(text)
+        return text
     for p in problems:
-        _out(f"config: {ctx.redact(p)}")
+        _out(f"config: {mask_all(p)}")
     unknown = failed = False
     for name in names or list(specs):
         spec = specs.get(name)
@@ -314,32 +364,54 @@ def check_cmd(argv: list[str]) -> int:
             _out(f"{name}: not configured (configured: {', '.join(specs) or 'none'})")
             unknown = True
             continue
-        conn, own = setup_instance(spec, ctx)
+        conn, own = built[name] if name in built else setup_instance(spec, ctx)
         own = list(dict.fromkeys(_own_problems(cfg, name, removed) + own))
+        mask = _redactor(ctx, conn, spec)
+        # the "<name> (<type>): " head is not host-masked: an instance named like its host must stay recognisable
+        head = ctx.redact(f"{name} ({spec.type}): ")
         if own or conn is None:
-            _out(f"{name} ({spec.type}): disabled: {ctx.redact('; '.join(own))}")
+            _out(head + "disabled: " + "; ".join(mask(p) for p in own))
             if conn is not None:
-                _close(conn)
+                _close(conn, name, spec.timeout)
             continue
         try:
             phase, out, ms, timed_out = _probe(conn, ("check",), spec.timeout)
         finally:
-            _close(conn)
-        redact = _redactor(ctx, conn, spec)
-        error = _probe_error(phase, out, timed_out, spec.timeout, redact)
+            _close(conn, name, spec.timeout)
+        error = _probe_error(phase, out, timed_out, spec.timeout, mask)
         failed = failed or bool(error)
-        _out(redact(f"{name} ({spec.type}): " + (f"check failed: {error}" if error else f"ok ({ms} ms)")))
+        _out(head + (f"check failed: {error}" if error else f"ok ({ms} ms)"))
     return 2 if problems or unknown else 1 if failed else 0
 
 
-def _record_line(kind: str, record: object) -> str:
+def _record_dict(kind: str, record: object) -> dict:
+    """The record's declared fields only: a connector's subclass may add fields that the host neither checks nor
+    merges, and they must not reach the output unchecked."""
     import dataclasses
-    return kind + " " + " ".join(f"{k}={v}" for k, v in dataclasses.asdict(record).items() if v not in ("", None))
+    from .connectors import Attachment, Sighting
+    return {f.name: getattr(record, f.name) for f in dataclasses.fields(Sighting if kind == "sighting" else Attachment)}
+
+
+def _record_line(kind: str, record: object) -> str:
+    return kind + " " + " ".join(f"{k}={v}" for k, v in _record_dict(kind, record).items() if v not in ("", None))
+
+
+def _safe_str(x: object) -> str:
+    try:
+        return str(x)
+    except Exception:  # a connector's own type whose __str__ raises
+        return type(x).__name__
+
+
+def _report_stats(stats: dict) -> dict:
+    """Batch.stats as dict[str, int] promises it: a key that is not a str is shown as text (json.dumps refuses it),
+    a value that is not an int as text (NaN and inf are not JSON; a raising __str__ is shown as its type)."""
+    return {(k if isinstance(k, str) else _safe_str(k)): (v if isinstance(v, int) else _safe_str(v))
+            for k, v in stats.items()}
 
 
 def collect_cmd(argv: list[str]) -> int:
     import argparse
-    import dataclasses
     import json
     from .connectors import instances_context
     from .connectors.merge import normalise_batch
@@ -358,7 +430,7 @@ def collect_cmd(argv: list[str]) -> int:
     # redact (secrets) runs on all output; mask (secrets and the URL/HOST host) only on error and problem texts, as the
     # collector does: device data may name the source's own address (a firewall's ARP list) and is shown unmasked
     redact: Callable[[str], str] = ctx.redact
-    mask: Callable[[str], str] = ctx.redact
+    mask: Callable[[str], str] = _redactor(ctx, None, spec) if spec else ctx.redact
     problems = _global_problems(cfg) + _own_problems(cfg, name, removed_problems(os.environ))
     batch = None
     if spec is None:
@@ -368,26 +440,28 @@ def collect_cmd(argv: list[str]) -> int:
         conn, own = setup_instance(spec, ctx)
         problems += own
         if conn is not None:
-            redact, mask = _redactor(ctx, conn, spec, hosts=False), _redactor(ctx, conn, spec)
+            mask = _redactor(ctx, conn, spec)
         if problems or conn is None:
-            report["error"] = "disabled: " + "; ".join(dict.fromkeys(problems))
+            report["error"] = "disabled: " + "; ".join(mask(p) for p in dict.fromkeys(problems))
             rc = 2
             if conn is not None:
-                _close(conn)
+                _close(conn, name, spec.timeout)
         else:
             try:
                 phase, out, ms, timed_out = _probe(conn, ("check", "collect"), spec.timeout)
             finally:
-                _close(conn)
+                _close(conn, name, spec.timeout)
             error = _probe_error(phase, out, timed_out, spec.timeout, mask)
             report.update(phase=phase, ms=ms, error=error, ok=not error)
             rc = 1 if error else 0
             if not error:
                 batch = normalise_batch(name, out)  # source filled, MACs normalised, stats["dropped"] set
-                report.update(stats=batch.stats, sightings=[dataclasses.asdict(r) for r in batch.sightings],
-                              attachments=[dataclasses.asdict(r) for r in batch.attachments])
+                report.update(stats=_report_stats(batch.stats),
+                              sightings=[_record_dict("sighting", r) for r in batch.sightings],
+                              attachments=[_record_dict("attachment", r) for r in batch.attachments])
     report["problems"] = [mask(p) for p in dict.fromkeys(problems)]
-    report["error"] = mask(report["error"])
+    # error is masked where it is made (the problems one by one, the probe's by _probe_error): masking the joined
+    # text again would treat "disabled" as the label and mask an instance name that matches the host
     if args.json:
         # one object; the whole text redacted (the redactor also matches JSON-escaped secrets). default=str: a stat
         # value that is not JSON (a connector's own type) must not turn the object into a traceback
@@ -399,14 +473,14 @@ def collect_cmd(argv: list[str]) -> int:
     head = f"{name} ({spec.type})" if spec else name
     if batch is not None:
         _out(redact(f"{head}: {len(batch.sightings)} sightings, {len(batch.attachments)} attachments, {report['ms']} ms"))
-        _out(redact("stats: " + " ".join(f"{k}={v}" for k, v in sorted(batch.stats.items(), key=lambda kv: str(kv[0])))))
+        _out(redact("stats: " + " ".join(f"{k}={v}" for k, v in sorted(report["stats"].items()))))
         for kind, records in (("sighting", batch.sightings), ("attachment", batch.attachments)):
             for r in records:
                 _out(redact(_record_line(kind, r)))
-    elif report["phase"] == "validate":
-        _out(mask(f"{head}: {report['error']}"))
+    elif report["phase"] == "validate":  # the head is not host-masked: see check_cmd
+        _out(ctx.redact(f"{head}: {report['error']}"))
     else:
-        _out(mask(f"{head}: {report['phase']} failed: {report['error']}"))
+        _out(ctx.redact(f"{head}: {report['phase']} failed: {report['error']}"))
     return rc
 
 
@@ -420,7 +494,8 @@ def types_line() -> str:
     """The INFO line after startup_line(): every loaded connector type and where it comes from (no settings, and no
     path other than the configured LW_CONNECTORS_DIR)."""
     from .connectors import type_help
-    return "connector types: " + type_help()
+    # names and versions come from package metadata: a newline in one would forge a second line in the start log
+    return _printable("connector types: " + type_help())
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -42,7 +42,8 @@ def setup_instance(spec: InstanceSpec, ctx: HostContext, client: object | None =
             return None, instance_problems(spec)
         conn = build_instance(spec, ctx, client=client)
         return conn, instance_problems(spec, conn)
-    except Exception as e:
+    # SystemExit too: a plugin calling sys.exit() on a bad setting only loses its instance, as at import (loader)
+    except (Exception, SystemExit) as e:
         return None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
 
 
@@ -75,6 +76,7 @@ class _Run:
     result: tuple | None = None
     skip_logged: bool = False
     answered: bool = False      # collected successfully at least once in this process (the baseline waits for it)
+    waited: int = 0             # seconds of failed check()s retried every poll while the baseline waited (B-08.4)
 
 
 class Collector:
@@ -86,6 +88,8 @@ class Collector:
         # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
         self._ctx = instances_context(specs)
         self._ctx.device_names = self._device_names
+        # before the instances are built: a connector may call device_names() in __init__
+        self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._connectors: dict = {}
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
@@ -118,7 +122,6 @@ class Collector:
             log.info("removed %d seen rows and %d location sources of instances that are no longer configured",
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
-        self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
@@ -261,6 +264,11 @@ class Collector:
                 # B-08.4: the baseline waits for this one, so a source that comes up late must be seen at the next
                 # poll, not after up to MAX_BACKOFF; the backoff is not doubled and starts once the baseline is taken
                 run.retry_at = time.monotonic() + self.cfg.poll_seconds
+                # but collect() still takes over once MAX_BACKOFF has passed: a check() that keeps failing while
+                # collect() works would otherwise never answer and hold the baseline back for good
+                run.waited += self.cfg.poll_seconds
+                if run.waited >= MAX_BACKOFF:
+                    run.checked = True
                 error = f"check failed: {error}"
             elif phase == "check":
                 # retry check() after POLL_SECONDS, doubling up to MAX_BACKOFF; after that wait, collect() every poll

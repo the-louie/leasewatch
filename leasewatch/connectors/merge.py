@@ -360,7 +360,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             (mac, {k: row[k] for k in ("ip", "hostname", "vlan", "lease_type")}) for mac, row in rows.items()]
     res.rows = {mac: row for mac, row in rows.items()
                 if mac in merged or any(row[k] != before[mac][k] for k in UPDATE_COLUMNS)}
-    res.stats = {"devices": len(merged), "new": len(res.new), "changed": changes}
+    # B-09: what the first run counted is no change (no event, no history row of its own), so it is not reported as one
+    res.stats = {"devices": len(merged), "new": len(res.new), "changed": 0 if state.first_run else changes}
     return res
 
 

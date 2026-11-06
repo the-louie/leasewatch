@@ -17,8 +17,9 @@ Hooks:
 - make_context(): the HostContext lent to the instance; default HostContext().
 - failing_settings(): optional, settings for which check() or collect() raises ConnectorError against the fake
   (a wrong credential); None (the default) skips that test.
-- make_connector(settings): optional, how an instance is built; default connector_class(name, settings,
-  make_context()). A built-in wrapper overrides it to hand in a fake client.
+- make_connector(settings): optional, how an instance is built; default as build_instance(): connector_class(name,
+  settings without the host keys, make_context() with timeout from TIMEOUT). A built-in wrapper overrides it to hand
+  in a fake client.
 
 What is checked: describe() is well formed; __init__ and validate() make no network connection; validate() accepts
 the valid settings and names every required key that is missing (through the host's own instance_problems()); the
@@ -27,15 +28,18 @@ failure raises ConnectorError whose text holds no secret value and no host of a 
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import re
 import socket
+from dataclasses import replace
 from typing import TYPE_CHECKING, ClassVar
 from unittest import mock
-from urllib.parse import urlparse
 
 import leasewatch.connectors as _connectors
 from leasewatch.connectors import (API_VERSION, HOST_KEYS, MIN_SECRET_LEN, Attachment, Batch, Connector,
-                                   ConnectorError, HostContext, InstanceSpec, Sighting, instance_problems)
+                                   ConnectorError, HostContext, InstanceSpec, Sighting, instance_problems,
+                                   make_host_mask)
 
 __all__ = ["ConnectorContractTests"]
 
@@ -46,12 +50,17 @@ else:
     _Base = object
 
 TYPE_RE = re.compile(r"^[a-z0-9_]+$")
+# a setting key becomes the <KEY> of LW_CONNECTOR__<NAME>__<KEY>, so it must be a non-empty shell-exportable word
+KEY_RE = TYPE_RE
+SETTING_KINDS = frozenset({"str", "int"})  # setting_problems() range-checks only "int"; a typo would skip it silently
 SIGHTING_KINDS = frozenset({"dhcp", "arp", "client", "scan"})
 LINKS = frozenset({"wired", "wifi"})
 
 
-def _no_network(*args: object, **kwargs: object) -> None:
-    raise AssertionError("network I/O in __init__ or validate()")
+# what the no-network test stops: connecting, a connectionless datagram and every name lookup (gethostbyname and
+# friends call the C resolver directly, not getaddrinfo)
+_SOCKET_METHODS = ("connect", "connect_ex", "sendto", "sendmsg")
+_SOCKET_FUNCS = ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr")
 
 
 class ConnectorContractTests(_Base):
@@ -70,7 +79,10 @@ class ConnectorContractTests(_Base):
         return HostContext()
 
     def make_connector(self, settings: dict[str, str]) -> Connector:
-        return self.connector_class(self.instance_name, settings, self.make_context())
+        # as build_instance() does: the host keys never reach the connector, and TIMEOUT arrives as ctx.timeout, so
+        # a connector that reads settings["timeout"] fails here as it would in production
+        ctx = replace(self.make_context(), timeout=InstanceSpec(self.instance_name, "", settings).timeout)
+        return self.connector_class(self.instance_name, {k: v for k, v in settings.items() if k not in HOST_KEYS}, ctx)
 
     # --- helpers -------------------------------------------------------------------------------------------------
 
@@ -81,8 +93,11 @@ class ConnectorContractTests(_Base):
 
     def _secret_values(self, settings: dict[str, str]) -> list[str]:
         keys = {s.key for s in self.connector_class.describe().settings if s.secret}
-        # a value under MIN_SECRET_LEN is not masked by make_redactor (see there), so it is not looked for either
-        return [v for k, v in settings.items() if k in keys and len(v) >= MIN_SECRET_LEN]
+        # a value under MIN_SECRET_LEN is not masked by make_redactor (see there), so it is not looked for either.
+        # The repr and JSON escaped forms too, as make_redactor masks them: a {x!r} or a JSON body echoes a secret
+        # with a quote or backslash escaped, and the literal would then not match
+        return [f for k, v in settings.items() if k in keys and len(v) >= MIN_SECRET_LEN
+                for f in {v, repr(v)[1:-1], json.dumps(v)[1:-1]}]
 
     # --- the contract --------------------------------------------------------------------------------------------
 
@@ -97,15 +112,31 @@ class ConnectorContractTests(_Base):
         self.assertEqual(len(keys), len(set(keys)), "setting keys are not unique")
         for k in keys:
             self.assertEqual(k, k.lower(), f"setting key {k!r} is not lower case")
+            self.assertRegex(k, KEY_RE, f"setting key {k!r} is not of the form [a-z0-9_]+")
             self.assertNotIn(k, HOST_KEYS, f"setting key {k!r} is a host key")
+        for s in info.settings:
+            self.assertIn(s.kind, SETTING_KINDS, f"setting {s.key!r} has an unknown kind")
+            if s.secret:  # parse_instances() takes <KEY>_FILE as the secret's file, so such a key never arrives
+                self.assertNotIn(f"{s.key}_file", keys, f"setting key {s.key + '_file'!r} is {s.key}'s _FILE form")
 
     def test_contract_no_network_in_init_or_validate(self) -> None:
-        with mock.patch.object(socket.socket, "connect", _no_network), \
-                mock.patch.object(socket.socket, "connect_ex", _no_network), \
-                mock.patch.object(socket, "create_connection", _no_network), \
-                mock.patch.object(socket, "getaddrinfo", _no_network):
-            conn = self._build(self.valid_settings())
+        settings = self.valid_settings()  # outside the guard: the fixture may start a local fake on port 0
+        calls: list[str] = []
+
+        def stop(what: str) -> object:
+            def no_network(*args: object, **kwargs: object) -> None:
+                # recorded as well as raised: a connector's own `except Exception` would swallow the raise
+                calls.append(what)
+                raise AssertionError(f"network I/O in __init__ or validate(): {what}")
+            return no_network
+        with contextlib.ExitStack() as stack:
+            for name in _SOCKET_METHODS:
+                stack.enter_context(mock.patch.object(socket.socket, name, stop(f"socket.{name}")))
+            for name in _SOCKET_FUNCS:
+                stack.enter_context(mock.patch.object(socket, name, stop(name)))
+            conn = self._build(settings)
             conn.validate()
+        self.assertEqual(calls, [], "network I/O in __init__ or validate()")
 
     def test_contract_validate(self) -> None:
         settings = self.valid_settings()
@@ -136,6 +167,10 @@ class ConnectorContractTests(_Base):
         self.assertIsNone(conn.check())
         batch = conn.collect()
         self.assertIsInstance(batch, Batch)
+        # normalise_batch() drops a field that is not a list or tuple whole (a generator would also be used up by
+        # the first loop below, so its records would go unchecked)
+        self.assertIsInstance(batch.sightings, (list, tuple))
+        self.assertIsInstance(batch.attachments, (list, tuple))
         info = self.connector_class.describe()
         self.assertTrue(batch.sightings or batch.attachments, "the valid fixture gives no records")
         if "sighting" not in info.produces:
@@ -152,6 +187,7 @@ class ConnectorContractTests(_Base):
         for r in [*batch.sightings, *batch.attachments]:
             self.assertTrue(norm_mac(r.mac), f"MAC {r.mac!r} fails norm_mac")
             self.assertIsInstance(r.observed_at, int)
+            self.assertNotIsInstance(r.observed_at, bool, "observed_at is a bool")  # the host reads a bool as 0
             self.assertGreater(r.observed_at, 0)
 
     def test_contract_failure_raises_connector_error(self) -> None:
@@ -167,12 +203,9 @@ class ConnectorContractTests(_Base):
             self.assertNotIn(v, text)
         for v in settings.values():
             if v.lower().startswith(("http://", "https://")):
-                try:
-                    host = urlparse(v).hostname or ""
-                except ValueError:
-                    host = ""
-                if host:
-                    self.assertNotIn(host.lower(), text.lower())
+                # whole occurrences in every spelling make_host_mask() covers (case, trailing dot, IDNA, IPv6
+                # exploded), so "10.0.0.15" is not the host 10.0.0.1 but "fd00:0000:...:0001" is fd00::1
+                self.assertEqual(make_host_mask(v)(text), text, "the error text holds the host of a URL setting")
 
     def test_contract_close(self) -> None:
         conn = self.make_connector(self.valid_settings())
@@ -182,6 +215,8 @@ class ConnectorContractTests(_Base):
         try:
             conn.check()
             conn.collect()
+        except Exception:  # noqa: BLE001 - test_contract_check_and_collect reports it; here only close() is tested
+            pass
         finally:
             conn.close()
         conn.close()

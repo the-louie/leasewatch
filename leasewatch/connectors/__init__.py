@@ -289,7 +289,8 @@ def make_host_mask(url_or_host: str) -> Callable[[str], str]:
     """A function that replaces whole occurrences of a host by "<host>" ("10.0.0.1" is not "10.0.0.15"): a source's
     address is internal infrastructure, not for the UI, and e.g. ssl's hostname-mismatch text echoes it.
     url_or_host: a URL (with "://"; its hostname is used) or a bare host name or address. Masked spellings: as
-    given, lower case, without a trailing dot, the IDNA (punycode) form, an IPv6 address compressed and exploded."""
+    given, lower case, without a trailing dot, the IDNA (punycode) form, an IPv6 address compressed and exploded.
+    A spelling shorter than MIN_REDACT (3) characters is never masked ("fw" stays): it would garble every word."""
     host = url_or_host
     if "://" in url_or_host:
         try:
@@ -468,7 +469,7 @@ class InstanceSpec:
             return 60  # reported by instance_problems()
 
 
-# The loaded types, cached process-wide with the key they were loaded under: (LW_CONNECTORS_DIR, sys.path). A
+# The loaded types, cached process-wide with the key they were loaded under: (LW_CONNECTORS_DIR, cwd, sys.path). A
 # changed key (a test's own dir or fake dist-info, never production) rebuilds it, so no test patches the registry.
 _LOADED = None  # loader.LoadResult
 _KEY: tuple | None = None
@@ -477,7 +478,12 @@ _LOCK = threading.RLock()
 
 
 def _key() -> tuple:
-    return (os.environ.get("LW_CONNECTORS_DIR", "").strip(), tuple(sys.path))
+    # the cwd too: a relative LW_CONNECTORS_DIR is resolved against it, and the loader never scans it on sys.path
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    return (os.environ.get("LW_CONNECTORS_DIR", "").strip(), cwd, tuple(sys.path))
 
 
 def _loaded():  # -> loader.LoadResult (not imported here: loader imports this module)
@@ -513,7 +519,8 @@ def _reset_registry() -> None:
 
 def registry() -> dict[str, type]:
     """type -> connector class: the built-ins plus the third-party types (see loader.py). Loaded on first use (the
-    built-in modules import this one) and again when LW_CONNECTORS_DIR or sys.path has changed."""
+    built-in modules import this one) and again when LW_CONNECTORS_DIR, the working directory or sys.path has
+    changed."""
     return _loaded().types
 
 
@@ -528,7 +535,8 @@ def type_origins() -> dict:
 
 
 def broken_types() -> dict[str, str]:
-    """type -> why it is not loaded, for every declared type that was refused or failed to import."""
+    """type -> why it is not loaded, for every declared type that was refused or failed to import. A plugin that
+    declares a built-in type name is not here: the built-in stays loaded, and the refusal is an ERROR in the log."""
     return dict(_loaded().broken)
 
 
