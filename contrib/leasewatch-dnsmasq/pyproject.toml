@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leasewatch-dnsmasq"
+version = "0.1.0"
+description = "leasewatch connector: DHCPv4 leases from a dnsmasq leases file"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+packages = ["leasewatch_dnsmasq"]
+
+# used from 1.2's loader
+# [project.entry-points."leasewatch.connectors.v1"]
+# dnsmasq_leases = "leasewatch_dnsmasq.connector:DnsmasqLeasesConnector"

@@ -2,6 +2,12 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.2.0 (unreleased)
+
+### Added
+
+- **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
+
 ## 1.1.0 (2026-11-06)
 
 ### Added
