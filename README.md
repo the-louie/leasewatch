@@ -42,6 +42,8 @@ Create a user with only the privileges *Diagnostics: ARP Table* and the leases p
 
 - `python -m leasewatch snmp-profiles` lists the built-in SNMP profiles and their match rules.
 - `python -m leasewatch snmp-detect <instance>` (or `--host 10.0.0.2 --auth-key-env MY_AUTH_KEY --priv-key-env MY_PRIV_KEY`) prints sysObjectID, sysDescr, the chosen profile and the first rows of each walk. With an instance it uses that instance's settings; with `--host` both `--auth-key-env` and `--priv-key-env` are required and name the environment variables that hold the keys (there is no default name). Keys are read from environment variables, never from the command line. Needs pysnmp.
+- `python -m leasewatch check [instance ...]` prints the loaded connector types, any plugin that failed to load, the config problems, and one line per instance: `ok (<ms> ms)`, `disabled: <problems>` or `check failed: <error>` (only `validate()` and `check()` run). Exit code 0 when all are ok, 1 when a check failed or timed out, 2 on a config or load problem or an unknown name.
+- `python -m leasewatch collect <instance> [--json]` runs `check()` and `collect()` once and prints the records as leasewatch would merge them (MACs normalised, `source` filled, `dropped` counted). With `--json` it prints exactly one JSON object, also on failure (`"ok": false`, `phase`, `error`). Same exit codes as `check`. Neither command starts the server or opens the database; secret settings and the source's host are masked in all output.
 
 ### Connectors
 

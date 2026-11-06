@@ -1,8 +1,12 @@
 """Entry point: collector thread + web server. `python -m leasewatch`.
 
-Two helper commands for writing SNMP profiles (they never start the server):
+Helper commands (they never start the server or open the database):
 `python -m leasewatch snmp-profiles` lists the built-in profiles and their match rules;
-`python -m leasewatch snmp-detect <instance>` (or `--host ...`) prints what a switch reports and what the profile walks.
+`python -m leasewatch snmp-detect <instance>` (or `--host ...`) prints what a switch reports and what the profile walks;
+`python -m leasewatch check [instance ...]` prints the loaded connector types, the config problems and each instance's
+validate()/check() result;
+`python -m leasewatch collect <instance> [--json]` runs check() and collect() once and prints the batch as the host
+would merge it.
 """
 from __future__ import annotations
 
@@ -12,15 +16,17 @@ import signal
 import sqlite3
 import sys
 import threading
+import time
+from typing import Callable
 
 from . import __version__
-from .collector import Collector
+from .collector import Collector, error_text, setup_instance
 from .config import ENV_PREFIX, Config, removed_problems
 from .db import Database
 from .web import serve
 
 
-SUBCOMMANDS = ("snmp-detect", "snmp-profiles")
+SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect")
 NO_PYSNMP = "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"
 
 
@@ -121,9 +127,7 @@ def _detect_connector(args: object) -> tuple[object | None, list[str], str]:
     # the server checks these too: an unreadable AUTH_KEY_FILE, TIMEOUT=x, or a parse problem with one of the
     # instance's own variables (two spellings of a key, a name left out of LW_CONNECTORS). Another instance's
     # problems stay out: they do not stop this switch from answering. The name listed twice stops the server
-    own = removed + [p for p in cfg.connector_problems if p not in removed and (
-        p.startswith((f"connector {args.instance} ", f"LW_CONNECTORS: {args.instance} "))
-        or f"{ENV_PREFIX}{args.instance.upper()}__" in p.upper())]
+    own = removed + _own_problems(cfg, args.instance, removed)
     named = next((s for s in cfg.instances if s.name == args.instance), None)
     if named is not None and named.type not in registry():  # a TYPE typo: name it as the server would
         return None, own, f"config: {instance_problems(named)[0]}"
@@ -136,6 +140,12 @@ def _detect_connector(args: object) -> tuple[object | None, list[str], str]:
         # or for another instance (LW_CONNECTORS unset, an invalid name)
         return None, list(cfg.connector_problems), f"no snmp_switch instance {args.instance!r} configured (configured: {', '.join(names) or 'none'})"
     return conn, own + instance_problems(spec, conn), ""
+
+
+def _own_problems(cfg: Config, name: str, removed: list[str]) -> list[str]:
+    """cfg.connector_problems that belong to the instance `name` (its own variables, its LW_CONNECTORS entry)."""
+    return [p for p in cfg.connector_problems if p not in removed and (
+        p.startswith((f"connector {name} ", f"LW_CONNECTORS: {name} ")) or f"{ENV_PREFIX}{name.upper()}__" in p.upper())]
 
 
 def snmp_detect_cmd(argv: list[str]) -> int:
@@ -195,6 +205,211 @@ def snmp_detect_cmd(argv: list[str]) -> int:
     return 0
 
 
+def _global_problems(cfg: Config) -> list[str]:
+    """The config problems that stop the server whatever the instance: a removed 1.0 variable, a load problem,
+    LW_CONNECTORS unset (all part of cfg.connector_problems, which Config() fills once)."""
+    from .connectors import load_problems
+    loaded = load_problems()
+    return [p for p in cfg.connector_problems
+            if p in removed_problems(os.environ) or p in loaded or p.startswith("LW_CONNECTORS is not set")]
+
+
+def _redactor(ctx: object, conn: object | None, spec: object, hosts: bool = True) -> Callable[[str], str]:
+    """The host's redact (every secret setting of every instance, as the collector uses it), then the instance's own
+    redact() if it has one (a switch masks its host and user), then (hosts=True, for error and problem texts only) the
+    host of the instance's URL/HOST setting."""
+    from .connectors import make_host_mask
+    own = getattr(conn, "redact", None)
+    masks = [make_host_mask(v) for k, v in spec.settings.items() if k in ("url", "host") and v.strip()] if hosts else []
+
+    def redact(text: str) -> str:
+        text = ctx.redact(text)
+        if callable(own):
+            try:
+                text = own(text)
+            except Exception:  # a connector's own helper must not turn a report into a traceback; the masks still run
+                pass
+        for mask in masks:
+            text = mask(text)
+        return text
+    return redact
+
+
+def _probe(conn: object, steps: tuple[str, ...], timeout: int) -> tuple[str, object, int, bool]:
+    """Call conn's methods `steps` in order in a daemon thread joined for `timeout` seconds (the collector's TIMEOUT
+    rule): (phase reached, last return value or the exception, ms, timed out). A hung thread is abandoned."""
+    state: dict = {"phase": steps[0], "out": None, "done": False}
+
+    def work() -> None:
+        out: object = None
+        try:
+            for step in steps:
+                state["phase"] = step
+                out = getattr(conn, step)()
+        except BaseException as e:  # reported, never raised: the command prints one line (or one object) per outcome
+            out = e
+        state["out"] = out
+        state["done"] = True  # last: the joining thread reads "out" only once this is set
+
+    t0 = time.monotonic()
+    t = threading.Thread(target=work, name=f"probe-{getattr(conn, 'name', '')}", daemon=True)
+    try:
+        t.start()
+    except RuntimeError as e:  # out of threads
+        return steps[0], e, 0, False
+    t.join(timeout)
+    if not state["done"]:
+        return state["phase"], None, timeout * 1000, True
+    return state["phase"], state["out"], int((time.monotonic() - t0) * 1000), False
+
+
+def _probe_error(phase: str, out: object, timed_out: bool, timeout: int, redact: Callable[[str], str]) -> str:
+    """The collector's error text for a probe result, "" when it succeeded."""
+    from .connectors import Batch
+    if timed_out:
+        return f"timed out after {timeout} s"
+    if isinstance(out, BaseException):
+        return error_text(out, redact)
+    if phase == "collect" and not isinstance(out, Batch):
+        return "collect() did not return a Batch"
+    return ""
+
+
+def _close(conn: object) -> None:
+    try:
+        conn.close()
+    except Exception as e:  # the report is made; a failing close() is named on stderr, never its text
+        logging.getLogger("leasewatch").warning("connector %s: close() failed (%s)", getattr(conn, "name", "?"),
+                                                type(e).__name__)
+
+
+def check_cmd(argv: list[str]) -> int:
+    import argparse
+    from .connectors import broken_types, instances_context
+    ap = argparse.ArgumentParser(prog="python -m leasewatch check",
+                                 description="Show the loaded connector types and config problems, then run validate() "
+                                             "and check() for each instance (collect() is never called).")
+    ap.add_argument("instance", nargs="*", help="instance names (default: every instance in LW_CONNECTORS)")
+    args = ap.parse_args(argv)
+    cfg = Config()
+    ctx = instances_context(cfg.instances)
+    specs = {s.name: s for s in cfg.instances}
+    names = list(dict.fromkeys(args.instance))
+    removed = removed_problems(os.environ)
+    _out(types_line())
+    for type_, why in sorted(broken_types().items()):
+        _out(f"plugin: {type_} not loaded: {ctx.redact(why)}")
+    if names:  # global problems plus the named instances' own; another instance's problem does not count
+        problems = _global_problems(cfg) + [p for n in names for p in _own_problems(cfg, n, removed)]
+        problems += [p for n in names if n in specs for p in setup_instance(specs[n], ctx)[1]]
+    else:
+        problems = cfg.validate()
+    problems = list(dict.fromkeys(problems))
+    for p in problems:
+        _out(f"config: {ctx.redact(p)}")
+    unknown = failed = False
+    for name in names or list(specs):
+        spec = specs.get(name)
+        if spec is None:
+            _out(f"{name}: not configured (configured: {', '.join(specs) or 'none'})")
+            unknown = True
+            continue
+        conn, own = setup_instance(spec, ctx)
+        own = list(dict.fromkeys(_own_problems(cfg, name, removed) + own))
+        if own or conn is None:
+            _out(f"{name} ({spec.type}): disabled: {ctx.redact('; '.join(own))}")
+            if conn is not None:
+                _close(conn)
+            continue
+        try:
+            phase, out, ms, timed_out = _probe(conn, ("check",), spec.timeout)
+        finally:
+            _close(conn)
+        redact = _redactor(ctx, conn, spec)
+        error = _probe_error(phase, out, timed_out, spec.timeout, redact)
+        failed = failed or bool(error)
+        _out(redact(f"{name} ({spec.type}): " + (f"check failed: {error}" if error else f"ok ({ms} ms)")))
+    return 2 if problems or unknown else 1 if failed else 0
+
+
+def _record_line(kind: str, record: object) -> str:
+    import dataclasses
+    return kind + " " + " ".join(f"{k}={v}" for k, v in dataclasses.asdict(record).items() if v not in ("", None))
+
+
+def collect_cmd(argv: list[str]) -> int:
+    import argparse
+    import dataclasses
+    import json
+    from .connectors import instances_context
+    from .connectors.merge import normalise_batch
+    ap = argparse.ArgumentParser(prog="python -m leasewatch collect",
+                                 description="Run validate(), check() and collect() once for one instance and print the "
+                                             "batch as the host would merge it.")
+    ap.add_argument("instance", help="configured instance (LW_CONNECTORS)")
+    ap.add_argument("--json", action="store_true", help="print exactly one JSON object, also on failure")
+    args = ap.parse_args(argv)
+    cfg = Config()
+    ctx = instances_context(cfg.instances)
+    name = args.instance
+    spec = next((s for s in cfg.instances if s.name == name), None)
+    report: dict = {"instance": name, "type": spec.type if spec else "", "ok": False, "phase": "validate", "error": "",
+                    "ms": 0, "problems": [], "stats": {}, "sightings": [], "attachments": []}
+    # redact (secrets) runs on all output; mask (secrets and the URL/HOST host) only on error and problem texts, as the
+    # collector does: device data may name the source's own address (a firewall's ARP list) and is shown unmasked
+    redact: Callable[[str], str] = ctx.redact
+    mask: Callable[[str], str] = ctx.redact
+    problems = _global_problems(cfg) + _own_problems(cfg, name, removed_problems(os.environ))
+    batch = None
+    if spec is None:
+        report["error"] = f"not configured (configured: {', '.join(s.name for s in cfg.instances) or 'none'})"
+        rc = 2
+    else:
+        conn, own = setup_instance(spec, ctx)
+        problems += own
+        if conn is not None:
+            redact, mask = _redactor(ctx, conn, spec, hosts=False), _redactor(ctx, conn, spec)
+        if problems or conn is None:
+            report["error"] = "disabled: " + "; ".join(dict.fromkeys(problems))
+            rc = 2
+            if conn is not None:
+                _close(conn)
+        else:
+            try:
+                phase, out, ms, timed_out = _probe(conn, ("check", "collect"), spec.timeout)
+            finally:
+                _close(conn)
+            error = _probe_error(phase, out, timed_out, spec.timeout, mask)
+            report.update(phase=phase, ms=ms, error=error, ok=not error)
+            rc = 1 if error else 0
+            if not error:
+                batch = normalise_batch(name, out)  # source filled, MACs normalised, stats["dropped"] set
+                report.update(stats=batch.stats, sightings=[dataclasses.asdict(r) for r in batch.sightings],
+                              attachments=[dataclasses.asdict(r) for r in batch.attachments])
+    report["problems"] = [mask(p) for p in dict.fromkeys(problems)]
+    report["error"] = mask(report["error"])
+    if args.json:
+        # one object; the whole text redacted (the redactor also matches JSON-escaped secrets). default=str: a stat
+        # value that is not JSON (a connector's own type) must not turn the object into a traceback
+        for line in redact(json.dumps(report, ensure_ascii=True, indent=2, default=str)).splitlines():
+            _out(line)
+        return rc
+    for p in report["problems"]:
+        _out(f"config: {p}")
+    head = f"{name} ({spec.type})" if spec else name
+    if batch is not None:
+        _out(redact(f"{head}: {len(batch.sightings)} sightings, {len(batch.attachments)} attachments, {report['ms']} ms"))
+        _out(redact("stats: " + " ".join(f"{k}={v}" for k, v in sorted(batch.stats.items(), key=lambda kv: str(kv[0])))))
+        for kind, records in (("sighting", batch.sightings), ("attachment", batch.attachments)):
+            for r in records:
+                _out(redact(_record_line(kind, r)))
+    elif report["phase"] == "validate":
+        _out(mask(f"{head}: {report['error']}"))
+    else:
+        _out(mask(f"{head}: {report['phase']} failed: {report['error']}"))
+    return rc
+
+
 def startup_line(cfg: Config, version: str) -> str:
     """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail."""
     conns = ", ".join(f"{s.name} ({s.type})" for s in cfg.instances)
@@ -222,7 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         rc = None
         try:
             try:
-                rc = (snmp_detect_cmd if argv[0] == "snmp-detect" else snmp_profiles_cmd)(argv[1:])
+                rc = {"snmp-detect": snmp_detect_cmd, "snmp-profiles": snmp_profiles_cmd, "check": check_cmd,
+                      "collect": collect_cmd}[argv[0]](argv[1:])
             except SystemExit as e:  # argparse's --help or usage error: its output is flushed below like any other
                 rc = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
             sys.stdout.flush()  # here, not at exit: a reader that has gone away is caught below

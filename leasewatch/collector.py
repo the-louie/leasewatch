@@ -15,11 +15,12 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .config import Config
 from .db import Database
-from .connectors import (Batch, ConnectorError, InstanceSpec, build_instance, instance_problems, instances_context,
-                         registry)
+from .connectors import (Batch, ConnectorError, HostContext, InstanceSpec, build_instance, instance_problems,
+                         instances_context, registry)
 from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState,
                                normalise_batch, to_fw1, merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
@@ -35,6 +36,25 @@ SKIPPED = "previous collection has not completed; skipped"
 # (type, ok, error, count key, Batch.stats key)
 ALIASES = {"switch": ("snmp_switch", "switch_ok", "switch_error", "switch_macs", "macs"),
            "unifi": ("unifi", "unifi_ok", "unifi_error", "unifi_clients", "clients")}
+
+
+def setup_instance(spec: InstanceSpec, ctx: HostContext, client: object | None = None) -> tuple[object | None, list[str]]:
+    """(connector, problems) for one instance: built with ctx and checked by instance_problems() (validate()); the
+    connector is None when it cannot be built. No network I/O. Shared by the collector and the check/collect commands."""
+    try:
+        if registry().get(spec.type) is None:  # unknown or empty TYPE: validate()'s message, not build_instance's KeyError
+            return None, instance_problems(spec)
+        conn = build_instance(spec, ctx, client=client)
+        return conn, instance_problems(spec, conn)
+    except Exception as e:
+        return None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
+
+
+def error_text(exc: BaseException, redact: Callable[[str], str]) -> str:
+    """How a failed check()/collect() is shown: only a ConnectorError's text is meant for the UI (redacted, at most 200
+    characters; a bare one has none: its type name); any other exception is shown as its type name, its text goes to
+    the redacted log line only."""
+    return redact(str(exc) or type(exc).__name__)[:200] if isinstance(exc, ConnectorError) else type(exc).__name__
 
 
 @dataclass
@@ -120,14 +140,7 @@ class Collector:
         run = _Run(spec.name, spec.type, spec.timeout, cls.describe().produces if cls else frozenset(),
                    self.cfg.poll_seconds, checked=client is not None)  # C5: remove (an injected client is a test double without check())
         self._runs[spec.name] = run
-        try:
-            if cls is None:  # unknown or empty TYPE: validate()'s message, not the KeyError build_instance raises
-                conn, problems = None, instance_problems(spec)
-            else:
-                conn = build_instance(spec, self._ctx, client=client)
-                problems = instance_problems(spec, conn)
-        except Exception as e:
-            conn, problems = None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
+        conn, problems = setup_instance(spec, self._ctx, client)
         if problems:
             run.disabled = run.error = "disabled: " + "; ".join(problems)
             # each problem already starts with "connector <name> (<type>)"
@@ -250,10 +263,7 @@ class Collector:
             if res is None:
                 error = f"timed out after {run.timeout} s"
             elif exc is not None:
-                # only a ConnectorError's text is meant for the UI (a bare one has none: its type name); any other
-                # exception is shown as its type name, its text goes to the redacted log line only
-                error = (self._ctx.redact(str(exc) or type(exc).__name__)[:200] if isinstance(exc, ConnectorError)
-                         else type(exc).__name__)
+                error = error_text(exc, self._ctx.redact)
             else:
                 error = "collect() did not return a Batch"
             if phase == "check":

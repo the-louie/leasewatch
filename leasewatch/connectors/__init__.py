@@ -526,6 +526,11 @@ def type_origins() -> dict:
     return dict(_loaded().origins)
 
 
+def broken_types() -> dict[str, str]:
+    """type -> why it is not loaded, for every declared type that was refused or failed to import."""
+    return dict(_loaded().broken)
+
+
 def secret_keys(type_: str) -> frozenset[str]:
     cls = registry().get(type_)
     return frozenset(s.key for s in cls.describe().settings if s.secret) if cls else frozenset()
