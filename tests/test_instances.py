@@ -346,12 +346,6 @@ class ThreadTests(Base):
             run.thread.join(5)
         self.assertIsNone(run.result)  # the abandoned thread's late outcome belongs to no poll
 
-    def test_alias_keys_need_name_and_type(self):
-        col, db = self.collector({"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "fake"})
-        col.run_once()
-        self.assertEqual(db.get_meta("conn.switch.ok"), "1")
-        self.assertEqual(db.get_meta("switch_ok", "unset"), "unset")  # a "switch" that is not an snmp_switch
-
     def test_sighting_producers(self):
         env = {"LW_CONNECTORS": "fw1,fw2", **FW1, "LW_CONNECTOR__FW2__TYPE": "fakefw"}
         col, db = self.collector(env, rows=[])
@@ -371,7 +365,7 @@ class ThreadTests(Base):
 
 
 class StatusTests(Base):
-    def test_meta_keys_and_legacy_aliases(self):
+    def test_meta_keys_without_legacy_aliases(self):
         col, db = self.collector(sources("unifi"))
         swap_client(col, "unifi", type("U", (), {"clients": lambda self: {}})())
         col.run_once()
@@ -381,8 +375,7 @@ class StatusTests(Base):
                               m[f"conn.{name}.enabled"]), (typ, "1", "", count, "1"))
             self.assertGreater(int(m[f"conn.{name}.ts"]), 0)
             self.assertGreaterEqual(int(m[f"conn.{name}.ms"]), 0)
-        self.assertEqual((m["unifi_ok"], m["unifi_error"], m["unifi_clients"]), ("1", "", "0"))
-        self.assertNotIn("switch_ok", m)
+        self.assertFalse({"unifi_ok", "unifi_error", "unifi_clients", "switch_ok"} & m.keys())
 
     def test_strategy_copied_to_meta(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1,sw,x", **FW1, "LW_CONNECTOR__SW__TYPE": "fake", "LW_CONNECTOR__X__TYPE": "fake"})
@@ -416,7 +409,7 @@ class StatusTests(Base):
         self.assertEqual([(c["name"], c["type"], c["ok"], c["enabled"]) for c in conns], [("fw1", "opnsense", True, True), ("x", "fake", True, True)])
         self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "strategy", "enabled"})
         self.assertEqual(conns[0]["count"], 1)
-        self.assertIn("switch", body["meta"])  # the 1.0 objects stay for one release
+        self.assertFalse({"switch", "unifi"} & body["meta"].keys())  # the 1.0 objects were removed in 1.2
         self.assertNotIn("fw1-key", json.dumps(body))
 
 

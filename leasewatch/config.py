@@ -234,12 +234,6 @@ class Config:
         """The configured connector instances, in LW_CONNECTORS order (the merge tie-break order)."""
         return self.connector_specs
 
-    @property
-    def unifi_enabled(self) -> bool:
-        # only the instance the collector writes unifi_ok/unifi_clients for (collector.ALIASES), as web.py does for
-        # meta.switch; another name would show a dot that never turns green
-        return any(sp.name == "unifi" and sp.type == "unifi" for sp in self.connector_specs)
-
     def host_allowed(self, host: str) -> bool:
         """`host` as sent in the Host header (may carry a port). See allowed_hosts."""
         h = (host or "").strip().lower()

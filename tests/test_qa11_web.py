@@ -227,10 +227,12 @@ class LwConnectorsSwitchTests(Base):
            "LW_CONNECTOR__SWITCH__HOST": "10.0.0.2", "LW_CONNECTOR__SWITCH__NAME": "sw-rack", "LW_CONNECTOR__SWITCH__USER": "u",
            "LW_CONNECTOR__SWITCH__AUTH_KEY": "aaaaaaaa", "LW_CONNECTOR__SWITCH__PRIV_KEY": "pppppppp"}
 
-    def test_R102_deprecated_switch_object_follows_the_instance(self) -> None:
-        self.db.set_meta("switch_ok", "1"); self.db.set_meta("switch_macs", "12")
-        sw = self.handler()._meta()["switch"]
-        self.assertEqual((sw["enabled"], sw["name"], sw["ok"], sw["macs"]), (True, "sw-rack", True, 12))
+    def test_R102_switch_status_is_in_connectors_only(self) -> None:
+        self.db.set_meta("conn.switch.ok", "1"); self.db.set_meta("conn.switch.count", "12")
+        m = self.handler()._meta()
+        self.assertNotIn("switch", m); self.assertNotIn("unifi", m)
+        sw = next(c for c in m["connectors"] if c["name"] == "switch")
+        self.assertEqual((sw["enabled"], sw["label"], sw["ok"], sw["count"]), (True, "sw-rack", True, 12))
 
 
 class TwoControllersTests(Base):
@@ -321,9 +323,11 @@ class OtherNameControllerTests(Base):
            "LW_CONNECTOR__FW1__KEY": "kkkkk", "LW_CONNECTOR__FW1__SECRET": "sssss", "LW_CONNECTOR__HOME__TYPE": "unifi",
            "LW_CONNECTOR__HOME__URL": "https://10.0.0.3", "LW_CONNECTOR__HOME__USER": "ro", "LW_CONNECTOR__HOME__PASSWORD": "pppppp"}
 
-    def test_V23_V24_deprecated_unifi_object_follows_the_named_instance(self) -> None:
+    def test_V23_V24_controller_status_follows_its_instance(self) -> None:
         self.db.set_meta("conn.home.ok", "1")
-        self.assertFalse(self.handler()._meta()["unifi"]["enabled"])
+        m = self.handler()._meta()
+        self.assertNotIn("unifi", m)
+        self.assertEqual([(c["name"], c["label"], c["ok"]) for c in m["connectors"] if c["type"] == "unifi"], [("home", "Wi-Fi", True)])
 
 
 class TypeHintTests(unittest.TestCase):

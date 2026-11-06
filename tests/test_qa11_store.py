@@ -90,9 +90,9 @@ class MetaTest(DbBase):
     def test_r51_lone_surrogate_does_not_roll_back_the_transaction(self) -> None:
         with self.db.tx() as c:
             c.execute("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,0,0)", (MAC,))
-            self.db.set_meta("unifi_error", "unifi: \ud800", c)
+            self.db.set_meta("conn.unifi.error", "unifi: \ud800", c)
         self.assertIsNotNone(self.db.device(MAC))
-        self.assertEqual(self.db.get_meta("unifi_error"), "unifi: ?")
+        self.assertEqual(self.db.get_meta("conn.unifi.error"), "unifi: ?")
 
     def test_r133_r134_signatures_are_annotated(self) -> None:
         self.assertIn("return", Database.tx.__wrapped__.__annotations__)

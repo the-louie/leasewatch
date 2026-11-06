@@ -171,15 +171,15 @@ class StatusTests(Base):
         self.assertEqual((db.get_meta("conn.sw.ok"), db.get_meta("conn.sw.count"), db.get_meta("conn.sw.strategy")), ("0", "0", ""))
         self.assertEqual(db.get_meta("conn.fw1.strategy", "unset"), "unset")
 
-    def test_disabled_switch_writes_its_alias_status(self):
+    def test_disabled_switch_writes_its_status(self):
         cfg_env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST: disabled
         col, db = self.collector(cfg_env)
         self.assertTrue(col._runs["switch"].disabled)
-        db.set_meta("switch_ok", "1")  # a good poll before the restart
-        db.set_meta("switch_error", "")
+        db.set_meta("conn.switch.ok", "1")  # a good poll before the restart
         col.run_once()
-        self.assertEqual(db.get_meta("switch_ok"), "0")
-        self.assertTrue(db.get_meta("switch_error").startswith("disabled: "))
+        self.assertEqual((db.get_meta("conn.switch.ok"), db.get_meta("conn.switch.enabled")), ("0", "0"))
+        self.assertTrue(db.get_meta("conn.switch.error").startswith("disabled: "))
+        self.assertEqual(db.get_meta("switch_ok", "unset"), "unset")  # no 1.0 alias keys any more
 
     def test_string_stat_of_a_sighting_producer_does_not_break_the_poll(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1,fx", **FW1, "LW_CONNECTOR__FX__TYPE": "fakefw"})
@@ -256,16 +256,14 @@ class Round2Tests(Base):
         Collector(self.cfg({**env, "LW_CONNECTOR__WIFI__URL": "https://x.example.lan"}), db, self.client)
         self.assertEqual((db.get_meta("conn.wifi.enabled"), db.get_meta("conn.wifi.error")), ("1", ""))
 
-    def test_disabled_alias_is_written_at_start(self):  # V47
+    def test_disabled_status_is_written_at_start(self):  # V47
         db = self.collector({"LW_CONNECTORS": "fw1", **FW1})[1]
-        db.set_meta("switch_ok", "1")  # a good poll before the restart
-        db.set_meta("switch_macs", "42")
         col = Collector(self.cfg({"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}),
                         db, self.client)
         self.client.fail = True
         col.run_once()
-        self.assertEqual(db.get_meta("switch_ok"), "0")
-        self.assertTrue(db.get_meta("switch_error").startswith("disabled: "))
+        self.assertEqual(db.get_meta("conn.switch.enabled"), "0")
+        self.assertTrue(db.get_meta("conn.switch.error").startswith("disabled: "))
 
     def test_event_prune_survives_a_clock_jump_that_lasts(self):  # V48
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
@@ -319,17 +317,17 @@ class Round3Tests(Base):
     """Fix round 3 (W01, W02, W03, W04, W29, W39)."""
     RES = SimpleNamespace(rows={}, history=[], events=[], seen=[])
 
-    def test_fixed_switch_clears_its_disabled_alias_at_start(self):  # W01
+    def test_fixed_switch_clears_its_disabled_error_at_start(self):  # W01
         env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST
         col, db = self.collector(env)
-        self.assertTrue(db.get_meta("switch_error").startswith("disabled: "))
+        self.assertTrue(db.get_meta("conn.switch.error").startswith("disabled: "))
         col = Collector(self.cfg({**env, "LW_CONNECTOR__SWITCH__HOST": "10.0.0.2", "LW_CONNECTOR__SWITCH__USER": "u",
                                   "LW_CONNECTOR__SWITCH__AUTH_KEY": "aaaaaaaa", "LW_CONNECTOR__SWITCH__PRIV_KEY": "pppppppp"}),
                         db, self.client)
         self.assertFalse(col._runs["switch"].disabled)
-        self.client.fail = True  # the firewall is down: _collect never reaches the enricher's alias write
+        self.client.fail = True  # the firewall is down: _collect never reaches the enricher's status write
         col.run_once()
-        self.assertEqual((db.get_meta("conn.switch.error"), db.get_meta("switch_error")), ("", ""))
+        self.assertEqual(db.get_meta("conn.switch.error"), "")
 
     def test_alternating_unexpected_failures_log_each_traceback_once(self):  # W02, W29
         col, _ = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})

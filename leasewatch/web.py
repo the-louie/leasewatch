@@ -97,8 +97,6 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 return f"Wi-Fi {s.name}" if sum(i.type == "unifi" for i in cfg.instances) > 1 else "Wi-Fi"
 
             m = db.all_meta()
-            # the instance the collector writes switch_ok/switch_macs for (collector.ALIASES)
-            sw = next((s for s in cfg.instances if s.name == "switch" and s.type == "snmp_switch"), None)
             now = int(time.time())
             last = int(m.get("last_poll_ts") or 0)
             return {
@@ -110,9 +108,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 "new_days": cfg.new_days, "site_name": cfg.site_name, "version": version, "mail": cfg.mail_enabled,
                 # abs(): a last poll in the future (the clock stepped back) proves nothing about the collector running
                 "stale": abs(now - last) > cfg.poll_seconds * 3 if last else True,
-                "switch": {"enabled": sw is not None, "name": (sw.settings.get("name") or sw.name) if sw else "switch", "ok": m.get("switch_ok") == "1", "error": m.get("switch_error", ""), "macs": int(m.get("switch_macs") or 0)},
-                "unifi": {"enabled": cfg.unifi_enabled, "ok": m.get("unifi_ok") == "1", "error": m.get("unifi_error", ""), "clients": int(m.get("unifi_clients") or 0)},
-                # one entry per configured instance, in LW_CONNECTORS order; "switch"/"unifi" above stay for one release
+                # one entry per configured instance, in LW_CONNECTORS order
                 # label: the dot text in the page (the switch's own NAME, "Wi-Fi"); name stays the instance id
                 "connectors": [{"name": s.name, "label": _label(s), "type": s.type, "ok": m.get(f"conn.{s.name}.ok") == "1",
                                 "error": m.get(f"conn.{s.name}.error", ""), "ts": int(m.get(f"conn.{s.name}.ts") or 0) or None,

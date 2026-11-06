@@ -16,6 +16,10 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 - **Baseline:** while the baseline waits for a sighting producer, no change events (ip, hostname, network, lease type, port, Wi-Fi, back) and no history rows are written, so a late producer no longer logs its details as changes (e.g. "hostname - -> laptop"). Devices are still recorded and updated; the poll that takes the baseline writes one history row per device with its complete values.
 
+### Removed
+
+- **API:** the deprecated 1.0 objects `meta.switch` and `meta.unifi` in `/api/status`, `/api/stats` and `/api/devices`; use `meta.connectors` (one entry per instance). The collector no longer writes the meta keys behind them (`switch_ok`, `switch_error`, `switch_macs`, `unifi_ok`, `unifi_error`, `unifi_clients`), and the page no longer falls back to them. Instance names `switch` and `unifi` have no special meaning any more.
+
 ### Fixed
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.

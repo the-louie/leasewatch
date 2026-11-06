@@ -312,14 +312,14 @@ class ReviewFixTests(unittest.TestCase):
         swap_client(col, "unifi", type("U", (), {"clients": lambda self: {}})())
         swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})())
         self.assertTrue(col.run_once()["ok"])
-        self.assertEqual((self.db.get_meta("last_raw"), self.db.get_meta("switch_macs"), self.db.get_meta("unifi_clients")),
+        self.assertEqual((self.db.get_meta("last_raw"), self.db.get_meta("conn.switch.count"), self.db.get_meta("conn.unifi.count")),
                          ("0 leases, 0 arp", "0", "0"))
 
     def test_enrich_error_names_a_bare_exception(self):
         col = Collector(cfg_with("switch"), self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5")]))
         swap_client(col, "switch", type("W", (), {"snapshot": lambda self: (_ for _ in ()).throw(TimeoutError())})())
         col.run_once()
-        self.assertEqual(self.db.get_meta("switch_error"), "TimeoutError")
+        self.assertEqual(self.db.get_meta("conn.switch.error"), "TimeoutError")
 
     def test_new_and_back_event_text(self):
         mac = "02:00:00:00:00:01"

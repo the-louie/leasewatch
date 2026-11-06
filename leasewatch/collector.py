@@ -32,10 +32,6 @@ HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
-# meta aliases the 1.0 UI reads, for the instances named "switch" and "unifi" (name and type must both match):
-# (type, ok, error, count key, Batch.stats key)
-ALIASES = {"switch": ("snmp_switch", "switch_ok", "switch_error", "switch_macs", "macs"),
-           "unifi": ("unifi", "unifi_ok", "unifi_error", "unifi_clients", "clients")}
 
 
 def setup_instance(spec: InstanceSpec, ctx: HostContext, client: object | None = None) -> tuple[object | None, list[str]]:
@@ -112,16 +108,9 @@ class Collector:
                     if not run.disabled and c.execute("SELECT 1 FROM meta WHERE key=? AND value='0'",
                                                       (f"conn.{run.name}.enabled",)).fetchone():
                         self.db.set_meta(f"conn.{run.name}.error", "", c)
-                        # and the 1.0 alias written below at that start: while the firewall fails nothing else clears it
-                        if run.name in ALIASES and run.type == ALIASES[run.name][0]:
-                            self.db.set_meta(ALIASES[run.name][2], "", c)
                     self.db.set_meta(f"conn.{run.name}.enabled", "0" if run.disabled else "1", c)
                     if run.disabled:
                         self.db.set_meta(f"conn.{run.name}.error", run.error, c)
-                        # the 1.0 aliases too: while the firewall fails, _collect never reaches the enricher's write
-                        if run.name in ALIASES and run.type == ALIASES[run.name][0]:
-                            self.db.set_meta(ALIASES[run.name][1], "0", c)
-                            self.db.set_meta(ALIASES[run.name][2], run.error, c)
         except sqlite3.Error as e:
             log.warning("cannot remove rows of instances that are no longer configured: %s", e)
             pruned = cleared = 0
@@ -301,12 +290,6 @@ class Collector:
             # stored one names a walk this poll did not make
             if f"conn.{n}.strategy" not in status and self.db.get_meta(f"conn.{n}.strategy"):
                 status[f"conn.{n}.strategy"] = ""
-            # a disabled instance writes them too, or a 1.0 reader keeps the last good poll's green status
-            if n in ALIASES and run.type == ALIASES[n][0]:
-                _type, k_ok, k_err, k_count, stat = ALIASES[n]
-                status[k_ok], status[k_err] = ("1" if ok else "0"), error
-                if ok:
-                    status[k_count] = str(out[n].stats.get(stat, 0))
         return out, status
 
     def _fail(self, msg: str, status: dict[str, str] | None = None) -> dict:

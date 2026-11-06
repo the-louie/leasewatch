@@ -113,10 +113,9 @@
     dot.className = "dot " + (ok ? "ok" : "bad");
     txt.innerHTML = m.last_poll_ts ? `polled ${esc(rel(m.last_poll_ts))} · ${esc(m.last_raw.replace("arp", "ARP entries"))}` : "no poll yet";
     // one dot per connector instance, text = its display label, tooltip = its instance name; a server without
-    // m.connectors (1.0) has only the switch and UniFi objects, and one without label (1.1 before labels) the name
+    // label (1.1 before labels) gives the name
     // an instance disabled at start (invalid settings) gets no dot: it never polls, and the start log names the problem
-    const sources = m.connectors ? m.connectors.filter(c => c.enabled !== false).map(c => [c.label || c.name, c.name, c])
-      : [[m.switch?.name || "switch", "switch", m.switch], ["Wi-Fi", "unifi", m.unifi]].filter(([, , s]) => s && s.enabled);
+    const sources = (m.connectors || []).filter(c => c.enabled !== false).map(c => [c.label || c.name, c.name, c]);
     for (const [label, name, s] of sources) {
       // a failed poll stops before the enrichers run: an instance last read at or before the last good poll was not
       // read in the failing ones, so its old "ok" is shown grey, not green

@@ -85,23 +85,6 @@ class QaConfigTests(unittest.TestCase):
         self.assertIn("LW_CONNECTOR__FW1__KEY set but fw1 is not in LW_CONNECTORS", p)
         self.assertTrue(any(x.startswith("LW_CONNECTORS is not set") for x in p), p)
 
-    # R26: unifi_enabled follows the configured instances
-    def test_unifi_enabled_in_connector_mode(self) -> None:
-        c = self.cfg(**FW)
-        self.assertFalse(c.unifi_enabled)
-        clean_env(BASE)
-        c = self.cfg(**{**FW, "LW_CONNECTORS": "fw1,unifi", "LW_CONNECTOR__UNIFI__TYPE": "unifi",
-                        "LW_CONNECTOR__UNIFI__URL": "https://10.0.0.3", "LW_CONNECTOR__UNIFI__USER": "ro",
-                        "LW_CONNECTOR__UNIFI__PASSWORD": "pw"})
-        self.assertTrue(c.unifi_enabled)
-
-    # V03: only the instance the collector writes unifi_ok/unifi_clients for (named "unifi") enables meta.unifi
-    def test_unifi_enabled_needs_the_alias_name(self) -> None:
-        c = self.cfg(**{**FW, "LW_CONNECTORS": "fw1,wifi", "LW_CONNECTOR__WIFI__TYPE": "unifi",
-                        "LW_CONNECTOR__WIFI__URL": "https://10.0.0.3", "LW_CONNECTOR__WIFI__USER": "ro",
-                        "LW_CONNECTOR__WIFI__PASSWORD": "pw"})
-        self.assertFalse(c.unifi_enabled)
-
     # R27: the URL scheme is case-insensitive, as urllib treats it
     def test_uppercase_scheme_accepted(self) -> None:
         self.assertEqual(self.cfg(LW_CONNECTOR__FW1__URL="HTTPS://10.0.0.1", PUBLIC_URL="HTTP://lw.example.lan",
