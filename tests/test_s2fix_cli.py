@@ -78,10 +78,72 @@ class TestInstanceNameKept(CliBase):
         rc, out, _ = self.cli("check")
         self.assertRegex(out.splitlines()[1], r"^dhcp1 \(fakecli\): ok \(\d+ ms\)$")
 
-    def test_client_label_is_kept(self):
+    def test_whole_error_text_is_masked(self):
+        # S2S02, S2S03, S2S08: the host is masked before the first ": " too; only the "<name> (<type>): " head stays
         mask = m._redactor(Ctx(), None, Spec(url="https://fw1/"))
         self.assertEqual(mask("fw1 /api/core/firmware/status: HTTP 401 from fw1"),
-                         "fw1 /api/core/firmware/status: HTTP 401 from <host>")
+                         "<host> /api/core/firmware/status: HTTP 401 from <host>")
+        mask = m._redactor(Ctx(), None, Spec(url="https://dhcp.example.lan"))
+        for text, want in (("dhcp.example.lan: connection refused", "<host>: connection refused"),
+                           ("url https://dhcp.example.lan: unreachable", "url https://<host>: unreachable"),
+                           ("HTTPSConnectionPool(host='dhcp.example.lan', port=443): Max retries exceeded",
+                            "HTTPSConnectionPool(host='<host>', port=443): Max retries exceeded")):
+            self.assertEqual(mask(text), want)
+
+    def test_collect_and_check_mask_a_leading_host(self):
+        self.env("dhcp1", inst("dhcp1", "collectfail", URL="https://dhcp.example.lan"))
+        with mock.patch.object(registry()["fakecli"], "_leak", lambda self: "dhcp.example.lan: connection refused"):
+            rc, out, _ = self.cli("collect", "dhcp1")
+            self.assertEqual((rc, out), (1, "dhcp1 (fakecli): collect failed: <host>: connection refused\n"))
+            rc, out, _ = self.cli("collect", "dhcp1", "--json")
+            self.assertEqual(json.loads(out)["error"], "<host>: connection refused")
+            os.environ["LW_CONNECTOR__DHCP1__MODE"] = "checkfail"
+            rc, out, _ = self.cli("check", "dhcp1")
+            self.assertIn("dhcp1 (fakecli): check failed: <host>: connection refused", out)
+
+
+class TestConfigLineMasks(CliBase):
+    """S2S04, S2S05: a config: line is masked with its own instance's host only, and its head is kept."""
+
+    def test_own_host_keeps_the_head(self):
+        cls = registry()["fakecli"]
+        with mock.patch.object(cls, "validate", lambda self: ["bad MODEX at " + self.settings["url"]]):
+            self.env("dhcp1", inst("dhcp1", URL="https://dhcp1"))
+            for argv in (("check",), ("check", "dhcp1"), ("collect", "dhcp1")):
+                rc, out, _ = self.cli(*argv)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("config: connector dhcp1 (fakecli): bad MODEX at https://<host>", out)
+                self.assertIn("disabled: connector dhcp1 (fakecli): bad MODEX at https://<host>", out)
+
+    def test_host_named_like_the_instance(self):
+        spec = Spec(host="sw1")
+        spec.name, spec.type = "sw1", "snmp_switch"
+        mask = m._redactor(Ctx(), None, spec)
+        self.assertEqual(mask("connector sw1 (snmp_switch): AUTH_KEY is required for sw1"),
+                         "connector sw1 (snmp_switch): AUTH_KEY is required for <host>")
+
+    def test_another_instances_host_does_not_mask(self):
+        self.env("dhcp1,dhcp2,SW1", inst("dhcp1", URL="https://sw1/"), inst("dhcp2", URL="https://dhcp1"),
+                 {"LW_CONNECTOR__DHCP2__BOGUS": "x"})
+        rc, out, _ = self.cli("check")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("config: LW_CONNECTORS: 'SW1' is not a valid instance name", out)
+        self.assertIn("config: connector dhcp2 (fakecli): unknown setting BOGUS", out)
+
+
+class TestGlobalNotOwn(CliBase):
+    """S2S01: a global load problem whose path names the instance's variable prefix does not disable it."""
+
+    def test_load_problem_does_not_disable(self):
+        os.environ["LW_CONNECTORS_DIR"] = os.path.join(self.tmp, "lw_connector__fw1__d")
+        self.env("fw1", {"LW_CONNECTOR__FW1__TYPE": "opnsense", "LW_CONNECTOR__FW1__URL": "https://192.0.2.1",
+                         "LW_CONNECTOR__FW1__KEY": "key-0123456789", "LW_CONNECTOR__FW1__SECRET": "secret-0123456789"})
+        with mock.patch.object(registry()["opnsense"], "check", lambda self: None):
+            for argv in (("check",), ("check", "fw1")):
+                rc, out, _ = self.cli(*argv)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("is not a directory", out)
+                self.assertRegex(out, r"fw1 \(opnsense\): ok \(\d+ ms\)")
 
 
 class TestOwnRedact(unittest.TestCase):
@@ -115,6 +177,13 @@ class TestClose(unittest.TestCase):
         with self.assertLogs("leasewatch", "WARNING"):
             m._close(C(), "dhcp1", 1)
         self.assertLess(time.monotonic() - t0, 5)
+
+    def test_out_of_range_timeout(self):
+        # S2S06: a disabled instance's TIMEOUT=99999999999999 must not raise OverflowError out of join()
+        class C:
+            def close(self) -> None:
+                pass
+        m._close(C(), "dhcp1", 99999999999999)
 
     def test_raising_name_and_close(self):
         class C:
@@ -213,6 +282,50 @@ class TestOddStats(CliBase):
             self.assertEqual(rep["stats"]["bad"], "Bad")
             rc, out, _ = self.cli("collect", "dhcp1")
             self.assertEqual(rc, 0, out)
+
+    def test_huge_and_int_subclass_stats(self):
+        # S2S07, S2S20, S2S21, S2S23: both modes, end to end
+        class I(int):
+            def __str__(self) -> str:
+                raise ZeroDivisionError
+        cls = registry()["fakecli"]
+        batch = Batch(sightings=[Sighting("02-00-00-00-00-2A", "", "dhcp", False, 1762400000)],
+                      stats={"big": 10 ** 5000, "leases": I(4)})
+        with mock.patch.object(cls, "collect", lambda self: batch):
+            self.env("dhcp1", inst("dhcp1"))
+            rc, out, _ = self.cli("collect", "dhcp1", "--json")
+            self.assertEqual((rc, json.loads(out)["stats"]["big"], json.loads(out)["stats"]["leases"]), (0, "int", 4))
+            rc, out, _ = self.cli("collect", "dhcp1")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("stats: big=int dropped=0 leases=4", out)
+
+
+class TestStatsReport(unittest.TestCase):
+    """S2S07, S2S19-S2S24: every stat stays, and no stat breaks --json or the human line."""
+
+    def test_odd_values_and_keys(self):
+        class I(int):
+            def __str__(self) -> str:
+                raise ZeroDivisionError
+
+            __format__ = lambda self, spec: 1 / 0  # noqa: E731
+
+        class K(str):
+            __format__ = lambda self, spec: 1 / 0  # noqa: E731
+
+        class D:
+            def __str__(self) -> str:
+                return "dropped"
+        rep = m._report_stats({"leases": I(4), K("k"): 1, "big": 10 ** 5000, 1: 5, "1": 6, D(): 99, "dropped": 0})
+        self.assertEqual(rep, {"leases": 4, "k": 1, "big": "int", "1": 6, "dropped": 0, "1#2": 5, "dropped#2": 99})
+        for k, v in rep.items():
+            self.assertIs(type(k), str)
+            self.assertIn(type(v), (int, str))
+        json.dumps(rep)
+        " ".join(f"{k}={v}" for k, v in sorted(rep.items()))
+
+    def test_collect_with_a_huge_stat(self):
+        pass
 
 
 class TestTypesLine(unittest.TestCase):

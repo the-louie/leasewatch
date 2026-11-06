@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext,  # noqa: E402
@@ -99,6 +100,27 @@ class NoNetworkTests(unittest.TestCase):
             with self.subTest(fn=fn):
                 self.assertTrue(failed(run(C, self.T)))
 
+    def test_getnameinfo_fails(self) -> None:
+        # S2S15: getnameinfo is a reverse (PTR) lookup through the C resolver, not through getaddrinfo
+        class C(Stub):
+            def validate(self) -> list[str]:
+                try:
+                    socket.getnameinfo(("10.0.0.2", 0), 0)
+                except Exception:  # noqa: BLE001
+                    pass
+                return []
+        self.assertTrue(failed(run(C, self.T)))
+
+    def test_platform_without_sendmsg_runs(self) -> None:
+        # S2S16: socket.socket has no sendmsg on Windows; the guard must skip it, not error for every connector
+        class WinSocket:
+            def connect(self, *a: object) -> None: ...
+            def connect_ex(self, *a: object) -> None: ...
+            def sendto(self, *a: object) -> None: ...
+        with mock.patch.object(socket, "socket", WinSocket):
+            result = run(Stub, self.T)
+        self.assertFalse(failed(result), result.failures + result.errors)
+
     def test_fixture_setup_is_outside_the_guard(self) -> None:
         # valid_settings() may start a local fake (port 0); only the connector is under the no-network rule
         class Contract(ConnectorContractTests, unittest.TestCase):
@@ -166,6 +188,17 @@ class DescribeTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertTrue(failed(run(self._with(Setting(key, required=True)), self.T)))
 
+    def test_trailing_newline_key_fails(self) -> None:
+        # S2S31: '$' matches before a final newline, and no env variable name can hold one
+        self.assertTrue(failed(run(self._with(Setting("url\n", required=True)), self.T)))
+
+    def test_trailing_newline_type_fails(self) -> None:
+        class C(Stub):
+            @classmethod
+            def describe(cls) -> ConnectorInfo:
+                return ConnectorInfo("stubtype\n", "0.1", API_VERSION, frozenset({"sighting"}), cls.settings_decl)
+        self.assertTrue(failed(run(C, self.T)))
+
     def test_unknown_kind_fails(self) -> None:
         self.assertTrue(failed(run(self._with(Setting("port", kind="integer", max=10)), self.T)))
 
@@ -186,6 +219,15 @@ class CheckAndCollectTests(unittest.TestCase):
                 recs = [Sighting("02:00:00:00:00:01", "", "arp", True, NOW), Sighting("not-a-mac", "", "arp", True, -5)]
                 return Batch(sightings=(r for r in recs))  # type: ignore[arg-type]
         self.assertTrue(failed(run(C, self.T)))
+
+    def test_empty_tuple_of_undeclared_kind_passes(self) -> None:
+        # S2S17: normalise_batch() takes a tuple, so an empty () for the kind a type does not produce is clean
+        class C(Stub):
+            def collect(self) -> Batch:
+                return Batch(sightings=(Sighting("02:00:00:00:00:01", "", "arp", True, NOW),),  # type: ignore[arg-type]
+                             attachments=())  # type: ignore[arg-type]
+        result = run(C, self.T)
+        self.assertFalse(failed(result), result.failures + result.errors)
 
     def test_bool_observed_at_fails(self) -> None:
         class C(Stub):

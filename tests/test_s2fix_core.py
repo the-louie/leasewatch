@@ -21,6 +21,11 @@ class _Exits(Fake):
         raise SystemExit(3)
 
 
+class _ValidateExits(Fake):
+    def validate(self):
+        raise SystemExit(4)
+
+
 class _Eager(Fake):
     def __init__(self, name, settings, ctx=None, client=None):
         super().__init__(name, settings, ctx, client)
@@ -85,6 +90,22 @@ class SetupTests(Base):
             with self.assertLogs("leasewatch.collector", "ERROR"):
                 col, _ = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "exits"})
         self.assertIn("cannot be set up (SystemExit)", col._runs["x"].error)
+
+    # S2S25: a SystemExit from validate() keeps the built connector (so the caller can close() it) and the setting
+    # problems found before validate(), as an ordinary exception does
+    def test_system_exit_in_validate_keeps_the_connector_and_the_setting_problems(self):
+        with mock.patch.dict(registry(), {"vexit": _ValidateExits}):
+            conn, problems = collector_mod.setup_instance(InstanceSpec("y", "vexit", {"bogus": "1"}), HostContext())
+        self.assertIsInstance(conn, _ValidateExits)
+        self.assertEqual(problems, ["connector y (vexit): unknown setting BOGUS",
+                                    "connector y (vexit): cannot be set up (SystemExit)"])
+
+    # S2S09: the server and `check` with no names validate the config before the Collector is built; a plugin's
+    # sys.exit() there must also only disable its instance, not end the process with the plugin's code
+    def test_system_exit_in_the_constructor_is_a_config_problem(self):
+        with mock.patch.dict(registry(), {"exits": _Exits}):
+            cfg = self.cfg({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "exits"})
+            self.assertIn("connector x (exits): cannot be set up (SystemExit)", cfg.validate())
 
     # S2R52: device_names() works while the connectors are built
     def test_device_names_callable_while_connectors_are_built(self):

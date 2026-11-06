@@ -231,7 +231,8 @@ and an unknown type is reported with the list of loaded types (built-in and thir
   - `ctx.redact` masks the secrets of **every** configured instance.
   - `make_host_mask(url_or_host)` returns a function that replaces whole occurrences of the host with `<host>`
     (lower case, without a trailing dot, the IDNA form, IPv6 compressed and exploded; `10.0.0.1` is not masked
-    inside `10.0.0.15`). TLS and resolver errors echo the host, so mask before you raise.
+    inside `10.0.0.15`; a host shorter than 3 characters, such as `fw`, is not masked). TLS and resolver errors
+    echo the host, so mask before you raise.
   - The order the mikrotik connector uses: redact the secrets first, then mask the host, then cut the text (a secret
     that contains the host name would no longer match after masking; a cut can split a secret).
 - HTTP: get an opener from `ctx.opener_factory(verify_tls=..., use_env_proxy=...)` (by default `build_opener`).
@@ -426,12 +427,13 @@ What it checks (all tests are named `test_contract_*`):
 - `validate()` accepts the valid settings, and the host's own `instance_problems()` names every required key when it
   is missing.
 - The repr shows no secret value, also not in its repr or JSON escaped form.
-- `check()` returns `None`; `collect()` returns a `Batch` whose `sightings` and `attachments` are lists, with at
+- `check()` returns `None`; `collect()` returns a `Batch` whose `sightings` and `attachments` are lists or tuples, with at
   least one record, only of the declared kinds, `kind` in `dhcp/arp/client/scan`, `link` in `wired/wifi`, a MAC
   that `norm_mac` accepts and an int (not bool) `observed_at > 0`.
 - With `failing_settings()`: a `ConnectorError` whose text holds no secret value (escaped forms included) and no
   host of a URL setting, in any spelling `make_host_mask()` masks (whole occurrences only: `10.0.0.15` is not
-  `10.0.0.1`). Give the fixture a host that is no word of your messages: a host `fw1` would match a `fw1` label.
+  `10.0.0.1`; a host shorter than 3 characters is not checked, as it is not masked). Give the fixture a host that is
+  no word of your messages: a host `fw1` would match a `fw1` label.
 - `close()` never raises, also twice and after `collect()` (a `check()` or `collect()` failure there is left to the
   check-and-collect test).
 

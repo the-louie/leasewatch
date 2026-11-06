@@ -536,7 +536,8 @@ def type_origins() -> dict:
 
 def broken_types() -> dict[str, str]:
     """type -> why it is not loaded, for every declared type that was refused or failed to import. A plugin that
-    declares a built-in type name is not here: the built-in stays loaded, and the refusal is an ERROR in the log."""
+    declares a built-in type name is not here: the built-in stays loaded, and the refusal is in the log (an ERROR for
+    this connector API, a WARNING for another API version)."""
     return dict(_loaded().broken)
 
 
@@ -593,7 +594,7 @@ def instance_problems(spec: InstanceSpec, conn: Connector | None = None) -> list
     try:
         conn = conn or build_instance(spec, HostContext())
         own = conn.validate()
-    except Exception as e:  # a constructor that chokes on a value: name the type of failure, never the value
+    except (Exception, SystemExit) as e:  # a constructor that chokes on a value or calls sys.exit(): name the type of failure, never the value (a plugin's exit must not end the host)
         return problems + [f"{head}: cannot be set up ({type(e).__name__})"]
     generic = setting_problems(spec.name, spec.type, info.settings, getattr(conn, "settings", spec.settings))
     problems += generic

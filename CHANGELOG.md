@@ -38,6 +38,19 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Connector loader: the group must be exactly leasewatch.connectors.v<N> (ASCII, no leading zero); type names with a trailing newline are refused; spaces around ':' in a LW_CONNECTORS_DIR entry point are accepted as pip accepts them.
 - Connector loader: clearer messages for a missing __init__.py, a package name repeated across LW_CONNECTORS_DIR entries, and unreadable distribution metadata (now names the distribution); the other-API warning is logged once per distribution, and dist names spelled 'lw_b'/'lw-b' count as one distribution.
 - registry() now also rebuilds when the working directory changes, so a relative LW_CONNECTORS_DIR follows os.chdir; unload drops submodules a plugin imported after the load.
+- Contract tests (`leasewatch.connectors.testing`): the no-network test also stops `socket.getnameinfo` and no longer errors on a platform without `socket.sendmsg` (Windows); a type name or setting key with a trailing newline now fails the describe test; an empty tuple for a record kind the type does not produce now passes the check-and-collect test.
+- docs/connectors.md: `make_host_mask()` and the contract test's host check skip a host shorter than 3 characters; this is now stated.
+- check and collect mask a URL or HOST host anywhere in an error or problem text, including before the first ": "; only the instance's own "connector <name> (<type>): " head stays readable.
+- check masks each config: line only with the host of the instance it belongs to, so another instance's host no longer hides a name, a type or a bad LW_CONNECTORS entry.
+- check and collect no longer disable an instance because of a global load problem whose path contains LW_CONNECTOR__<NAME>__.
+- check and collect no longer crash with OverflowError on a disabled instance with a huge TIMEOUT.
+- collect: an int stat with more than 4300 digits, or an int or str subclass with a raising __str__ or __format__, no longer gives a traceback; keys that turn into the same text are all kept, as "1" and "1#2".
+- A connector plugin that calls sys.exit() in its constructor or validate() now only disables its instance at server start and in `leasewatch check`; the process no longer exits with the plugin's code. The built connector is still closed, and its setting problems are still reported.
+- Connector loader: a package in LW_CONNECTORS_DIR that would shadow another module now stops the start even when its type is a duplicate or a built-in name.
+- Connector loader: a space inside a module name in an entry point value is refused instead of being removed.
+- Connector loader: describe() produces/roles may be a tuple or list of str, as the contract test accepts; a Setting key that is not a str makes the type broken instead of crashing Config().
+- Connector loader: a distribution name or LW_CONNECTORS_DIR entry with a newline can no longer forge a log line; two distributions without a Name are no longer merged into one.
+- Connector loader: unloading plugins no longer fails when another thread imports a module at the same time.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

@@ -49,7 +49,8 @@ if TYPE_CHECKING:  # the assert methods come from the TestCase it is mixed into
 else:
     _Base = object
 
-TYPE_RE = re.compile(r"^[a-z0-9_]+$")
+# \A...\Z, not ^...$: "$" also matches before a final newline, and no env variable name holds one
+TYPE_RE = re.compile(r"\A[a-z0-9_]+\Z")
 # a setting key becomes the <KEY> of LW_CONNECTOR__<NAME>__<KEY>, so it must be a non-empty shell-exportable word
 KEY_RE = TYPE_RE
 SETTING_KINDS = frozenset({"str", "int"})  # setting_problems() range-checks only "int"; a typo would skip it silently
@@ -58,9 +59,10 @@ LINKS = frozenset({"wired", "wifi"})
 
 
 # what the no-network test stops: connecting, a connectionless datagram and every name lookup (gethostbyname and
-# friends call the C resolver directly, not getaddrinfo)
+# friends and getnameinfo call the C resolver directly, not getaddrinfo)
 _SOCKET_METHODS = ("connect", "connect_ex", "sendto", "sendmsg")
-_SOCKET_FUNCS = ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr")
+_SOCKET_FUNCS = ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr",
+                 "getnameinfo")
 
 
 class ConnectorContractTests(_Base):
@@ -131,6 +133,8 @@ class ConnectorContractTests(_Base):
             return no_network
         with contextlib.ExitStack() as stack:
             for name in _SOCKET_METHODS:
+                if not hasattr(socket.socket, name):  # sendmsg is Unix only; a missing one cannot be called either
+                    continue
                 stack.enter_context(mock.patch.object(socket.socket, name, stop(f"socket.{name}")))
             for name in _SOCKET_FUNCS:
                 stack.enter_context(mock.patch.object(socket, name, stop(name)))
@@ -173,10 +177,11 @@ class ConnectorContractTests(_Base):
         self.assertIsInstance(batch.attachments, (list, tuple))
         info = self.connector_class.describe()
         self.assertTrue(batch.sightings or batch.attachments, "the valid fixture gives no records")
+        # assertFalse, not == []: an empty tuple is as clean to normalise_batch() as an empty list
         if "sighting" not in info.produces:
-            self.assertEqual(batch.sightings, [])
+            self.assertFalse(batch.sightings, "sightings from a type that does not produce them")
         if "attachment" not in info.produces:
-            self.assertEqual(batch.attachments, [])
+            self.assertFalse(batch.attachments, "attachments from a type that does not produce them")
         norm_mac = HostContext().norm_mac
         for r in batch.sightings:
             self.assertIsInstance(r, Sighting)

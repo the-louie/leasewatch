@@ -152,7 +152,8 @@ def _belongs(problem: str, name: str) -> bool:
 
 def _own_problems(cfg: Config, name: str, exclude: list[str]) -> list[str]:
     """cfg.connector_problems that belong to the instance `name` (its own variables, its LW_CONNECTORS entry), less
-    `exclude` (the global ones, already counted)."""
+    `exclude` (the global ones, already counted: every caller passes _global_problems(), so a load problem whose
+    path happens to contain LW_CONNECTOR__<NAME>__ does not also disable the instance)."""
     return [p for p in cfg.connector_problems if p not in exclude and _belongs(p, name)]
 
 
@@ -234,18 +235,23 @@ def _global_problems(cfg: Config) -> list[str]:
 def _redactor(ctx: object, conn: object | None, spec: object, hosts: bool = True) -> Callable[[str], str]:
     """The host's redact (every secret setting of every instance, as the collector uses it), then (hosts=True, for
     error and problem texts only) the instance's own redact() if it has one (a switch masks its host and user) and the
-    host of the instance's URL/HOST setting. hosts=False is for device data, which the collector merges unmasked."""
-    from .connectors import make_host_mask, mask_url_host
+    host of the instance's URL/HOST setting, on the whole text except a leading "connector <name> (<type>): " head.
+    hosts=False is for device data, which the collector merges unmasked."""
+    from .connectors import make_host_mask
     if not hosts:
         return ctx.redact
     own = getattr(conn, "redact", None)
-    # a URL's host is masked by the connectors' own rule: the client's "fw1 <path>: " label before the first ": "
-    # stays, so a host named like that label (or like the instance) does not hide it
-    masks = [(lambda t, v=v: mask_url_host(t, v)) if k == "url" and "://" in v else make_host_mask(v)
-             for k, v in spec.settings.items() if k in ("url", "host") and v.strip()]
+    # the whole text, not mask_url_host (which keeps everything before the first ": "): a third-party error that
+    # starts with the host ("dhcp.example.lan: refused") must not show it. The instance's own head is kept instead,
+    # so an instance named like its host stays recognisable
+    masks = [make_host_mask(v) for k, v in spec.settings.items() if k in ("url", "host") and v.strip()]
+    name = getattr(spec, "name", None)
+    heads = (f"connector {name} ({getattr(spec, 'type', '')}): ", f"connector {name}: ") if name else ()
 
     def redact(text: str) -> str:
         text = ctx.redact(text)
+        head = next((h for h in heads if text.startswith(h)), "")
+        text = text[len(head):]
         if callable(own):
             try:
                 out = own(text)
@@ -255,7 +261,7 @@ def _redactor(ctx: object, conn: object | None, spec: object, hosts: bool = True
             text = out if isinstance(out, str) else text
         for mask in masks:
             text = mask(text)
-        return text
+        return head + text
     return redact
 
 
@@ -317,7 +323,9 @@ def _close(conn: object, name: str, timeout: int) -> None:
     except RuntimeError:  # out of threads: closing inline is the only way left
         work()
         return
-    t.join(timeout)
+    # a disabled instance may have TIMEOUT out of range (14 digits): join() would raise OverflowError, so the
+    # setting's own maximum caps it
+    t.join(min(timeout, 3600))
     if t.is_alive():
         log.warning("connector %s: close() did not return within %d s", name, timeout)
 
@@ -334,29 +342,27 @@ def check_cmd(argv: list[str]) -> int:
     ctx = instances_context(cfg.instances)
     specs = {s.name: s for s in cfg.instances}
     names = list(dict.fromkeys(args.instance))
-    removed = removed_problems(os.environ)
+    glob = _global_problems(cfg)
     _out(types_line())
     for type_, why in sorted(broken_types().items()):
         _out(f"plugin: {type_} not loaded: {ctx.redact(why)}")
     # each named instance is built once, here, and the same connector is checked and closed below
     built = {n: setup_instance(specs[n], ctx) for n in names if n in specs}
     if names:  # global problems plus the named instances' own; another instance's problem does not count
-        problems = _global_problems(cfg) + [p for n in names for p in _own_problems(cfg, n, removed)]
+        problems = glob + [p for n in names for p in _own_problems(cfg, n, glob)]
         problems += [p for n in built for p in built[n][1]]
     else:
         problems = cfg.validate()
     problems = list(dict.fromkeys(problems))
-    # a problem text may echo a URL or HOST (a third-party validate()): masked with every instance's host, as collect
-    # masks its own instance's
-    masks = [_redactor(ctx, None, s) for s in cfg.instances]
+    # a problem text may echo a URL or HOST (a third-party validate()): masked with the host of the instance it
+    # belongs to, as collect masks its own. Not with every instance's: another host spelled like a name, a type or a
+    # bad LW_CONNECTORS entry would hide it. A global problem names variables, never a setting's value
+    masks = [(s.name, _redactor(ctx, None, s)) for s in cfg.instances]
 
-    def mask_all(text: str) -> str:
-        text = ctx.redact(text)
-        for f in masks:
-            text = f(text)
-        return text
+    def mask_one(text: str) -> str:
+        return next((f for n, f in masks if _belongs(text, n)), ctx.redact)(text)
     for p in problems:
-        _out(f"config: {mask_all(p)}")
+        _out(f"config: {mask_one(p)}")
     unknown = failed = False
     for name in names or list(specs):
         spec = specs.get(name)
@@ -365,7 +371,7 @@ def check_cmd(argv: list[str]) -> int:
             unknown = True
             continue
         conn, own = built[name] if name in built else setup_instance(spec, ctx)
-        own = list(dict.fromkeys(_own_problems(cfg, name, removed) + own))
+        own = list(dict.fromkeys(_own_problems(cfg, name, glob) + own))
         mask = _redactor(ctx, conn, spec)
         # the "<name> (<type>): " head is not host-masked: an instance named like its host must stay recognisable
         head = ctx.redact(f"{name} ({spec.type}): ")
@@ -398,16 +404,37 @@ def _record_line(kind: str, record: object) -> str:
 
 def _safe_str(x: object) -> str:
     try:
-        return str(x)
+        return str.__str__(str(x))  # a plain str: a str subclass's own __format__ may raise in the human line
     except Exception:  # a connector's own type whose __str__ raises
         return type(x).__name__
+
+
+def _stat_value(v: object) -> object:
+    if isinstance(v, int):
+        try:
+            v = int(v)  # a plain int: an int subclass's own __str__/__format__ is never called by the output
+            str(v)  # more than 4300 digits: int-to-text raises ValueError, in json.dumps and the human line alike
+            return v
+        except Exception:
+            pass
+    return _safe_str(v)
 
 
 def _report_stats(stats: dict) -> dict:
     """Batch.stats as dict[str, int] promises it: a key that is not a str is shown as text (json.dumps refuses it),
     a value that is not an int as text (NaN and inf are not JSON; a raising __str__ is shown as its type)."""
-    return {(k if isinstance(k, str) else _safe_str(k)): (v if isinstance(v, int) else _safe_str(v))
-            for k, v in stats.items()}
+    out = {k: _stat_value(v) for k, v in stats.items() if type(k) is str}
+    # the other keys after the str ones (the host's "dropped" among them), each under a free name: 1 and "1" both
+    # stay, as "1" and "1#2", and no connector key replaces the host's
+    for k, v in stats.items():
+        if type(k) is not str:
+            key = base = _safe_str(k)
+            n = 1
+            while key in out:
+                n += 1
+                key = f"{base}#{n}"
+            out[key] = _stat_value(v)
+    return out
 
 
 def collect_cmd(argv: list[str]) -> int:
@@ -431,7 +458,8 @@ def collect_cmd(argv: list[str]) -> int:
     # collector does: device data may name the source's own address (a firewall's ARP list) and is shown unmasked
     redact: Callable[[str], str] = ctx.redact
     mask: Callable[[str], str] = _redactor(ctx, None, spec) if spec else ctx.redact
-    problems = _global_problems(cfg) + _own_problems(cfg, name, removed_problems(os.environ))
+    glob = _global_problems(cfg)
+    problems = glob + _own_problems(cfg, name, glob)
     batch = None
     if spec is None:
         report["error"] = f"not configured (configured: {', '.join(s.name for s in cfg.instances) or 'none'})"

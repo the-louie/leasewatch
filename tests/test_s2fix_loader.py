@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV  # noqa: E402
 from test_loader import GROUP, LoaderBase, instance, make_dir_dist, make_ep_dist  # noqa: E402
 
+from leasewatch.connectors.opnsense import OpnsenseConnector  # noqa: E402
+
 from leasewatch.connectors import _reset_registry, broken_types, load_problems, registry  # noqa: E402
 
 LOG = "leasewatch.connectors.loader"
@@ -253,6 +255,106 @@ class TestConflictsAndShadows(LoaderBase):
         with self.assertLogs(LOG, "WARNING"):
             registry()
         self.assertIn("package lwt_ns has no __init__.py", broken_types()["nstype"])
+
+
+
+class TestSecondReview(LoaderBase):
+    """Second review round (S2S10..S2S30)."""
+
+    def test_drop_survives_a_module_import_during_the_walk(self):
+        # S2S10: _drop walked the live sys.modules; another thread's first import raised RuntimeError
+        from leasewatch.connectors import loader
+        sys.modules["lwt_walk"] = sys.modules["os"]
+        self.addCleanup(sys.modules.pop, "lwt_churn", None)
+
+        class Churn(set):
+            def __contains__(self, name):  # a first-time import elsewhere, in the middle of the walk
+                sys.modules.setdefault("lwt_churn", sys.modules["os"])
+                return super().__contains__(name)
+        loader._drop(Churn({"lwt_walk"}))
+        self.assertNotIn("lwt_walk", sys.modules)
+
+    def test_space_inside_the_module_name_is_refused(self):
+        # S2S11: removing every space turned "lwt_ sv.connector:Conn" into the valid lwt_sv
+        make_dir_dist(self.dir, "lw-sv", "lwt_sv", "svtype", value="lwt_ sv.connector:Conn")
+        self.use_dir()
+        with self.assertLogs(LOG, "WARNING"):
+            self.assertNotIn("svtype", registry())
+        self.assertTrue(any("entry point 'svtype' is not" in p for p in load_problems()), load_problems())
+
+    def test_shadow_stops_the_start_for_a_duplicate_type(self):
+        # S2S12 case B: the duplicate check dropped the declaration before the shadow check saw it
+        make_dir_dist(self.dir, "a-dist", "json", "dupx", prelude="raise SystemExit('must not run')")
+        make_dir_dist(self.dir, "b-dist", "lwt_bx", "dupx")
+        self.use_dir()
+        with self.assertLogs(LOG, "WARNING"):
+            self.assertNotIn("dupx", registry())
+        self.assertIn("LW_CONNECTORS_DIR a-dist: package json would shadow another module", load_problems())
+        self.assertIn("provided twice", broken_types()["dupx"])
+
+    def test_shadow_stops_the_start_for_a_built_in_type_name(self):
+        # S2S12 case C
+        make_dir_dist(self.dir, "a-dist", "json", "opnsense", prelude="raise SystemExit('must not run')")
+        self.use_dir()
+        with self.assertLogs(LOG, "WARNING"):
+            reg = registry()
+        self.assertIs(reg["opnsense"], OpnsenseConnector)
+        self.assertIn("LW_CONNECTORS_DIR a-dist: package json would shadow another module", load_problems())
+
+    def _info_type(self, type_: str, info: str) -> None:
+        base = make_dir_dist(self.dir, f"lw-{type_}", f"lwt_{type_}", type_)
+        with open(os.path.join(base, f"lwt_{type_}", "connector.py"), "a", encoding="utf-8") as f:
+            f.write(f"Conn.INFO = ConnectorInfo({info})\n")
+        self.use_dir()
+
+    def test_unhashable_setting_key_is_a_broken_type(self):
+        # S2S13: Setting(['a']) passed the shape check and Config() raised TypeError in secret_keys
+        self._info_type("keyl", "'keyl', '1', 1, frozenset({'sighting'}), (Setting(['a']),)")
+        with self.assertLogs(LOG, "WARNING"):
+            cfg = self.cfg({**FW1_ENV, "LW_CONNECTORS": "fw1,dhcp1", **instance("dhcp1", "keyl")})
+        self.assertIn("settings is not a tuple of Setting", broken_types()["keyl"])
+        self.assertTrue(any(p.startswith("connector dhcp1 (keyl): cannot be loaded") for p in cfg.validate()))
+
+    def test_tuple_produces_and_roles_are_accepted(self):
+        # S2S14: the published contract test accepts tuples (set(...)), so the loader must too
+        self._info_type("tupl", "'tupl', '1', 1, ('sighting',), (Setting('url'),), ('controller',)")
+        self.assertIn("tupl", registry())
+        self.assertNotIn("tupl", broken_types())
+
+    def test_distribution_names_cannot_forge_a_log_line(self):
+        # S2S28, S2S30: the dist name and the dir entry were logged with %s and stored with their newline
+        base = make_dir_dist(self.dir, "a\nERROR forged entry", "lwt_fe", "okname", group="leasewatch.connectors.v2")
+        write_pyproject(base, '[project.entry-points."leasewatch.connectors.v2"]\nokname = "lwt_fe.connector:Conn"\n')
+        make_ep_dist(self.site, "lw-n", "lwt_fn", "BAD")
+        make_ep_dist(os.path.join(self.site, "v2"), "lw-m", "lwt_fm", "ntype", group="leasewatch.connectors.v2")
+        for meta in (os.path.join(self.site, "lw_n-0.3.0.dist-info", "METADATA"),
+                     os.path.join(self.site, "v2", "lw_m-0.3.0.dist-info", "METADATA")):
+            with open(meta, encoding="utf-8") as f:
+                text = f.read()
+            with open(meta, "w", encoding="utf-8") as f:
+                f.write(text.replace("Name: lw-", "Name: lw-x\n ERROR forged dist "))
+        self.use_dir()
+        self.use_site()
+        sys.path.append(os.path.join(self.site, "v2"))
+        with self.assertLogs(LOG, "WARNING") as logs:
+            registry()
+        self.assertEqual(len([r for r in logs.records if "forged" in r.getMessage()]), 3, logs.output)
+        self.assertFalse(any("\n" in r.getMessage() for r in logs.records), logs.output)
+        self.assertFalse(any("\n" in why for why in broken_types().values()), broken_types())
+
+    def test_two_nameless_distributions_are_two_declarations(self):
+        # S2S29: both got the dedup key "?" and the type loaded instead of being refused as provided twice
+        for sub in ("e", "f"):
+            info = os.path.join(self.site, sub, f"{sub}-1.dist-info")
+            os.makedirs(info)
+            with open(os.path.join(info, "METADATA"), "w", encoding="utf-8") as f:
+                f.write("Metadata-Version: 2.1\nVersion: 1\n")
+            with open(os.path.join(info, "entry_points.txt"), "w", encoding="utf-8") as f:
+                f.write(f"[{GROUP}]\nt9 = lwt_t9.connector:Conn\n")
+            sys.path.append(os.path.join(self.site, sub))
+        with self.assertLogs(LOG, "WARNING"):
+            self.assertNotIn("t9", registry())
+        self.assertIn("provided twice", broken_types()["t9"])
 
 
 if __name__ == "__main__":

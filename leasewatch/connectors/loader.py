@@ -103,7 +103,7 @@ def load(environ: Mapping[str, str], path: list[str] | None = None) -> LoadResul
         raw = (environ.get("LW_CONNECTORS_DIR") or "").strip()
         if raw:
             decls += _dir_decls(raw, res, other)
-        _import_all(_unshadowed(_without_conflicts(decls, res), res), res, packages)
+        _import_all(_without_conflicts(_unshadowed(decls, res), res), res, packages)
     except BaseException as e:
         # what was registered or imported before the failure must not stay: the log promises built-ins only, and a
         # dir package left in sys.modules would be refused as a shadow by every later load
@@ -131,8 +131,9 @@ def unload(result: LoadResult) -> None:
 
 def _drop(packages) -> None:
     """Remove every sys.modules entry of these dir packages (process global: only the dir plugins' own entries)."""
-    for name in [n for n in sys.modules if n.split(".")[0] in packages]:
-        del sys.modules[name]
+    # list(): a copy taken in one step; walking the live dict fails when another thread imports meanwhile
+    for name in [n for n in list(sys.modules) if n.split(".")[0] in packages]:
+        sys.modules.pop(name, None)
 
 
 def _scan_path(path: list) -> list[str]:
@@ -144,7 +145,22 @@ def _scan_path(path: list) -> list[str]:
     return [p for p in path if isinstance(p, str) and p and os.path.realpath(p) != cwd]
 
 
+def _one_line(text: str) -> str:
+    # a dir entry or a folded METADATA Name can hold a newline, which would forge a log line or a problem line
+    return " ".join(text.split())
+
+
+def _norm(dist: str) -> str:
+    return re.sub(r"[-_.]+", "-", dist).lower()
+
+
+def _value(value: str) -> re.Match | None:
+    # spaces around ":" as pip accepts them; a space inside a name stays and fails, as in EntryPoint.load()
+    return _VALUE_RE.match(re.sub(r"\s*:\s*", ":", value.strip()))
+
+
 def _other_api(dist: str, group: str, api: str, type_: str, other: dict[str, str]) -> None:
+    dist = _one_line(dist)
     # %r: the name is not checked against TYPE_RE here, and a newline in it would forge a log line
     log.warning("%s declares connector type %r for connector API %s (group %s); this host has connector API %d, "
                 "so it is not loaded", dist, type_, api, group, API_VERSION)
@@ -155,10 +171,10 @@ def _other_api(dist: str, group: str, api: str, type_: str, other: dict[str, str
 def _entry_point_decls(path: list, other: dict[str, str]) -> list[_Decl]:
     decls: list[_Decl] = []
     seen: set[tuple[str, str, str, str]] = set()
-    for dist in importlib.metadata.distributions(path=_scan_path(path)):
+    for i, dist in enumerate(importlib.metadata.distributions(path=_scan_path(path))):
         name = "?"
         try:
-            name = str(dist.metadata.get("Name") or "?")
+            name = _one_line(str(dist.metadata.get("Name") or "?"))
             version = str(dist.version or "")
             eps = list(dist.entry_points)
         except Exception as e:  # broken metadata of some unrelated distribution
@@ -170,14 +186,15 @@ def _entry_point_decls(path: list, other: dict[str, str]) -> list[_Decl]:
                 continue
             # the same distribution reached twice (a path listed twice, or one name spelled "lw_b" and "lw-b" by two
             # build backends) is one declaration; checked first, so the other-API warning is logged once too
-            key = (re.sub(r"[-_.]+", "-", name).lower(), ep.group, ep.name, ep.value)
+            # a dist without a Name is its own distribution: "?" must not merge two of them
+            key = (_norm(name) if name != "?" else str(i), ep.group, ep.name, ep.value)
             if key in seen:
                 continue
             seen.add(key)
             if m.group(1) != str(API_VERSION):
                 _other_api(name, ep.group, m.group(1), ep.name, other)
                 continue
-            vm = _VALUE_RE.match(ep.value.replace(" ", ""))
+            vm = _value(ep.value)
             if not TYPE_RE.match(ep.name):
                 log.warning("%s: entry point %r = %r is not <type> = module:Class with a type of a-z, 0-9 and _; "
                             "ignored", name, ep.name, ep.value)
@@ -256,8 +273,7 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
                 if m.group(1) != str(API_VERSION):
                     _other_api(f"LW_CONNECTORS_DIR {entry}", group, m.group(1), type_, other)
                     continue
-                # spaces around ":" as the entry-point path (and pip) accept them: one declaration serves both
-                vm = _VALUE_RE.match(value.replace(" ", "")) if isinstance(value, str) else None
+                vm = _value(value) if isinstance(value, str) else None  # one declaration serves both origins
                 if not TYPE_RE.match(type_) or not vm:
                     res.problems.append(f"LW_CONNECTORS_DIR {entry}: entry point {type_!r} is not <type> = "
                                         "\"module:Class\" with a type of a-z, 0-9 and _")
@@ -269,14 +285,16 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
 
 
 def _unshadowed(decls: list[_Decl], res: LoadResult) -> list[_Decl]:
-    """Refuses the dir declarations whose package would shadow another module. Run after the duplicate check: a type
-    also declared elsewhere (e.g. the same package installed with pip and mounted) is refused as "provided twice",
-    which says what to remove, and its declaration never reaches this check."""
+    """Refuses the dir declarations whose package would shadow another module. Run before the duplicate and built-in
+    checks, so a shadow stops the start even when the type is refused for another reason. The one exception: the same
+    distribution installed with pip and mounted finds its own installed package; that is "provided twice", which
+    says what to remove."""
+    installed = {(d.type, _norm(d.origin.dist)) for d in decls if d.origin.kind == ENTRY_POINT}
     out = []
     shadows: dict[tuple[str, str], bool] = {}
     for d in decls:
         pkg = d.module.split(".")[0]
-        if d.path and not d.refused:
+        if d.path and not d.refused and (d.type, _norm(d.origin.dist)) not in installed:
             if (d.path, pkg) not in shadows:
                 shadows[(d.path, pkg)] = _shadows(pkg, d.path)
                 if shadows[(d.path, pkg)]:
@@ -329,11 +347,14 @@ def _class_problem(type_: str, obj: object) -> tuple[str, ConnectorInfo | None]:
         return f"written for connector API {info.api_version}, this host has {API_VERSION}", None
     # the host iterates these (secret keys, known settings, "sighting" check): a wrong shape would be a traceback in
     # Config() instead of this type-level problem
-    if not isinstance(info.settings, (tuple, list)) or not all(isinstance(s, Setting) for s in info.settings):
+    # a key that is not a str (e.g. a list) is unhashable in secret_keys()
+    if not isinstance(info.settings, (tuple, list)) or not all(isinstance(s, Setting) and isinstance(s.key, str)
+                                                                for s in info.settings):
         return "describe() settings is not a tuple of Setting", None
     for name in ("produces", "roles"):
         value = getattr(info, name)
-        if not isinstance(value, (set, frozenset)) or not all(isinstance(v, str) for v in value):
+        # tuple and list too: the host only uses `in` and iteration, and the contract test accepts them (set(...))
+        if not isinstance(value, (set, frozenset, tuple, list)) or not all(isinstance(v, str) for v in value):
             return f"describe() {name} is not a set of str", None
     return "", info
 
@@ -394,5 +415,5 @@ def _import_all(decls: list[_Decl], res: LoadResult, packages: dict[str, tuple[s
         res.origins[d.type] = replace(d.origin, type_version=info.version)
         if d.ep is None:
             used.add(d.module.split(".")[0])
-    res.modules += [n for n in sys.modules if n.split(".")[0] in used]
+    res.modules += [n for n in list(sys.modules) if n.split(".")[0] in used]
     _drop(set(packages) - used)  # nothing registered from it: no half-imported package stays behind
