@@ -228,11 +228,12 @@ class KeaTests(StubCase):
 
 
 DNSMASQ_LEASES = "/api/dnsmasq/leases/search"
+NOW_DM = 1_800_000_000
 
 
 class DnsmasqTests(StubCase):
     # shaped from /api/dnsmasq/leases/search: Kea key names, no "state", "*" for an empty hostname/client id
-    LEASE = {"expire": 1767225600, "hwaddr": "02:00:00:00:02:01", "iaid": "", "address": "10.0.110.15",
+    LEASE = {"expire": 1900000000, "hwaddr": "02:00:00:00:02:01", "iaid": "", "address": "10.0.110.15",
              "hostname": "alexs-ipad", "client_id": "01:02:00:00:00:02:01", "if": "vlan0110", "if_name": "opt3",
              "if_descr": "Clients", "mac_info": "Acme", "is_reserved": [], "sort_address": "x"}
     V6 = {"expire": 0, "hwaddr": "", "iaid": "33554433", "address": "fd00::15", "hostname": "*", "client_id": "*",
@@ -256,11 +257,28 @@ class DnsmasqTests(StubCase):
         self.assertEqual([s.ip for s in out], ["10.0.110.15"])
 
     def test_dnsmasq_star_is_empty(self):
-        rows = fw1.dnsmasq_leases([{**self.LEASE, "hostname": "*", "client_id": "*"}])
+        rows = fw1.dnsmasq_leases([{**self.LEASE, "hostname": "*", "client_id": "*"}], NOW_DM)
         self.assertEqual((rows[0]["hostname"], rows[0]["mac"]), ("", "02:00:00:00:02:01"))
-        self.assertEqual(fw1.dnsmasq_leases([{**self.LEASE, "client_id": "*"}])[0]["hostname"], "alexs-ipad")
+        self.assertEqual(fw1.dnsmasq_leases([{**self.LEASE, "client_id": "*"}], NOW_DM)[0]["hostname"], "alexs-ipad")
         out, _, _ = self.run_dm([{**self.LEASE, "hostname": "*"}])
         self.assertEqual(out[0].hostname, "")
+
+    def test_dnsmasq_type_prefixed_hwaddr_dropped(self):
+        # "<type>-<bytes>" is a non-Ethernet or empty hardware address; norm_mac would turn "06-02:00:00:00:01"
+        # (5 bytes) into a 6-byte MAC that does not exist
+        rows = [{**self.LEASE, "hwaddr": h} for h in ("06-02:00:00:00:01", "20-02:00:00:00:02:02", "0-")]
+        self.assertEqual(fw1.dnsmasq_leases(rows, NOW_DM), [])
+        out, _, _ = self.run_dm(rows + [self.LEASE])
+        self.assertEqual([s.mac for s in out], ["02:00:00:00:02:01"])
+
+    def test_dnsmasq_expired_lease_skipped(self):
+        # dnsmasq prunes a past lease only later; the contrib file connector skips it, so this backend does too
+        rows = [{**self.LEASE, "expire": NOW_DM}, {**self.LEASE, "expire": NOW_DM - 1, "hwaddr": "02:00:00:00:02:03"},
+                {**self.LEASE, "expire": NOW_DM + 1, "hwaddr": "02:00:00:00:02:04"},
+                {**self.LEASE, "expire": 0, "hwaddr": "02:00:00:00:02:05"}]  # 0: an infinite lease
+        self.assertEqual([r["mac"] for r in fw1.dnsmasq_leases(rows, NOW_DM)], ["02:00:00:00:02:04", "02:00:00:00:02:05"])
+        out, _, _ = self.run_dm([{**self.LEASE, "expire": 1700000000}])  # the caller supplies the current time
+        self.assertEqual(out, [])
 
     def test_dnsmasq_lease_type_and_list_is_reserved(self):
         for extra, want in (({"is_reserved": []}, "dynamic"), ({"is_reserved": ["hwaddr"]}, "static"),

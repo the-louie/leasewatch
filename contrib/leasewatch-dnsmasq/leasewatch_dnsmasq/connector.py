@@ -20,7 +20,8 @@ from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, Connector
 log = logging.getLogger("leasewatch.contrib.dnsmasq")
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
-RETRY_DELAY = 0.05  # seconds before the one re-read of a file caught mid-rewrite; dnsmasq's rewrite takes far less
+RETRY_DELAY = 0.05  # seconds between two reads that must agree; dnsmasq's rewrite takes far less
+READ_ATTEMPTS = 3  # comparisons of a read with the one before it, so at most READ_ATTEMPTS + 1 reads per poll
 # lines dnsmasq writes besides leases: the server DUID (before the DHCPv6 leases) and per-lease extra data
 EXTRA_KEYWORDS = frozenset({"duid", "vendorclass", "agent-info"})
 
@@ -105,9 +106,10 @@ def _os_problem(e: OSError) -> str:
     return os.strerror(e.errno).lower() if e.errno else type(e).__name__
 
 
-def _read_once(path: str) -> tuple[bytes, bool]:
-    """The bytes of the file, and whether it changed while it was read: size or mtime differ before and after the
-    read, or fewer bytes were read than its size. Raises ConnectorError."""
+def _read_once(path: str) -> tuple[bytes, tuple[int, int, int] | None]:
+    """The bytes of the file, and its (inode, size, mtime) after the read, or None when it changed while it was
+    read: size or mtime differ before and after the read, or fewer bytes were read than its size.
+    Raises ConnectorError."""
     fd = _open(path)
     try:
         before = os.fstat(fd)
@@ -122,26 +124,30 @@ def _read_once(path: str) -> tuple[bytes, bool]:
         raise ConnectorError(f"PATH: larger than {MAX_FILE_BYTES // 1024} KiB")
     changed = ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
                or len(raw) != after.st_size)
-    return raw, changed
+    return raw, None if changed else (after.st_ino, after.st_size, after.st_mtime_ns)
 
 
 def read_file(path: str) -> str:
     """The text of the leases file (bounded, regular files only). Raises ConnectorError.
 
     dnsmasq rewrites the file in place: ftruncate to 0, then buffered writes, then fflush (research: lease.c
-    lease_update_file). A read in that window gets a prefix that parses as a shorter but valid list, and on the
-    first poll that list would become the baseline. Such a read is caught by a change during the read, or by a
-    text that does not end with a newline (every line dnsmasq writes does; a stdio buffer boundary rarely falls
-    on a line end). It is read once more after RETRY_DELAY; if that read still changes, or still lacks the final
-    newline and differs from the first, the poll fails for this instance instead of reporting a short list.
-    A file without a final newline that reads the same twice is stable (hand-written or copied) and is used."""
-    raw, changed = _read_once(path)
-    if changed or (raw and not raw.endswith(b"\n")):
+    lease_update_file). A read in that window gets an empty text or a prefix that parses as a shorter but valid
+    list, and on the first poll that list would become the baseline. A text is used only when it is stable: two
+    reads RETRY_DELAY apart give the same bytes and the same inode, size and mtime, and neither changed while it
+    was read. No size, mtime or final-newline heuristic decides alone: an empty read or a prefix that ends on a
+    line end looks like a complete file. Up to READ_ATTEMPTS comparisons; then the poll fails for this instance
+    instead of reporting a short list. Limit: a writer stalled for longer than RETRY_DELAY across both reads
+    leaves a prefix that reads the same twice, and it is used."""
+    prev = _read_once(path)
+    for _ in range(READ_ATTEMPTS):
         time.sleep(RETRY_DELAY)
-        again, changed = _read_once(path)
-        if changed or (again and not again.endswith(b"\n") and again != raw):
-            raise ConnectorError("PATH: file changed while reading")
-        raw = again
+        cur = _read_once(path)
+        if cur[1] is not None and cur == prev:
+            raw = cur[0]
+            break
+        prev = cur
+    else:
+        raise ConnectorError("PATH: file changed while reading")
     # dnsmasq writes ASCII; a stray byte from a hand-edited file must not fail the whole poll
     return raw.decode("utf-8", errors="replace")
 

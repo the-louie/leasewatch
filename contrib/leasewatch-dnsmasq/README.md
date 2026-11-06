@@ -40,9 +40,15 @@ blocking). Errors name only the kind of problem (`PATH: not found`, `PATH: permi
 `PATH: not a regular file`, `PATH: larger than 4096 KiB`, `PATH: symbolic link loop`, `PATH: path too long`, and for
 other errors the system's short error text), never the path.
 
-dnsmasq rewrites the file in place, so a read can catch it half written. A read during which the file changed, or
-whose text does not end with a newline, is repeated once after 50 ms. If the file is still changing, the poll fails
-for this instance with `PATH: file changed while reading` instead of reporting a short lease list.
+dnsmasq rewrites the file in place, so a read can catch it empty or half written. Each poll reads the file, waits
+50 ms and reads it again; the text is used only when both reads give the same bytes and the file's inode, size and
+modification time did not change. Otherwise it reads once more and compares with the read before, up to 3 times.
+If the file is still changing, the poll fails for this instance with `PATH: file changed while reading` instead of
+reporting a short lease list. An empty file is used only when it reads empty both times.
+
+Limit: if dnsmasq stalls in the middle of its rewrite for longer than both reads and the wait between them (for
+example on a slow SD card under heavy write load), the half-written file reads the same twice and is used. The
+leases missing from it are not listed for that poll (on the very first poll they show up as new on the next one).
 
 ## Where the file is
 

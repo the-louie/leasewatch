@@ -145,11 +145,11 @@ class ParseTest(unittest.TestCase):
         row = lease(address=5)
         row["host-name"] = None
         s = parse(SERVERS, [row], [], NOW)[0][0]
-        self.assertEqual((s.ip, s.hostname), ("5", ""))
+        self.assertEqual((s.ip, s.hostname), ("", ""))  # RouterOS sends strings only: a number is no value
 
     def test_non_string_active_value_does_not_shadow_configured(self) -> None:
         # a list, object or boolean is not a value: it must fall back to the configured one, not become "[]"
-        for junk in ([], {}, False, True, [1]):
+        for junk in ([], {}, False, True, [1], 0, 7, 1.5, float("nan"), float("inf")):
             row = lease(**{"active-mac-address": junk, "active-address": junk, "active-client-id": junk,
                            "client-id": "1:2:0:0:0:0:1"})
             s = parse(SERVERS, [row], [], NOW)[0][0]
@@ -400,12 +400,23 @@ class ErrorTextTest(unittest.TestCase):
         self.assertNotIn("\u202e", self.http_error("a\u2028b\u202ec"))
 
     def test_idna_error_wrapped(self) -> None:
-        for exc in (UnicodeError("label too long"), UnicodeEncodeError("idna", "x", 0, 1, "label empty")):
+        # the IDNA codec (host) and http.client's ASCII encoding of the path both raise UnicodeError
+        for exc in (UnicodeError("label too long"), UnicodeEncodeError("idna", "x", 0, 1, "label empty"),
+                    UnicodeEncodeError("ascii", "/prefix/\u00e4", 8, 9, "ordinal not in range(128)")):
             conn = make(ctx=HostContext(opener_factory=lambda **kw: StubOpener(exc)))
             with self.assertRaises(ConnectorError) as cm:
                 conn.check()
-            self.assertEqual(str(cm.exception), "mikrotik /rest/system/resource: bad URL (host name not valid)")
+            self.assertEqual(str(cm.exception), "mikrotik /rest/system/resource: bad URL (not valid as ASCII/IDNA)")
             self.assertIsNone(cm.exception.__cause__)
+
+    def test_cert_error_without_verify_message(self) -> None:
+        # a hand-built error (wrapper, test double) has no verify_message; CPython's own always sets it
+        text = mc._os_error_text(ssl.SSLCertVerificationError(1, "x"))
+        self.assertTrue(text.startswith("TLS certificate not accepted (verify failed)"), text)
+
+    def test_cut_text_is_max_plus_ellipsis(self) -> None:
+        self.assertEqual(mc._clean("x" * 400), "x" * mc.MAX_ERROR_TEXT + "...")
+        self.assertEqual(mc._clean("x" * mc.MAX_ERROR_TEXT), "x" * mc.MAX_ERROR_TEXT)
 
 
 class SettingsTest(unittest.TestCase):

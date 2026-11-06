@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -99,14 +100,22 @@ def kea_leases(rows: list[dict]) -> list[dict]:
     return out
 
 
-def dnsmasq_leases(rows: list[dict]) -> list[dict]:
+def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
     """dnsmasq rows (/api/dnsmasq/leases/search) in the common shape. They use the Kea key names but have no "state"
-    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname, and include IPv6
-    leases, which leasewatch does not track. Their client id ("*" when empty too) is not read: kea_leases keeps
-    no client id, as Sighting.client_id is not used by this backend."""
+    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname, and include IPv6 leases, which leasewatch does not track. Their client id
+    ("*" when empty too) is not read: kea_leases keeps no client id, as Sighting.client_id is not used by this
+    backend. As in the contrib dnsmasq_leases connector, skipped: a hardware address with a type prefix
+    ("<type>-<bytes>": not Ethernet, or empty; norm_mac would turn a 5-byte one into a fake MAC) and a lease whose
+    "expire" is not 0 (infinite) and not after `now` (dnsmasq prunes it only later)."""
     out = []
     for l in rows:
-        if not isinstance(l, dict) or ":" in _s(l.get("address")):
+        if not isinstance(l, dict) or ":" in _s(l.get("address")) or "-" in _s(l.get("hwaddr")):
+            continue
+        try:
+            expire = int(l.get("expire") or 0)
+        except (TypeError, ValueError):  # a malformed expiry says nothing about the lease; keep it as before
+            expire = 0
+        if expire and expire <= now:
             continue
         out.append({**l, "hostname": ""} if _s(l.get("hostname")) == "*" else l)
     return kea_leases(out)
@@ -274,8 +283,10 @@ class Fw1Client:
 
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
-        parse = {"kea": kea_leases, "dnsmasq": dnsmasq_leases}.get(self.dhcp_backend, isc_leases)
-        lease_rows = parse(leases)
+        if self.dhcp_backend == "dnsmasq":
+            lease_rows = dnsmasq_leases(leases, time.time())  # the clock read here keeps the parser pure
+        else:
+            lease_rows = {"kea": kea_leases}.get(self.dhcp_backend, isc_leases)(leases)
         if reservations:
             # an active lease already carries what its reservation says; only lease-less reservations are added
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}

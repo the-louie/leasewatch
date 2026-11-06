@@ -47,11 +47,10 @@ _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060
 
 
 def _s(v: Any) -> str:
-    """RouterOS sends every value as a string; a null or a number from a changed firmware must not crash the poll.
-    A boolean, list or object is no value at all: "" (not "[]"), so it never shadows the configured value."""
-    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
-        return ""
-    return str(v).strip()
+    """RouterOS sends every value as a string; anything else from a changed firmware must not crash the poll.
+    Any non-string (null, number, boolean, list, object) is no value at all: "", so it never shadows the configured
+    value. A number is not kept: 0 or NaN (json.loads accepts it) as an active-* value would hide the real MAC/IP."""
+    return v.strip() if isinstance(v, str) else ""
 
 
 def flag(row: Mapping[str, Any], key: str) -> bool | None:
@@ -183,8 +182,8 @@ def make_host_mask(url: str) -> Callable[[str], str]:
 
 
 def _clean(text: str) -> str:
-    """One line of at most MAX_ERROR_TEXT characters: control characters out, so a router answer cannot forge log
-    lines. Only _error calls it, after redaction and masking: a cut first would leave a part of a secret or host
+    """One line: control characters out, so a router answer cannot forge log lines. A text longer than
+    MAX_ERROR_TEXT characters is cut to MAX_ERROR_TEXT characters plus "...". Only _error calls it, after redaction and masking: a cut first would leave a part of a secret or host
     that no longer matches."""
     text = _CTRL_RE.sub(" ", text).strip()
     return text if len(text) <= MAX_ERROR_TEXT else text[:MAX_ERROR_TEXT] + "..."
@@ -202,7 +201,9 @@ def _http_error_text(e: urllib.error.HTTPError) -> str:
     except Exception:  # any: the body is a courtesy; a broken or non-JSON one changes nothing
         body = None
     if isinstance(body, dict):
-        # raw: _error redacts, masks, then cleans and cuts the whole text
+        # raw: _error redacts, masks, then cleans and cuts the whole text. A message so long that it pushes the
+        # detail past the cut loses the detail; cutting each part on its own first would cut before redaction and
+        # masking, and a secret or host split by the cut would leak. RouterOS's message is a short reason phrase.
         parts = [_s(body.get(k)) for k in ("message", "detail") if isinstance(body.get(k), str)]
         parts = [p for p in parts if _CTRL_RE.sub("", p).strip()]
         if parts:
@@ -213,7 +214,7 @@ def _http_error_text(e: urllib.error.HTTPError) -> str:
 def _os_error_text(e: BaseException) -> str:
     """What went wrong at the network or TLS level, without a stack of nested reprs. Raw: _error cleans and cuts."""
     if isinstance(e, ssl.SSLCertVerificationError):
-        return f"TLS certificate not accepted ({e.verify_message or 'verify failed'}); set VERIFY_TLS=0 for a self-signed certificate"
+        return f"TLS certificate not accepted ({getattr(e, 'verify_message', None) or 'verify failed'}); set VERIFY_TLS=0 for a self-signed certificate"
     if isinstance(e, ssl.SSLError):
         # .reason is set only on errors ssl itself raises; strerror carries the text of a hand-built one
         return f"TLS error ({getattr(e, 'reason', None) or e.strerror or type(e).__name__})"
@@ -304,8 +305,10 @@ class MikrotikConnector(SettingsMixin):
             raise self._error(path, _os_error_text(reason) if reason else _s(e.reason)) from None
         except (http.client.HTTPException, OSError) as e:  # OSError covers ssl.SSLError and TimeoutError
             raise self._error(path, _os_error_text(e)) from None
-        except UnicodeError:  # the IDNA codec refuses the host ("label too long", "label empty"); validate() cannot
-            raise self._error(path, "bad URL (host name not valid)") from None
+        except UnicodeError:
+            # the IDNA codec refuses the host ("label too long"), or http.client cannot encode a non-ASCII path
+            # as ASCII; validate() catches neither, and which part failed is not known here, so neither is named
+            raise self._error(path, "bad URL (not valid as ASCII/IDNA)") from None
         if len(raw) > MAX_BODY:
             raise self._error(path, f"response larger than {MAX_BODY // (1024 * 1024)} MiB")
         try:

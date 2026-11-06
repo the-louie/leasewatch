@@ -158,8 +158,10 @@ class FileTest(unittest.TestCase):
 
 
 class TornReadTest(unittest.TestCase):
-    """dnsmasq rewrites the file in place (truncate, then buffered writes): a read in between sees a prefix."""
+    """dnsmasq rewrites the file in place (truncate, then buffered writes): a read in between sees a prefix. A text
+    is used only when two reads RETRY_DELAY apart give the same bytes and the same fstat, at most 3 attempts."""
     FULL = b"1900000000 02:00:00:00:00:01 10.0.0.10 a *\n1900000000 02:00:00:00:00:02 10.0.0.11 b *\n"
+    LINE1 = FULL[:FULL.index(b"\n") + 1]
 
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp()
@@ -170,18 +172,58 @@ class TornReadTest(unittest.TestCase):
         with open(self.path, "wb") as f:
             f.write(data)
 
+    def writer(self, *steps: bytes | None) -> mock._patch:
+        """time.sleep patched: the n-th sleep writes steps[n] (None: the writer does nothing then)."""
+        it = iter(steps)
+
+        def step(_: float) -> None:
+            data = next(it, None)
+            if data is not None:
+                self.write(data)
+        return mock.patch.object(dc.time, "sleep", side_effect=step)
+
+    def test_complete_file_is_read_twice(self) -> None:
+        self.write(self.FULL)
+        with self.writer() as sleep:
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+        self.assertEqual([c.args for c in sleep.call_args_list], [(dc.RETRY_DELAY,)])
+
     def test_prefix_is_retried_and_full_file_used(self) -> None:
         self.write(self.FULL[:60])  # cut inside the second line, as a stdio buffer boundary falls
-        with mock.patch.object(dc.time, "sleep", side_effect=lambda s: self.write(self.FULL)) as sleep:
+        with self.writer(self.FULL) as sleep:
             self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(sleep.call_count, 2)
 
-    def test_still_changing_after_retry_fails_the_poll(self) -> None:
-        self.write(self.FULL[:50])
-        with mock.patch.object(dc.time, "sleep", side_effect=lambda s: self.write(self.FULL[:60])):
+    def test_prefix_on_a_line_end_is_retried(self) -> None:
+        self.write(self.LINE1)  # a buffer flush that happens to end on a line end parses as a shorter valid list
+        with self.writer(self.FULL):
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+
+    def test_empty_read_in_the_truncate_window_is_retried(self) -> None:
+        self.write(b"")  # between dnsmasq's ftruncate and its fflush
+        with self.writer(self.FULL):
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+
+    def test_writer_still_progressing_is_followed_to_a_stable_text(self) -> None:
+        self.write(self.FULL[:30])
+        with self.writer(self.LINE1, self.FULL) as sleep:
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_still_changing_after_three_attempts_fails_the_poll(self) -> None:
+        self.write(self.FULL[:20])
+        with self.writer(self.FULL[:40], self.FULL[:60], self.FULL[:80]) as sleep:
             with self.assertRaises(ConnectorError) as cm:
                 make(self.path).collect()
         self.assertEqual(str(cm.exception), "PATH: file changed while reading")
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_same_bytes_but_new_mtime_is_not_stable(self) -> None:
+        self.write(self.FULL)
+        os.utime(self.path, ns=(1, 1))
+        with self.writer(self.FULL) as sleep:  # rewritten with the same text: mtime differs, bytes do not
+            self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
+        self.assertEqual(sleep.call_count, 2)
 
     def test_size_change_during_read_is_retried(self) -> None:
         self.write(self.FULL)
@@ -193,20 +235,20 @@ class TornReadTest(unittest.TestCase):
             if len(calls) == 3:  # the first read's after-read fstat: the writer appended meanwhile
                 return os.stat_result((*st[:6], st.st_size + 40, *st[7:]))
             return st
-        with mock.patch.object(dc.os, "fstat", side_effect=fstat), mock.patch.object(dc.time, "sleep") as sleep:
+        with mock.patch.object(dc.os, "fstat", side_effect=fstat), self.writer() as sleep:
             self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(sleep.call_count, 2)  # the first read is not trusted, so two more are compared
 
     def test_stable_file_without_final_newline_is_read(self) -> None:
         self.write(self.FULL.rstrip(b"\n"))  # a hand-written or copied file; the same on the second read
-        with mock.patch.object(dc.time, "sleep"):
+        with self.writer():
             self.assertEqual(make(self.path).collect().stats, {"leases": 2, "dropped": 0})
 
-    def test_complete_file_read_once(self) -> None:
-        self.write(self.FULL)
-        with mock.patch.object(dc.time, "sleep") as sleep:
-            make(self.path).collect()
-        self.assertEqual(sleep.call_count, 0)
+    def test_stable_empty_file_is_read(self) -> None:
+        self.write(b"")
+        with self.writer() as sleep:
+            self.assertEqual(make(self.path).collect().stats, {"leases": 0, "dropped": 0})
+        self.assertEqual(sleep.call_count, 1)
 
 
 class SettingsTest(unittest.TestCase):
