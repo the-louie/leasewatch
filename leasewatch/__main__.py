@@ -419,15 +419,8 @@ def startup_line(cfg: Config, version: str) -> str:
 def types_line() -> str:
     """The INFO line after startup_line(): every loaded connector type and where it comes from (no settings, and no
     path other than the configured LW_CONNECTORS_DIR)."""
-    from .connectors import registry, type_origins
-    from .connectors.loader import BUILTIN, DIR
-    reg, origins = registry(), type_origins()
-    parts = [f"{', '.join(sorted(t for t in reg if origins.get(t) and origins[t].kind == BUILTIN))} (built-in)"]
-    for o, t in sorted(((o, t) for t, o in origins.items() if o.kind != BUILTIN and t in reg),
-                       key=lambda ot: (ot[0].kind == DIR, ot[1])):  # entry points, then the dir, as they are loaded
-        where = f"LW_CONNECTORS_DIR {o.location}" if o.kind == DIR else o.kind
-        parts.append(f"{t} {o.type_version} ({f'{o.dist} {o.version}'.strip()}, {where})")
-    return "connector types: " + "; ".join(parts)
+    from .connectors import type_help
+    return "connector types: " + type_help()
 
 
 def main(argv: list[str] | None = None) -> int:

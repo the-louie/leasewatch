@@ -168,6 +168,17 @@ class TestLoad(LoaderBase):
                                        "epdemo 0.3.0 (lw-epdemo 0.3.0, entry point); "
                                        f"dirdemo 0.3.0 (lw-dirdemo 0.3.0, LW_CONNECTORS_DIR {self.dir})")
 
+    def test_type_help_lists_loaded_plugin_types(self):
+        # B-08.2: the `type` help and the unknown-type problem name every loaded type, not only the built-ins
+        from leasewatch.connectors import HOST_SETTINGS, InstanceSpec, instance_problems, type_help
+        make_dir_dist(self.dir, "lw-dirdemo", "lwt_dirdemo", "dirdemo")
+        self.use_dir()
+        self.assertEqual(type_help(), "opnsense, snmp_switch, unifi (built-in); "
+                                      f"dirdemo 0.3.0 (lw-dirdemo 0.3.0, LW_CONNECTORS_DIR {self.dir})")
+        self.assertNotIn("opnsense", HOST_SETTINGS[0].help)  # no literal list that would miss the plugins
+        self.assertEqual(instance_problems(InstanceSpec("x", "nosuch")),
+                         ["connector x: unknown type 'nosuch' (known: dirdemo, opnsense, snmp_switch, unifi)"])
+
     def test_types_line_with_built_ins_only(self):
         from leasewatch.__main__ import types_line
         self.assertEqual(types_line(), "connector types: opnsense, snmp_switch, unifi (built-in)")

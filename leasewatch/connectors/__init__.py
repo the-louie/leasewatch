@@ -394,7 +394,8 @@ class SettingsMixin:
 NAME_RE = re.compile(r"^[a-z0-9]+$")
 # keys every instance accepts besides its type's own settings; the host reads them, the connector never sees them
 HOST_SETTINGS = (
-    Setting("type", required=True, help="connector type (opnsense, snmp_switch, unifi)"),
+    # not a literal list: plugins add types at load time (type_help() and `python -m leasewatch check` list them)
+    Setting("type", required=True, help="connector type: a built-in or a loaded third-party one (see type_help())"),
     Setting("timeout", default="60", kind="int", min=1, max=3600, help="seconds a collect may run before this poll abandons it"),
 )
 HOST_KEYS = frozenset(s.key for s in HOST_SETTINGS)
@@ -529,6 +530,19 @@ def type_origins() -> dict:
 def broken_types() -> dict[str, str]:
     """type -> why it is not loaded, for every declared type that was refused or failed to import."""
     return dict(_loaded().broken)
+
+
+def type_help() -> str:
+    """Every loaded type and where it comes from: the built-ins, then the entry points, then LW_CONNECTORS_DIR (the
+    order they are loaded in). No settings, and no path other than the configured LW_CONNECTORS_DIR."""
+    from .loader import BUILTIN, DIR
+    reg, origins = registry(), type_origins()
+    parts = [f"{', '.join(sorted(t for t in reg if origins.get(t) and origins[t].kind == BUILTIN))} (built-in)"]
+    for o, t in sorted(((o, t) for t, o in origins.items() if o.kind != BUILTIN and t in reg),
+                       key=lambda ot: (ot[0].kind == DIR, ot[1])):
+        where = f"LW_CONNECTORS_DIR {o.location}" if o.kind == DIR else o.kind
+        parts.append(f"{t} {o.type_version} ({f'{o.dist} {o.version}'.strip()}, {where})")
+    return "; ".join(parts)
 
 
 def secret_keys(type_: str) -> frozenset[str]:
