@@ -138,7 +138,7 @@ class Collector:
         """Build one instance; run validate() and disable the instance on problems."""
         cls = registry().get(spec.type)
         run = _Run(spec.name, spec.type, spec.timeout, cls.describe().produces if cls else frozenset(),
-                   self.cfg.poll_seconds, checked=client is not None)  # C5: remove (an injected client is a test double without check())
+                   self.cfg.poll_seconds)
         self._runs[spec.name] = run
         conn, problems = setup_instance(spec, self._ctx, client)
         if problems:
@@ -202,9 +202,11 @@ class Collector:
             log.info("connector %s (%s) recovered", run.name, run.type)
         run.failed, run.error = bool(error), error
 
-    def _collect(self, names: list[str]) -> tuple[dict[str, object], dict[str, str]]:
+    def _collect(self, names: list[str], baseline_pending: bool = False) -> tuple[dict[str, object], dict[str, str]]:
         """Collect the given instances in parallel: (name -> Batch or ConnectorFailure, meta status). A disabled
-        instance has no entry (the merge treats it as off); a skipped, waiting or failed one a ConnectorFailure."""
+        instance has no entry (the merge treats it as off); a skipped, waiting or failed one a ConnectorFailure.
+        baseline_pending: the baseline is held back, so a failed check() of one that has not answered is retried
+        every poll and not backed off."""
         out: dict[str, object] = {}
         status: dict[str, str] = {}
         started: list[_Run] = []
@@ -266,7 +268,12 @@ class Collector:
                 error = error_text(exc, self._ctx.redact)
             else:
                 error = "collect() did not return a Batch"
-            if phase == "check":
+            if phase == "check" and baseline_pending and not run.answered:
+                # B-08.4: the baseline waits for this one, so a source that comes up late must be seen at the next
+                # poll, not after up to MAX_BACKOFF; the backoff is not doubled and starts once the baseline is taken
+                run.retry_at = time.monotonic() + self.cfg.poll_seconds
+                error = f"check failed: {error}"
+            elif phase == "check":
                 # retry check() after POLL_SECONDS, doubling up to MAX_BACKOFF; after that wait, collect() every poll
                 run.retry_at = time.monotonic() + min(run.backoff, MAX_BACKOFF)
                 if run.backoff >= MAX_BACKOFF:
@@ -384,7 +391,8 @@ class Collector:
     def run_once(self) -> dict:
         t0 = time.time()
         producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
-        got, status = self._collect(producers)
+        # read again below after the collection; here only to keep a pending baseline's failed check()s from backing off
+        got, status = self._collect(producers, self.db.get_meta("first_run_done", "") != "1")
         ok = {n: b for n, b in got.items() if isinstance(b, Batch)}
         if not ok:  # every sighting producer failed: the poll fails, so nothing stays online forever
             errors = [(n, b.error) for n, b in got.items()]

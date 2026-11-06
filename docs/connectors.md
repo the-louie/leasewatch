@@ -55,7 +55,9 @@ How the host runs it (`leasewatch/collector.py`):
   parallel. The poll fails only when every sighting producer failed.
 - **Check backoff.** If `check()` fails or hangs, it is tried again after `POLL_SECONDS`, then after double that time,
   and so on up to 600 s. After that wait, the host stops calling `check()` and calls `collect()` every poll. Once
-  `check()` has passed, a failing `collect()` does not run `check()` again.
+  `check()` has passed, a failing `collect()` does not run `check()` again. Exception: while the first baseline is
+  held back, a sighting producer that has not yet answered is retried every `POLL_SECONDS`, without the backoff, so a
+  source that comes up late does not delay the baseline by minutes. Once the baseline is taken, the backoff applies.
 - **Log on change.** A failure is logged once when the instance goes from ok to failed (WARNING for a
   `ConnectorError` or a timeout; ERROR with a redacted traceback for any other exception), and once more when it
   recovers. Do not log every failed poll yourself.

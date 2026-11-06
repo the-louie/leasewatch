@@ -483,6 +483,35 @@ class BaselineWaitTests(Base):
         self.assertEqual(sent, [["02:00:00:00:00:09"]])
         self.assertEqual(self.baselines(db)["02:00:00:00:00:09"], 0)
 
+    # B-08.4: while the baseline waits for fx, its failed check() is retried at the next poll, not backed off
+    def test_failed_check_is_retried_every_poll_while_the_baseline_waits(self):
+        col, db = self.collector(self.ENV)
+        sent, fx, run = [], col._connectors["fx"], col._runs["fx"]
+        fx.on_check = self.down
+        fx.on_collect = self.fx_batch
+        for i in range(3):
+            self.poll(col, sent)
+            self.assertEqual((fx.checks, round(run.retry_at - time.monotonic())), (i + 1, 15))
+            self.assertNotEqual(db.get_meta("first_run_done", ""), "1")
+            run.retry_at -= 15  # one POLL_SECONDS passes
+        fx.on_check = lambda: None
+        self.poll(col, sent)
+        self.assertEqual((fx.checks, fx.collects, db.get_meta("first_run_done", "")), (4, 1, "1"))
+        self.assertEqual(sent, [])
+
+    # B-08.4: once the baseline is stored (here by an earlier process) a failed check() backs off as before
+    def test_failed_check_backs_off_after_the_baseline(self):
+        col, db = self.collector(self.ENV)
+        db.set_meta("first_run_done", "1")
+        fx, run = col._connectors["fx"], col._runs["fx"]
+        fx.on_check = self.down
+        waits = []
+        for _ in range(3):
+            self.poll(col, [])
+            waits.append(round(run.retry_at - time.monotonic()))
+            run.retry_at = 0
+        self.assertEqual(waits, [15, 30, 60])
+
     # Z02: an empty poll during the baseline wait, after devices are stored, is an ordinary poll, not "first poll empty"
     def test_empty_poll_during_the_wait_is_not_a_failed_first_poll(self):
         col, db = self.collector(self.ENV)

@@ -10,6 +10,7 @@ from leasewatch.fw1 import Sighting, Fw1Error
 
 class FakeClient:
     def __init__(self, sightings): self.sightings_data = sightings; self.fail = False
+    def arp_raw(self): return []  # what the opnsense connector's check() calls; `fail` breaks collect() only
     def sightings(self, ignore=()):
         if self.fail: raise Fw1Error("boom")
         return list(self.sightings_data), {"leases": 1, "arp": 1}
@@ -37,6 +38,16 @@ class CollectorTests(unittest.TestCase):
         m = merge([S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="phone", online=False), S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="", src="arp")])
         d = m["aa:bb:cc:dd:ee:01"]
         self.assertEqual(d.hostname, "phone"); self.assertTrue(d.online); self.assertEqual(d.sources, {"dhcp", "arp"}); self.assertEqual(d.lease_type, "dynamic")
+
+    # B-08.3: an injected client is not a reason to skip check(); the connector's check() runs against it
+    def test_injected_client_is_checked(self):
+        c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5")])
+        calls = []
+        c.arp_raw = lambda: calls.append(1) or []
+        col = Collector(self.cfg, self.db, client=c)
+        self.assertTrue(col.run_once()["ok"])
+        col.run_once()
+        self.assertEqual(len(calls), 1)  # once, then collect() only
 
     def test_first_run_is_baseline_then_new_devices_and_changes(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", "phone")])

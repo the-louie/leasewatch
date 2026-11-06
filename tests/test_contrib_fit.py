@@ -42,6 +42,9 @@ MAIL = {"MAILGUN_KEY": "mg-key", "MAILGUN_DOMAIN": "example.com", "MAIL_TO": "op
 class FakeFwClient:
     """The firewall client the opnsense connector wraps: one ARP row."""
 
+    def arp_raw(self):
+        return []  # what the opnsense connector's check() calls
+
     def sightings(self, ignore=()):
         row = Fw1Sighting(mac=MAC_FW, ip="10.0.0.5", hostname="", vendor="", vlan="LAN", iface="lan", source="arp",
                           lease_type="", online=True)

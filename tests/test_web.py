@@ -37,6 +37,9 @@ class FakeClient:
         self.sightings_data = sightings
         self.fail = False
 
+    def arp_raw(self):
+        return []  # what the opnsense connector's check() calls; `fail` breaks collect() only
+
     def sightings(self, ignore=()):
         if self.fail:
             raise Fw1Error("boom")
