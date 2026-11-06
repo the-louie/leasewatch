@@ -26,6 +26,12 @@ class _ValidateExits(Fake):
         raise SystemExit(4)
 
 
+class _GenExits(Fake):
+    def validate(self):  # a generator: its body runs only when the result is read
+        yield "x"
+        raise SystemExit(5)
+
+
 class _Eager(Fake):
     def __init__(self, name, settings, ctx=None, client=None):
         super().__init__(name, settings, ctx, client)
@@ -106,6 +112,12 @@ class SetupTests(Base):
         with mock.patch.dict(registry(), {"exits": _Exits}):
             cfg = self.cfg({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "exits"})
             self.assertIn("connector x (exits): cannot be set up (SystemExit)", cfg.validate())
+
+    # S2T06: a generator validate() ran outside the try, so its SystemExit ended the host
+    def test_system_exit_in_a_generator_validate_is_a_config_problem(self):
+        with mock.patch.dict(registry(), {"genexit": _GenExits}):
+            cfg = self.cfg({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "genexit"})
+            self.assertIn("connector x (genexit): cannot be set up (SystemExit)", cfg.validate())
 
     # S2R52: device_names() works while the connectors are built
     def test_device_names_callable_while_connectors_are_built(self):

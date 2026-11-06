@@ -170,11 +170,12 @@ def _other_api(dist: str, group: str, api: str, type_: str, other: dict[str, str
 
 def _entry_point_decls(path: list, other: dict[str, str]) -> list[_Decl]:
     decls: list[_Decl] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[object, str, str, str]] = set()
     for i, dist in enumerate(importlib.metadata.distributions(path=_scan_path(path))):
         name = "?"
         try:
-            name = _one_line(str(dist.metadata.get("Name") or "?"))
+            # a Name of only whitespace is no name: "" would merge two such distributions in the key below
+            name = _one_line(str(dist.metadata.get("Name") or "")) or "?"
             version = str(dist.version or "")
             eps = list(dist.entry_points)
         except Exception as e:  # broken metadata of some unrelated distribution
@@ -186,8 +187,9 @@ def _entry_point_decls(path: list, other: dict[str, str]) -> list[_Decl]:
                 continue
             # the same distribution reached twice (a path listed twice, or one name spelled "lw_b" and "lw-b" by two
             # build backends) is one declaration; checked first, so the other-API warning is logged once too
-            # a dist without a Name is its own distribution: "?" must not merge two of them
-            key = (_norm(name) if name != "?" else str(i), ep.group, ep.name, ep.value)
+            # a dist without a Name is its own distribution: "?" must not merge two of them, and its key is a tuple
+            # so it never equals a normalised name (a dist named "0")
+            key = (_norm(name) if name != "?" else ("?", i), ep.group, ep.name, ep.value)
             if key in seen:
                 continue
             seen.add(key)
@@ -286,15 +288,13 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
 
 def _unshadowed(decls: list[_Decl], res: LoadResult) -> list[_Decl]:
     """Refuses the dir declarations whose package would shadow another module. Run before the duplicate and built-in
-    checks, so a shadow stops the start even when the type is refused for another reason. The one exception: the same
-    distribution installed with pip and mounted finds its own installed package; that is "provided twice", which
-    says what to remove."""
-    installed = {(d.type, _norm(d.origin.dist)) for d in decls if d.origin.kind == ENTRY_POINT}
+    checks, so a shadow stops the start even when the type is refused for another reason. A package both installed
+    with pip and mounted shadows its installed copy too: every duplicate is an error."""
     out = []
     shadows: dict[tuple[str, str], bool] = {}
     for d in decls:
         pkg = d.module.split(".")[0]
-        if d.path and not d.refused and (d.type, _norm(d.origin.dist)) not in installed:
+        if d.path and not d.refused:
             if (d.path, pkg) not in shadows:
                 shadows[(d.path, pkg)] = _shadows(pkg, d.path)
                 if shadows[(d.path, pkg)]:
@@ -348,8 +348,11 @@ def _class_problem(type_: str, obj: object) -> tuple[str, ConnectorInfo | None]:
     # the host iterates these (secret keys, known settings, "sighting" check): a wrong shape would be a traceback in
     # Config() instead of this type-level problem
     # a key that is not a str (e.g. a list) is unhashable in secret_keys()
-    if not isinstance(info.settings, (tuple, list)) or not all(isinstance(s, Setting) and isinstance(s.key, str)
-                                                                for s in info.settings):
+    # a min/max that is not an int (bool is one) would raise TypeError at n < s.min in setting_problems()
+    if not isinstance(info.settings, (tuple, list)) or not all(
+            isinstance(s, Setting) and isinstance(s.key, str)
+            and all(b is None or (isinstance(b, int) and not isinstance(b, bool)) for b in (s.min, s.max))
+            for s in info.settings):
         return "describe() settings is not a tuple of Setting", None
     for name in ("produces", "roles"):
         value = getattr(info, name)

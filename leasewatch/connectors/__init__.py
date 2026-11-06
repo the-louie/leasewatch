@@ -593,7 +593,7 @@ def instance_problems(spec: InstanceSpec, conn: Connector | None = None) -> list
     problems += [f"{head}: unknown setting {k.upper()}" for k in sorted(spec.settings) if k not in known]
     try:
         conn = conn or build_instance(spec, HostContext())
-        own = conn.validate()
+        own = list(conn.validate())  # list() here: a generator's body runs only when read, and must run in this try
     except (Exception, SystemExit) as e:  # a constructor that chokes on a value or calls sys.exit(): name the type of failure, never the value (a plugin's exit must not end the host)
         return problems + [f"{head}: cannot be set up ({type(e).__name__})"]
     generic = setting_problems(spec.name, spec.type, info.settings, getattr(conn, "settings", spec.settings))

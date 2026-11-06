@@ -189,7 +189,7 @@ Declare every key your type accepts in `ConnectorInfo.settings` as a `Setting`:
 | `choices` | `()` | Allowed values; anything else is `<KEY> must be one of a, b`. An explicitly empty value is refused too when the setting has a default. |
 | `help` | `""` | One line for your README. |
 | `kind` | `"str"` | `"int"`: the value must be an integer within `min`..`max` (either bound optional). |
-| `min`, `max` | `None` | Bounds for `kind="int"`. |
+| `min`, `max` | `None` | Bounds for `kind="int"`: an `int` or `None`; any other value (a str, a float, a bool) refuses the type. |
 
 The operator sets them as `LW_CONNECTOR__<NAME>__<KEY>`, with the instance name and the key in upper case. Your
 `__init__` gets them in lower case and always as strings. `SettingsMixin._init_settings()` fills in the defaults.
@@ -315,7 +315,7 @@ packages = ["leasewatch_<name>"]
 
 ## 7. Installing
 
-Use **one** of the two ways per package. A type declared twice is refused.
+Use **one** of the two ways per package. A type declared twice is refused, and a package installed both ways stops the start.
 
 **(a) Install it into leasewatch's Python environment.** Outside a container: `pip install ./leasewatch-<name>`
 (the build needs `setuptools`). For the container, build a derived image:
@@ -364,7 +364,8 @@ services:
   distributions with an entry point in `leasewatch.connectors.v1`, then the packages in `LW_CONNECTORS_DIR`. The
   working directory is never scanned for entry points.
 - **No precedence.** A type name declared twice (two packages, or one package installed both ways) is refused from
-  every origin: `type <t> is provided twice: … ; remove one`. A package that declares a built-in type name is
+  every origin: `type <t> is provided twice: … ; remove one`. A package installed both ways also stops the start:
+  its `LW_CONNECTORS_DIR` copy would shadow the installed one. A package that declares a built-in type name is
   refused and the built-in stays. All names are compared before any plugin code runs.
 - **All declared types are imported at load**, not only the ones `LW_CONNECTORS` uses.
 - **A broken or incompatible plugin** (an import error, `describe()` fails or names another type, not a connector

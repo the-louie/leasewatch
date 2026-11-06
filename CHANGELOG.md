@@ -31,21 +31,21 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - A connector that calls sys.exit() while it is built only disables its instance; the service keeps running.
 - A connector can call device_names() in its constructor.
 - The 'changed' count in the poll log line is 0 while the baseline waits, which matches the events and history written.
-- Connector loader: a plugin whose describe() has malformed settings, produces or roles is now refused as a broken type; Config() no longer stops with a traceback.
+- Connector loader: a plugin whose describe() has malformed settings (including a min or max that is not an int), produces or roles is now refused as a broken type; Config() no longer stops with a traceback.
 - Connector loader: a deeply nested pyproject.toml or an oversized API group number is now reported against that one entry; it no longer drops every third-party type.
 - Connector loader: after a loader failure or Ctrl-C during plugin import, only the built-ins stay registered and no half-imported LW_CONNECTORS_DIR package stays in sys.modules; any other BaseException from a plugin import is now a plugin failure.
-- Connector loader: a type that is pip-installed and also mounted in LW_CONNECTORS_DIR is refused as 'provided twice … remove one'; a shadowing or malformed declaration still counts in the duplicate check.
+- Connector loader: a type that is pip-installed and also mounted in LW_CONNECTORS_DIR is refused as 'provided twice … remove one', and the start stops (the mounted package would shadow the installed one); a shadowing or malformed declaration still counts in the duplicate check.
 - Connector loader: the group must be exactly leasewatch.connectors.v<N> (ASCII, no leading zero); type names with a trailing newline are refused; spaces around ':' in a LW_CONNECTORS_DIR entry point are accepted as pip accepts them.
 - Connector loader: clearer messages for a missing __init__.py, a package name repeated across LW_CONNECTORS_DIR entries, and unreadable distribution metadata (now names the distribution); the other-API warning is logged once per distribution, and dist names spelled 'lw_b'/'lw-b' count as one distribution.
 - registry() now also rebuilds when the working directory changes, so a relative LW_CONNECTORS_DIR follows os.chdir; unload drops submodules a plugin imported after the load.
 - Contract tests (`leasewatch.connectors.testing`): the no-network test also stops `socket.getnameinfo` and no longer errors on a platform without `socket.sendmsg` (Windows); a type name or setting key with a trailing newline now fails the describe test; an empty tuple for a record kind the type does not produce now passes the check-and-collect test.
 - docs/connectors.md: `make_host_mask()` and the contract test's host check skip a host shorter than 3 characters; this is now stated.
 - check and collect mask a URL or HOST host anywhere in an error or problem text, including before the first ": "; only the instance's own "connector <name> (<type>): " head stays readable.
-- check masks each config: line only with the host of the instance it belongs to, so another instance's host no longer hides a name, a type or a bad LW_CONNECTORS entry.
+- check and collect mask a config: line that belongs to one instance with that instance's host only; a line that belongs to no instance is masked with every instance's host.
 - check and collect no longer disable an instance because of a global load problem whose path contains LW_CONNECTOR__<NAME>__.
 - check and collect no longer crash with OverflowError on a disabled instance with a huge TIMEOUT.
 - collect: an int stat with more than 4300 digits, or an int or str subclass with a raising __str__ or __format__, no longer gives a traceback; keys that turn into the same text are all kept, as "1" and "1#2".
-- A connector plugin that calls sys.exit() in its constructor or validate() now only disables its instance at server start and in `leasewatch check`; the process no longer exits with the plugin's code. The built connector is still closed, and its setting problems are still reported.
+- A connector plugin that calls sys.exit() in its constructor or validate() (also a generator validate()) now only disables its instance at server start and in `leasewatch check`; the process no longer exits with the plugin's code. The built connector is still closed, and its setting problems are still reported.
 - Connector loader: a package in LW_CONNECTORS_DIR that would shadow another module now stops the start even when its type is a duplicate or a built-in name.
 - Connector loader: a space inside a module name in an entry point value is refused instead of being removed.
 - Connector loader: describe() produces/roles may be a tuple or list of str, as the contract test accepts; a Setting key that is not a str makes the type broken instead of crashing Config().

@@ -122,13 +122,29 @@ class TestConfigLineMasks(CliBase):
         self.assertEqual(mask("connector sw1 (snmp_switch): AUTH_KEY is required for sw1"),
                          "connector sw1 (snmp_switch): AUTH_KEY is required for <host>")
 
-    def test_another_instances_host_does_not_mask(self):
-        self.env("dhcp1,dhcp2,SW1", inst("dhcp1", URL="https://sw1/"), inst("dhcp2", URL="https://dhcp1"),
-                 {"LW_CONNECTOR__DHCP2__BOGUS": "x"})
+    def test_global_problem_is_masked_with_every_host(self):
+        # S2T05: a problem of no instance is masked with every instance's host, in check and collect alike
+        self.env("dhcp1,dhcp2,SW1", inst("dhcp1"), inst("dhcp2", URL="https://sw1/"),
+                 {"LW_CONNECTOR__DHCP1__BOGUS": "x"})
+        for argv in (("check",), ("check", "dhcp1"), ("collect", "dhcp1")):
+            rc, out, _ = self.cli(*argv)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("config: LW_CONNECTORS: '<host>' is not a valid instance name", out)
+            self.assertNotIn("SW1", out.upper().replace("DHCP1", ""))
         rc, out, _ = self.cli("check")
-        self.assertEqual(rc, 2, out)
-        self.assertIn("config: LW_CONNECTORS: 'SW1' is not a valid instance name", out)
-        self.assertIn("config: connector dhcp2 (fakecli): unknown setting BOGUS", out)
+        # a problem of exactly one instance keeps its "connector <name> (<type>): " head
+        self.assertIn("config: connector dhcp1 (fakecli): unknown setting BOGUS", out)
+
+    def test_connector_prefixed_validate_text_is_masked(self):
+        # S2T02, S2T04: "connector ..." text from validate() names no instance; it was masked with secrets only
+        cls = registry()["fakecli"]
+        with mock.patch.object(cls, "validate", lambda self: ["connector URL " + self.settings["url"] + " has no port"]):
+            self.env("dhcp1", inst("dhcp1", URL="https://dhcp.example.lan"))
+            for argv in (("check",), ("check", "dhcp1"), ("collect", "dhcp1")):
+                rc, out, _ = self.cli(*argv)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("config: connector URL https://<host> has no port", out)
+                self.assertNotIn("dhcp.example.lan", out)
 
 
 class TestGlobalNotOwn(CliBase):

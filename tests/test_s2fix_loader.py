@@ -216,16 +216,31 @@ class TestEntryPoints(LoaderBase):
 
 
 class TestConflictsAndShadows(LoaderBase):
-    def test_installed_and_mounted_is_provided_twice(self):
-        # S2R23
-        make_ep_dist(self.site, "lw-same", "lwt_same", "same")
-        make_dir_dist(self.dir, "lw-same", "lwt_same", "same")
+    def test_installed_and_mounted_stops_the_start(self):
+        # S2T07..S2T11: every duplicate is an error, whatever the dist names say; no name-based exemption
+        for dir_name in ("lw-same", "lw-other"):
+            with self.subTest(dir_name=dir_name):
+                _reset_registry()
+                make_ep_dist(os.path.join(self.site, dir_name), "lw-same", "lwt_same", "same")
+                make_dir_dist(os.path.join(self.dir, dir_name), dir_name, "lwt_same", "same")
+                sys.path.append(os.path.join(self.site, dir_name))
+                os.environ["LW_CONNECTORS_DIR"] = os.path.join(self.dir, dir_name)
+                with self.assertLogs(LOG, "WARNING"):
+                    self.assertNotIn("same", registry())
+                self.assertIn("provided twice", broken_types()["same"])
+                self.assertIn(f"LW_CONNECTORS_DIR {dir_name}: package lwt_same would shadow another module",
+                              load_problems())
+                sys.path.remove(os.path.join(self.site, dir_name))
+
+    def test_installed_name_does_not_exempt_a_stdlib_shadow(self):
+        # S2T09, S2T10
+        make_ep_dist(self.site, "lw-x", "lwt_x", "tx")
+        make_dir_dist(self.dir, "lw-x", "json", "tx", prelude="raise SystemExit('must not run')")
         self.use_site()
         self.use_dir()
         with self.assertLogs(LOG, "WARNING"):
-            self.assertNotIn("same", registry())
-        self.assertIn("provided twice", broken_types()["same"])
-        self.assertEqual(load_problems(), [])
+            registry()
+        self.assertIn("LW_CONNECTORS_DIR lw-x: package json would shadow another module", load_problems())
 
     def test_shadowing_declaration_still_counts_in_the_duplicate_check(self):
         # S2R27
@@ -315,6 +330,21 @@ class TestSecondReview(LoaderBase):
         self.assertIn("settings is not a tuple of Setting", broken_types()["keyl"])
         self.assertTrue(any(p.startswith("connector dhcp1 (keyl): cannot be loaded") for p in cfg.validate()))
 
+    def test_non_int_setting_bound_is_a_broken_type(self):
+        # S2T12: min="0" passed the shape check and Config() raised TypeError at n < s.min
+        for bound in ("min='0'", "max=1.5", "min=True"):
+            with self.subTest(bound=bound):
+                _reset_registry()
+                for k in [k for k in os.environ if k.startswith("LW_CONNECTOR")]:
+                    del os.environ[k]
+                self._info_type(f"bnd{len(bound)}", f"'bnd{len(bound)}', '1', 1, frozenset({{'sighting'}}), "
+                                                      f"(Setting('a', kind='int', {bound}),)")
+                with self.assertLogs(LOG, "WARNING"):
+                    cfg = self.cfg({**FW1_ENV, "LW_CONNECTORS": "fw1,dhcp1", **instance("dhcp1", f"bnd{len(bound)}"),
+                                    "LW_CONNECTOR__DHCP1__A": "5"})
+                self.assertIn("settings is not a tuple of Setting", broken_types()[f"bnd{len(bound)}"])
+                self.assertTrue(any("cannot be loaded" in p for p in cfg.validate()))
+
     def test_tuple_produces_and_roles_are_accepted(self):
         # S2S14: the published contract test accepts tuples (set(...)), so the loader must too
         self._info_type("tupl", "'tupl', '1', 1, ('sighting',), (Setting('url'),), ('controller',)")
@@ -355,6 +385,30 @@ class TestSecondReview(LoaderBase):
         with self.assertLogs(LOG, "WARNING"):
             self.assertNotIn("t9", registry())
         self.assertIn("provided twice", broken_types()["t9"])
+
+    def _decls(self, *names: str) -> list:
+        # a fixed path, so the scan index of each distribution is known: the first one is 0
+        from leasewatch.connectors import loader
+        path = []
+        for i, name in enumerate(names):
+            sub = os.path.join(self.site, f"d{i}")
+            info = os.path.join(sub, f"d{i}-1.dist-info")
+            os.makedirs(info)
+            with open(os.path.join(info, "METADATA"), "w", encoding="utf-8") as f:
+                f.write(f"Metadata-Version: 2.1\nName: {name}\nVersion: 1\n")
+            with open(os.path.join(info, "entry_points.txt"), "w", encoding="utf-8") as f:
+                f.write(f"[{GROUP}]\nt9 = lwt_t9.connector:Conn\n")
+            path.append(sub)
+        return loader._entry_point_decls(path, {})
+
+    def test_nameless_key_cannot_meet_a_dist_named_like_its_index(self):
+        # S2T21, S2T22: the nameless dist's key was str(i), the same as a dist named "0"
+        self.assertEqual(len(self._decls("", "0")), 2)
+
+    def test_blank_name_is_nameless(self):
+        # S2T20: a Name of only whitespace became "" and merged with another blank one
+        decls = self._decls("\x0b", "\x0c")
+        self.assertEqual([d.origin.dist for d in decls], ["?", "?"])
 
 
 if __name__ == "__main__":

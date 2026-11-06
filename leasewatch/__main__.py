@@ -265,6 +265,27 @@ def _redactor(ctx: object, conn: object | None, spec: object, hosts: bool = True
     return redact
 
 
+def _problem_mask(ctx: object, specs: list) -> Callable[[str], str]:
+    """The mask for a config problem text: a text that belongs to exactly one instance is masked as that instance
+    masks its own (its "connector <name> ..." head kept); any other text (a global problem, a validate() text that
+    starts with "connector " and names no instance) with every instance's URL/HOST host, as no instance vouches for
+    it. This over-masks a name spelled like a host, e.g. "LW_CONNECTORS: <name> is listed twice": the safe direction,
+    and the per-instance line's head still shows the name."""
+    from .connectors import make_host_mask
+    own = [(s.name, _redactor(ctx, None, s)) for s in specs]
+    every = [make_host_mask(v) for s in specs for k, v in s.settings.items() if k in ("url", "host") and v.strip()]
+
+    def mask(text: str) -> str:
+        found = [f for n, f in own if _belongs(text, n)]
+        if len(found) == 1:
+            return found[0](text)
+        text = ctx.redact(text)
+        for m in every:
+            text = m(text)
+        return text
+    return mask
+
+
 def _probe(conn: object, steps: tuple[str, ...], timeout: int) -> tuple[str, object, int, bool]:
     """Call conn's methods `steps` in order in a daemon thread joined for `timeout` seconds (the collector's TIMEOUT
     rule): (phase reached, last return value or the exception, ms, timed out). A hung thread is abandoned."""
@@ -354,13 +375,8 @@ def check_cmd(argv: list[str]) -> int:
     else:
         problems = cfg.validate()
     problems = list(dict.fromkeys(problems))
-    # a problem text may echo a URL or HOST (a third-party validate()): masked with the host of the instance it
-    # belongs to, as collect masks its own. Not with every instance's: another host spelled like a name, a type or a
-    # bad LW_CONNECTORS entry would hide it. A global problem names variables, never a setting's value
-    masks = [(s.name, _redactor(ctx, None, s)) for s in cfg.instances]
-
-    def mask_one(text: str) -> str:
-        return next((f for n, f in masks if _belongs(text, n)), ctx.redact)(text)
+    # a problem text may echo a URL or HOST (a third-party validate())
+    mask_one = _problem_mask(ctx, cfg.instances)
     for p in problems:
         _out(f"config: {mask_one(p)}")
     unknown = failed = False
@@ -460,6 +476,8 @@ def collect_cmd(argv: list[str]) -> int:
     mask: Callable[[str], str] = _redactor(ctx, None, spec) if spec else ctx.redact
     glob = _global_problems(cfg)
     problems = glob + _own_problems(cfg, name, glob)
+    # a global problem is not this instance's: masked as check masks it, with every instance's host
+    glob_mask = _problem_mask(ctx, cfg.instances)
     batch = None
     if spec is None:
         report["error"] = f"not configured (configured: {', '.join(s.name for s in cfg.instances) or 'none'})"
@@ -470,7 +488,8 @@ def collect_cmd(argv: list[str]) -> int:
         if conn is not None:
             mask = _redactor(ctx, conn, spec)
         if problems or conn is None:
-            report["error"] = "disabled: " + "; ".join(mask(p) for p in dict.fromkeys(problems))
+            report["error"] = "disabled: " + "; ".join((glob_mask if p in glob else mask)(p)
+                                                       for p in dict.fromkeys(problems))
             rc = 2
             if conn is not None:
                 _close(conn, name, spec.timeout)
@@ -487,7 +506,7 @@ def collect_cmd(argv: list[str]) -> int:
                 report.update(stats=_report_stats(batch.stats),
                               sightings=[_record_dict("sighting", r) for r in batch.sightings],
                               attachments=[_record_dict("attachment", r) for r in batch.attachments])
-    report["problems"] = [mask(p) for p in dict.fromkeys(problems)]
+    report["problems"] = [(glob_mask if p in glob else mask)(p) for p in dict.fromkeys(problems)]
     # error is masked where it is made (the problems one by one, the probe's by _probe_error): masking the joined
     # text again would treat "disabled" as the label and mask an instance name that matches the host
     if args.json:
