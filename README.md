@@ -100,6 +100,8 @@ The page has no login: it is meant for a trusted LAN behind a reverse proxy. Any
 
 `python3 -m unittest discover -s tests -v` — collector, enrichers and a full HTTP API suite (fake firewall, no network).
 
+`python3 -m unittest tests.test_ui_browser -v` — UI tests in headless Chrome (node + puppeteer from `npm root -g`, Chrome from `LW_TEST_CHROME` or the usual paths); they skip without node, puppeteer or Chrome.
+
 ## License
 
 MIT — see `LICENSE`.
