@@ -46,7 +46,19 @@ Only these names, and only as `from leasewatch.connectors import ...`:
 - `make_redactor`
 - `url_problems`
 - `parse_bool`
+- `Connector`
+- `make_host_mask`
 <!-- public-names: end -->
+
+A package's own tests may also import, only as `from leasewatch.connectors.testing import ...`:
+
+<!-- testing-names: begin -->
+- `ConnectorContractTests`
+<!-- testing-names: end -->
+
+`ConnectorContractTests` is a mixin with the connector contract as tests (describe(), no I/O in `__init__` or
+`validate()`, required settings, secrets kept out of the repr and of error texts, the Batch shape, `close()`). Mix
+it into a `unittest.TestCase` and fill in its hooks; its module docstring lists them.
 
 Every other name in `leasewatch` (other modules, `leasewatch.connectors` helpers not listed above, names that
 start with `_`) is private and can change in any release. `import leasewatch...` as a module is not allowed

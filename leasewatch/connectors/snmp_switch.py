@@ -4,7 +4,6 @@ A thin wrapper around switch.SwitchClient. pysnmp stays a lazy import inside the
 """
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 import sys
@@ -13,45 +12,11 @@ from typing import Callable, Mapping
 
 from .. import snmp_profiles
 from ..switch import SwitchClient, SwitchSnapshot
-from . import API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin, make_redactor
+from . import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin,
+               _bounded, _forms, make_redactor)
 
 INFRA_RE = re.compile(r"^(ap|apu|sw|switch|xgs|gs|usw|uap)[-_0-9]", re.I)  # hostnames that mean "another AP/switch hangs on this port"
-# a host or user name shorter than this is not masked: replacing "1" or "sw" would garble every number and word in the
-# message while hiding nothing (such a name is no secret anyway)
-MIN_REDACT = 3
 
-
-def _forms(value: str) -> set[str]:
-    """Spellings of a host or user name as it may appear in pysnmp's text: as given, lower-cased, without the trailing
-    dot of an FQDN, and an IPv6 address both compressed and exploded."""
-    v = value.strip()
-    out = {v, v.lower(), v.rstrip("."), v.lower().rstrip(".")}
-    try:
-        ip = ipaddress.ip_address(v.strip("[]"))
-    except ValueError:
-        pass
-    else:
-        out |= {ip.compressed, str(ip)}
-        try:
-            out.add(ip.exploded)
-        except ValueError:  # a scoped IPv6 address ("fe80::2%eth0") has no exploded form
-            pass
-    return {f for f in out if len(f) >= MIN_REDACT}
-
-
-def _bounded(forms: set[str]) -> list[re.Pattern]:
-    """Case-insensitive patterns for whole occurrences only: "10.0.0.2" must not hit "10.0.0.25", "sw" not "switch"."""
-    out = []
-    # not inside a name/number on either side; a trailing "." is allowed (end of sentence, FQDN root) unless more follows.
-    # An IPv6 form must also not touch another ":" group ("fe80::2" is not "fe80::2:5" or "fe80::2:beef", but
-    # "fe80::2: timeout" and "fe80::2:failed" are the host); for the others ":" is the port. Not the word inside an
-    # earlier "<host>"/"<user>" mask, so the user mask never hits it; any other host after "<" is still masked.
-    for group, colon in (([f for f in forms if ":" not in f], ""), ([f for f in forms if ":" in f], ":")):
-        if group:
-            alts = "|".join(re.escape(f) for f in sorted(group, key=len, reverse=True))
-            ahead = r"(?![\w-]|\.\w|:(?::|[0-9a-f]{1,4}(?!\w)))" if colon else r"(?![\w-]|\.\w)"
-            out.append(re.compile(rf"(?<![\w.{colon}-])(?!(?<=<)(?:host|user)>)(?:{alts}){ahead}", re.I))
-    return out
 
 @dataclass
 class _SnmpCfg:

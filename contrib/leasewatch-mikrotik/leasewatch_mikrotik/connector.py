@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import http.client
-import ipaddress
 import json
 import logging
 import re
@@ -20,11 +19,10 @@ import socket
 import ssl
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
+from typing import Any, Mapping
 
 from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, Setting,
-                                   SettingsMixin, Sighting, make_redactor, parse_bool, url_problems)
+                                   SettingsMixin, Sighting, make_host_mask, make_redactor, parse_bool, url_problems)
 
 log = logging.getLogger("leasewatch.contrib.mikrotik")
 
@@ -137,48 +135,6 @@ def parse(servers: list, leases: list, arp: list, now: int,
         out.append(Sighting(mac=mac, source="", kind="arp", presence=True, observed_at=now,
                             ip=_s(r.get("address")), network=iface, iface=iface))
     return out, dropped
-
-
-def _host_forms(url: str) -> set[str]:
-    """Spellings of the router's host in an error text: as given, lower-case, without a trailing dot, its IDNA
-    form, and an IPv6 address compressed and exploded."""
-    try:
-        host = urlparse(url).hostname or ""
-    except ValueError:
-        return set()
-    forms = {host, host.rstrip(".")}
-    try:
-        forms.add(host.encode("idna").decode("ascii").lower().rstrip("."))
-    except UnicodeError:  # a label idna cannot encode is never connected to
-        pass
-    try:
-        ip = ipaddress.ip_address(host)
-        forms |= {ip.compressed, ip.exploded}
-    except ValueError:
-        pass
-    return {f for f in forms if len(f) >= 2}
-
-
-def make_host_mask(url: str) -> Callable[[str], str]:
-    """A function that replaces whole occurrences of the router's host by "<host>" ("10.0.0.1" is not "10.0.0.15").
-    The router's address is internal infrastructure, not for the UI; ssl's hostname-mismatch text echoes it."""
-    forms = _host_forms(url)
-    if not forms:
-        return lambda text: text
-    rxs = []
-    # not inside a name or number on either side; an IPv6 form must also not touch another ":" group
-    # ("fe80::2" is not "fe80::2:5"), for the others a ":" is the port
-    for group, colon in (([f for f in forms if ":" not in f], ""), ([f for f in forms if ":" in f], ":")):
-        if group:
-            alts = "|".join(re.escape(f) for f in sorted(group, key=len, reverse=True))
-            ahead = r"(?![\w-]|\.\w|:(?::|[0-9a-f]{1,4}(?!\w)))" if colon else r"(?![\w-]|\.\w)"
-            rxs.append(re.compile(rf"(?<![\w.{colon}-])(?:{alts}){ahead}", re.I))
-
-    def mask(text: str) -> str:
-        for rx in rxs:
-            text = rx.sub("<host>", text)
-        return text
-    return mask
 
 
 def _clean(text: str) -> str:

@@ -14,6 +14,7 @@ from _contrib import CONTRIB, ROOT, contrib_dists, use_contrib  # noqa: E402
 
 README = os.path.join(CONTRIB, "README.md")
 PUBLIC_MODULE = "leasewatch.connectors"
+TESTING_MODULE = "leasewatch.connectors.testing"
 
 
 def py_files(top: str) -> list[str]:
@@ -37,12 +38,12 @@ def imports(path: str) -> list[tuple[int, str, list[str]]]:
     return out
 
 
-def public_names() -> list[str]:
+def public_names(block_name: str = "public-names") -> list[str]:
     with open(README, encoding="utf-8") as f:
         text = f.read()
-    block = re.search(r"<!-- public-names: begin -->(.*?)<!-- public-names: end -->", text, re.S)
+    block = re.search(rf"<!-- {block_name}: begin -->(.*?)<!-- {block_name}: end -->", text, re.S)
     if not block:
-        raise AssertionError("contrib/README.md has no public-names block")
+        raise AssertionError(f"contrib/README.md has no {block_name} block")
     return re.findall(r"^- `([A-Za-z_][A-Za-z0-9_]*)`$", block.group(1), re.M)
 
 
@@ -60,20 +61,27 @@ class ContribLayoutTest(unittest.TestCase):
     def test_readme_public_names_exist(self) -> None:
         import leasewatch.connectors as connectors
         names = public_names()
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 15)
         self.assertEqual(len(set(names)), len(names))
+        self.assertEqual(sorted(names), sorted(connectors.__all__))
         self.assertEqual([n for n in names if not hasattr(connectors, n)], [])
+
+    def test_readme_testing_names_exist(self) -> None:
+        import leasewatch.connectors.testing as testing
+        names = public_names("testing-names")
+        self.assertEqual(names, ["ConnectorContractTests"])
+        self.assertEqual(sorted(names), sorted(testing.__all__))
 
     def test_contrib_imports_only_public_names(self) -> None:
         if not contrib_dists():
             self.skipTest("no contrib packages yet")
-        allowed = set(public_names())
+        allowed = {PUBLIC_MODULE: set(public_names()), TESTING_MODULE: set(public_names("testing-names"))}
         bad = []
         for p in py_files(CONTRIB):
             for line, mod, names in imports(p):
                 if not is_under(mod, "leasewatch"):
                     continue
-                if mod != PUBLIC_MODULE or not names or set(names) - allowed:
+                if mod not in allowed or not names or set(names) - allowed[mod]:
                     bad.append(f"{os.path.relpath(p, ROOT)}:{line} {mod} {names}")
         self.assertEqual(bad, [])
 

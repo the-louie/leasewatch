@@ -12,6 +12,7 @@ other exception from check()/collect() is shown as its type name only (and logge
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -26,6 +27,11 @@ from typing import Callable, ClassVar, Iterable, Mapping, Protocol, runtime_chec
 from urllib.parse import urlparse
 
 from ..fw1 import _NoRedirect, norm_mac
+
+# the public names for connector code (contrib/README.md lists the same; tests/test_contrib_layout.py checks it)
+__all__ = ["API_VERSION", "ConnectorInfo", "Setting", "Sighting", "Attachment", "Batch", "ConnectorError",
+           "HostContext", "SettingsMixin", "build_opener", "make_redactor", "url_problems", "parse_bool",
+           "Connector", "make_host_mask"]
 
 API_VERSION = 1
 
@@ -241,26 +247,82 @@ def parse_bool(value: str) -> bool | None:
     return None
 
 
-def mask_url_host(text: str, url: str) -> str:
-    """`text` with the host of `url` masked as "<host>" (whole occurrences, as the switch masks its host): a TLS
-    name mismatch echoes it, and the firewall's or controller's address is internal infrastructure, not for the UI.
-    The clients' own "fw1 <path>: " / "unifi: " label is kept as is, so a host named "fw1" does not mask it."""
-    from .snmp_switch import _bounded, _forms  # imported here: snmp_switch imports this module
+# a host or user name shorter than this is not masked: replacing "1" or "sw" would garble every number and word in the
+# message while hiding nothing (such a name is no secret anyway)
+MIN_REDACT = 3
+
+
+def _forms(value: str) -> set[str]:
+    """Spellings of a host or user name as it may appear in an error text: as given, lower-cased, without the
+    trailing dot of an FQDN, and an IPv6 address both compressed and exploded."""
+    v = value.strip()
+    out = {v, v.lower(), v.rstrip("."), v.lower().rstrip(".")}
     try:
-        host = urlparse(url).hostname or ""
+        ip = ipaddress.ip_address(v.strip("[]"))
     except ValueError:
-        return text
+        pass
+    else:
+        out |= {ip.compressed, str(ip)}
+        try:
+            out.add(ip.exploded)
+        except ValueError:  # a scoped IPv6 address ("fe80::2%eth0") has no exploded form
+            pass
+    return {f for f in out if len(f) >= MIN_REDACT}
+
+
+def _bounded(forms: set[str]) -> list[re.Pattern]:
+    """Case-insensitive patterns for whole occurrences only: "10.0.0.2" must not hit "10.0.0.25", "sw" not "switch"."""
+    out = []
+    # not inside a name/number on either side; a trailing "." is allowed (end of sentence, FQDN root) unless more follows.
+    # An IPv6 form must also not touch another ":" group ("fe80::2" is not "fe80::2:5" or "fe80::2:beef", but
+    # "fe80::2: timeout" and "fe80::2:failed" are the host); for the others ":" is the port. Not the word inside an
+    # earlier "<host>"/"<user>" mask, so the user mask never hits it; any other host after "<" is still masked.
+    for group, colon in (([f for f in forms if ":" not in f], ""), ([f for f in forms if ":" in f], ":")):
+        if group:
+            alts = "|".join(re.escape(f) for f in sorted(group, key=len, reverse=True))
+            ahead = r"(?![\w-]|\.\w|:(?::|[0-9a-f]{1,4}(?!\w)))" if colon else r"(?![\w-]|\.\w)"
+            out.append(re.compile(rf"(?<![\w.{colon}-])(?!(?<=<)(?:host|user)>)(?:{alts}){ahead}", re.I))
+    return out
+
+
+def make_host_mask(url_or_host: str) -> Callable[[str], str]:
+    """A function that replaces whole occurrences of a host by "<host>" ("10.0.0.1" is not "10.0.0.15"): a source's
+    address is internal infrastructure, not for the UI, and e.g. ssl's hostname-mismatch text echoes it.
+    url_or_host: a URL (with "://"; its hostname is used) or a bare host name or address. Masked spellings: as
+    given, lower case, without a trailing dot, the IDNA (punycode) form, an IPv6 address compressed and exploded."""
+    host = url_or_host
+    if "://" in url_or_host:
+        try:
+            host = urlparse(url_or_host).hostname or ""
+        except ValueError:  # e.g. an unclosed "[": such a URL is refused by url_problems() and never connected to
+            host = ""
     forms = _forms(host)
     try:  # ssl and the resolver use the IDNA (punycode) name, so a TLS name mismatch echoes that spelling
         forms |= _forms(host.encode("idna").decode("ascii"))
     except UnicodeError:  # a label idna cannot encode (empty, too long): such a host is never connected to
         pass
+    rxs = _bounded(forms)
+
+    def mask(text: str) -> str:
+        for rx in rxs:
+            text = rx.sub("<host>", text)
+        return text
+    return mask
+
+
+def mask_url_host(text: str, url: str) -> str:
+    """`text` with the host of `url` masked as "<host>" (see make_host_mask). The clients' own "fw1 <path>: " /
+    "unifi: " label is kept as is, so a host named "fw1" does not mask it."""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return text
+    if not host:
+        return text
     head, sep, tail = text.partition(": ")
     if not sep:
         head, tail = "", text
-    for rx in _bounded(forms):
-        tail = rx.sub("<host>", tail)
-    return head + sep + tail
+    return head + sep + make_host_mask(host)(tail)
 
 
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")  # what http.client refuses in a request URL

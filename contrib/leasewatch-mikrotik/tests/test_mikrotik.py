@@ -18,7 +18,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))  # the package directory, when not started from it
 
-from leasewatch.connectors import API_VERSION, Batch, ConnectorError, HostContext, Sighting  # noqa: E402
+from leasewatch.connectors import API_VERSION, Batch, ConnectorError, HostContext, Sighting, make_host_mask  # noqa: E402
 from leasewatch_mikrotik import connector as mc  # noqa: E402
 from leasewatch_mikrotik.connector import MikrotikConnector, flag, parse  # noqa: E402
 
@@ -312,12 +312,12 @@ class StubTest(unittest.TestCase):
         self.assertIn("VERIFY_TLS=0", text)
 
     def test_host_masked_whole_occurrences_only(self) -> None:
-        mask = mc.make_host_mask("https://10.0.0.1")
+        mask = make_host_mask("https://10.0.0.1")
         self.assertEqual(mask("10.0.0.1 and 10.0.0.15 and 10.0.0.1:443"), "<host> and 10.0.0.15 and <host>:443")
-        mask6 = mc.make_host_mask("https://[fd00::1]")
+        mask6 = make_host_mask("https://[fd00::1]")
         self.assertEqual(mask6("fd00::1 fd00::1:5 fd00:0000:0000:0000:0000:0000:0000:0001"),
                          "<host> fd00::1:5 <host>")
-        self.assertEqual(mc.make_host_mask("https://ROUTER.example.lan.")("router.EXAMPLE.lan"), "<host>")
+        self.assertEqual(make_host_mask("https://ROUTER.example.lan.")("router.EXAMPLE.lan"), "<host>")
 
     def test_generic_tls_error(self) -> None:
         conn, _ = self.conn_raising(ssl.SSLError(1, "[SSL] wrong version number"))
