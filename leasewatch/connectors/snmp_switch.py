@@ -7,6 +7,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
@@ -30,7 +31,11 @@ def _forms(value: str) -> set[str]:
     except ValueError:
         pass
     else:
-        out |= {ip.compressed, ip.exploded, str(ip)}
+        out |= {ip.compressed, str(ip)}
+        try:
+            out.add(ip.exploded)
+        except ValueError:  # a scoped IPv6 address ("fe80::2%eth0") has no exploded form
+            pass
     return {f for f in out if len(f) >= MIN_REDACT}
 
 
@@ -38,16 +43,19 @@ def _bounded(forms: set[str]) -> list[re.Pattern]:
     """Case-insensitive patterns for whole occurrences only: "10.0.0.2" must not hit "10.0.0.25", "sw" not "switch"."""
     out = []
     # not inside a name/number on either side; a trailing "." is allowed (end of sentence, FQDN root) unless more follows.
-    # An IPv6 form must also not touch another ":" group ("fe80::2" is not "fe80::2:5"); for the others ":" is the port.
+    # An IPv6 form must also not touch another ":" group ("fe80::2" is not "fe80::2:5" or "fe80::2:beef", but
+    # "fe80::2: timeout" and "fe80::2:failed" are the host); for the others ":" is the port. Not the word inside an
+    # earlier "<host>"/"<user>" mask, so the user mask never hits it; any other host after "<" is still masked.
     for group, colon in (([f for f in forms if ":" not in f], ""), ([f for f in forms if ":" in f], ":")):
         if group:
             alts = "|".join(re.escape(f) for f in sorted(group, key=len, reverse=True))
-            out.append(re.compile(rf"(?<![\w.{colon}-])(?:{alts})(?![\w{colon}-]|\.\w)", re.I))
+            ahead = r"(?![\w-]|\.\w|:(?::|[0-9a-f]{1,4}(?!\w)))" if colon else r"(?![\w-]|\.\w)"
+            out.append(re.compile(rf"(?<![\w.{colon}-])(?!(?<=<)(?:host|user)>)(?:{alts}){ahead}", re.I))
     return out
 
 @dataclass
 class _SnmpCfg:
-    """The Config attributes SwitchClient reads; secrets kept out of repr like Config does."""
+    """The attributes SwitchClient reads (the 1.0 Config field names); secrets kept out of repr."""
     snmp_host: str
     snmp_user: str
     snmp_auth: str
@@ -76,7 +84,7 @@ def to_attachments(snap: SwitchSnapshot, source: str, device: str, observed_at: 
         port, via = snap.describe(mac)
         p = snap.ports.get(ifindex)
         out.append(Attachment(mac=mac, source=source, observed_at=observed_at, link="wired", device=device,
-                              port=port, via=via, uplink=bool(p and p.uplink), vlan=vlan))
+                              port=port, via=via, uplink=bool(p and p.uplink), vlan=vlan or None))  # 0: bridge FDB, VLAN unknown
     return out
 
 
@@ -110,8 +118,8 @@ class SnmpSwitchConnector(SettingsMixin):
         profile = self._profile()
         min_macs = self._min_macs()
         # read at call time: the host (and tests) may swap the client object
-        self.client = client or SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]),  # type: ignore[arg-type]
-                                             profile=profile, min_macs=min_macs, name=name)
+        self.client = client if client is not None else SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]),  # type: ignore[arg-type]
+                                                                     profile=profile, min_macs=min_macs, name=name, timeout=self.ctx.timeout)
 
     def _profile(self) -> dict | None:
         """profile_file > profile > None (detection). Reads the file (a local config file, not the device)."""
@@ -123,7 +131,7 @@ class SnmpSwitchConnector(SettingsMixin):
                 return None
             try:
                 return snmp_profiles.load_file(path)
-            except snmp_profiles.ProfileError:
+            except (snmp_profiles.ProfileError, RecursionError):  # RecursionError: a deeply nested value, copied later
                 # the detail quotes values from the file; it is shown by `python -m leasewatch snmp-detect`, not here
                 self.profile_problems.append(f"{where}: PROFILE_FILE is not a valid snmp profile (run: python -m leasewatch snmp-detect {self.name})")
                 return None
@@ -131,7 +139,9 @@ class SnmpSwitchConnector(SettingsMixin):
             try:
                 return snmp_profiles.load(name)
             except snmp_profiles.ProfileError:
-                self._bad_profile_name = True  # validate() reports it through the generic choices check
+                self._bad_profile_name = True  # a name outside BUILTIN is reported by the generic choices check
+                if name in snmp_profiles.BUILTIN:  # a shipped profile that fails to load: a broken install
+                    self.profile_problems.append(f"{where}: built-in PROFILE {name} cannot be loaded")
                 return None
         return None
 
@@ -149,7 +159,9 @@ class SnmpSwitchConnector(SettingsMixin):
         return None
 
     def validate(self) -> list[str]:
-        return self._generic_problems() + self.profile_problems
+        # an explicitly empty USER overrides the default and can never authenticate
+        user = [] if self.settings["user"].strip() else [f"connector {self.name} ({self.INFO.type}): USER is required"]
+        return self._generic_problems() + user + self.profile_problems
 
     def _refuse_if_invalid(self) -> None:
         if self.profile_problems or self._bad_profile_name:
@@ -159,11 +171,18 @@ class SnmpSwitchConnector(SettingsMixin):
         """`text` with the host, the USM user name and the secret settings (via make_redactor: repr/JSON forms, not
         under MIN_SECRET_LEN) masked. Host and user match whole occurrences only and not when shorter than MIN_REDACT
         (see there). Host and user go first: a key that is a substring of the host ("0.0" in "10.0.0.2") would
-        otherwise break the host apart so its whole-occurrence pattern no longer matches the rest."""
+        otherwise break the host apart so its whole-occurrence pattern no longer matches the rest. A secret that contains
+        the host or user ("admin@2024x" with user "admin") goes before them, or their mask would leave its rest, unless
+        it is itself part of the host ("admin-sw01" in "admin-sw01.example.lan"): then the host goes first, as above."""
+        hosts = {f.lower() for f in _forms(self.settings.get("host", ""))}
+        names = hosts | {f.lower() for f in _forms(self.settings.get("user", ""))}
+        secrets = [self.settings.get(st.key, "") for st in self.INFO.settings if st.secret]
+        text = make_redactor(v for v in secrets if any(n in v.lower() for n in names)
+                             and not any(v.lower() in h for h in hosts))(text)
         for key, mask in (("host", "<host>"), ("user", "<user>")):
             for rx in _bounded(_forms(self.settings.get(key, ""))):
                 text = rx.sub(mask, text)
-        return make_redactor(self.settings.get(st.key, "") for st in self.INFO.settings if st.secret)(text)
+        return make_redactor(secrets)(text)
 
     def _error(self, e: Exception) -> ConnectorError:
         """The one exception type for every failure. The client's own messages never contain the host or the keys,
@@ -172,6 +191,15 @@ class SnmpSwitchConnector(SettingsMixin):
         if isinstance(e, ConnectorError):
             return e
         if isinstance(e, ImportError):
+            # only "pysnmp" itself missing means it is not installed. Anything else is named, as pysnmp is then there:
+            # a module of its own or a name in one (a pysnmp before 7), or a module it needs (a crypto backend, "imp"
+            # for a pysnmp 4.x). A module name is no secret; e.msg is not used, it may carry a file path. A missing
+            # "pysnmp.x" counts as an older pysnmp only when the package itself was imported (read from sys.modules,
+            # not changed): a None entry there, as a blocked import leaves it, means pysnmp is not usable at all.
+            own = e.name is not None and e.name.startswith("pysnmp.")
+            if e.name and e.name != "pysnmp" and (not own or sys.modules.get("pysnmp") is not None):
+                what = f"no module {e.name}" if isinstance(e, ModuleNotFoundError) else f"a name is missing in {e.name}"
+                return ConnectorError(f"pysnmp cannot be imported: {what} (pysnmp 7 and its dependencies are needed)")
             return ConnectorError("missing dependency pysnmp")
         return ConnectorError(self.redact(str(e) or type(e).__name__))
 

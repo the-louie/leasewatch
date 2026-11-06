@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 from leasewatch import fw1, notify, unifi
 from leasewatch.config import Config
+from leasewatch.connectors.unifi import _UnifiCfg
 from leasewatch.fw1 import Fw1Client, Fw1Error, kea_leases
 from leasewatch.unifi import UnifiClient, parse_clients
 
@@ -85,7 +86,7 @@ class Fw1HttpTests(StubCase):
     def test_bad_fw1_url_is_fw1error(self):
         with self.assertRaises(Fw1Error) as cm:
             Fw1Client("https://[fe80::1", "k", "s", verify_tls=False, timeout=5).arp_raw()
-        self.assertIn("bad FW1_URL", str(cm.exception))
+        self.assertIn("bad URL", str(cm.exception))
 
     def test_non_utf8_body_is_fw1error(self):
         fw = self.stub({ARP: (200, {}, b"\xff\xfe[]")})
@@ -216,7 +217,7 @@ class KeaTests(StubCase):
 
 
 def unifi_cfg(url):
-    return Config(unifi_url=url, unifi_user="ro", unifi_password="pw", unifi_verify_tls=False)
+    return _UnifiCfg(unifi_url=url, unifi_site="default", unifi_user="ro", unifi_password="pw", unifi_verify_tls=False)
 
 
 STA = "/api/s/default/stat/sta"
@@ -337,7 +338,7 @@ class NotifyTests(StubCase):
 
 
 class ProxyTests(StubCase):
-    """LAN clients must not send the firewall/UniFi credentials through an http(s)_proxy unless PROXY_FOR_LAN is set."""
+    """LAN clients must not send the firewall/UniFi credentials through an http(s)_proxy unless the instance's proxy setting is set."""
     PROXY_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
 
     def setUp(self):

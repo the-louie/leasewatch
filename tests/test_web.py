@@ -14,7 +14,7 @@ import unittest
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
+from _env import FW1_ENV, clean_env, restore  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
@@ -28,7 +28,7 @@ MAC3 = "aa:bb:cc:dd:ee:03"  # new device, ARP only, non-ASCII hostname/vendor
 UNKNOWN = "02:11:22:33:44:55"
 SITE = "Hemnät Test"
 VERSION = "9.9.9-test"
-ENV = {"FW1_KEY": "k", "FW1_SECRET": "s", "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
+ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
        "SITE_NAME": SITE, "MAILGUN_KEY": "", "MAILGUN_DOMAIN": "", "MAIL_TO": "", "POLL_SECONDS": "120"}
 
 
@@ -791,7 +791,7 @@ class QaFixTests(WebTestCase):
     def test_lone_surrogate_name_is_400(self):
         for field in ("name", "note"):
             status, data, _ = self.post(MAC1, None, raw=('{"%s": "\\ud800"}' % field).encode())
-            self.assertEqual(status, 400, field); self.assertEqual(data["error"], "bad json", field)
+            self.assertEqual(status, 400, field); self.assertEqual(data["error"], f"{field} must be valid Unicode text", field)
         self.assertEqual(self.db.device(MAC1)["name"], "")
 
     def test_stdlib_errors_are_json_with_security_headers(self):
@@ -808,29 +808,29 @@ class QaFixTests(WebTestCase):
         self.assertEqual(st, 200); self.assertIn(b"A{{VERSION}}B", body)
 
     def test_connector_labels(self):
-        # legacy variables: the switch's SNMP_NAME and "Wi-Fi" as dot text, the instance name stays in "name"
-        self.cfg.snmp_host, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, self.cfg.snmp_name = "10.0.0.2", "a" * 8, "p" * 8, "sw-rack"
-        self.cfg.unifi_url, self.cfg.unifi_user, self.cfg.unifi_password = "https://unifi.example.lan", "ro", "pw"
+        # the switch's NAME and "Wi-Fi" as dot text, the instance name stays in "name"
+        self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("switch", "snmp_switch", {"name": "sw-rack"}),
+                                    InstanceSpec("unifi", "unifi", {})]
         conns = self.get_json("/api/status")[0]["meta"]["connectors"]
         self.assertEqual([(c["name"], c["label"]) for c in conns], [("fw1", "fw1"), ("switch", "sw-rack"), ("unifi", "Wi-Fi")])
         # LW_CONNECTORS: NAME when set, else the instance name
-        self.cfg.connector_specs = [InstanceSpec("fw2", "opnsense", {}), InstanceSpec("sw-a", "snmp_switch", {"name": "ap-hall-sw"}),
-                                    InstanceSpec("sw-b", "snmp_switch", {}), InstanceSpec("wifi", "unifi", {})]
+        self.cfg.connector_specs = [InstanceSpec("fw2", "opnsense", {}), InstanceSpec("swa", "snmp_switch", {"name": "ap-hall-sw"}),
+                                    InstanceSpec("swb", "snmp_switch", {}), InstanceSpec("wifi", "unifi", {})]
         conns = self.get_json("/api/status")[0]["meta"]["connectors"]
         self.assertEqual([(c["name"], c["label"]) for c in conns],
-                         [("fw2", "fw2"), ("sw-a", "ap-hall-sw"), ("sw-b", "sw-b"), ("wifi", "Wi-Fi")])
+                         [("fw2", "fw2"), ("swa", "ap-hall-sw"), ("swb", "swb"), ("wifi", "Wi-Fi")])
 
     def test_connector_strategy(self):
         # the switch's FDB strategy from meta; "" for an instance that reports none
-        self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("sw-a", "snmp_switch", {})]
-        self.db.set_meta("conn.sw-a.strategy", "cisco_per_vlan")
+        self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("swa", "snmp_switch", {})]
+        self.db.set_meta("conn.swa.strategy", "cisco_per_vlan")
         conns = self.get_json("/api/status")[0]["meta"]["connectors"]
-        self.assertEqual([(c["name"], c["strategy"]) for c in conns], [("fw1", ""), ("sw-a", "cisco_per_vlan")])
+        self.assertEqual([(c["name"], c["strategy"]) for c in conns], [("fw1", ""), ("swa", "cisco_per_vlan")])
 
     def test_port_in_use_exits_2_without_traceback(self):
         with socket.socket() as busy:
             busy.bind(("127.0.0.1", 0)); busy.listen(1)
-            env = dict(os.environ, LISTEN_PORT=str(busy.getsockname()[1]), FW1_URL="http://127.0.0.1:9", DATA_DIR=self.tmp.name,
+            env = dict(os.environ, LISTEN_PORT=str(busy.getsockname()[1]), LW_CONNECTOR__FW1__URL="http://127.0.0.1:9", DATA_DIR=self.tmp.name,
                        PYTHONPATH=REPO)
             out = subprocess.run([sys.executable, "-m", "leasewatch"], env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 2, out.stderr)

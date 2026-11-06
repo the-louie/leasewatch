@@ -11,10 +11,11 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
     ip, network, iface    arp, dhcp, then client, scan  taken together from one sighting. The lease is the first DHCP
                                                         sighting whose IP is in an ARP sighting, else the first DHCP
                                                         one; shown where ARP saw that IP, else at the first ARP
-                                                        sighting, else at the lease. A lease flagged online by the
-                                                        DHCP server does not override an ARP row (1.0 behaviour).
-                                                        Only with neither DHCP nor ARP: the first client, then scan,
-                                                        then any other kind (presence first within a kind)
+                                                        sighting, else at the lease if it has an IP. A lease flagged
+                                                        online by the DHCP server does not override an ARP row (1.0
+                                                        behaviour). Only with neither ARP nor a lease with an IP: a
+                                                        sighting with an IP first, then the (empty-IP) lease, then
+                                                        client, scan, any other kind (presence first within a kind)
     hostname              dhcp, client, arp, scan       the lease's hostname first, then the first non-empty value
     vendor                dhcp, arp, client, scan       the first non-empty value
     lease_type            dhcp                          the chosen lease only
@@ -42,9 +43,10 @@ import logging
 from dataclasses import dataclass, field, replace
 
 from ..config import Config
+from ..db import _CTRL
 from ..fw1 import Sighting as Fw1Sighting
 from ..fw1 import norm_mac
-from . import Attachment, Batch, Sighting
+from . import Attachment, Batch, Sighting, parse_bool
 
 log = logging.getLogger("leasewatch.merge")
 
@@ -95,11 +97,14 @@ class ConnectorFailure:
 class MergeState:
     """What the merge needs beyond the rows. no_lease_since (mac -> first poll listed without a lease) is updated in
     place, so LEASE_TYPE_MODE=grace keeps its clock across polls. controllers: instance names whose batch is a Wi-Fi
-    controller's complete client list (a MAC missing from an answered batch has left Wi-Fi)."""
+    controller's complete client list (a MAC missing from an answered batch has left Wi-Fi). producers: instance
+    names that produce sightings (only they can hold a lease); None when unknown, then every failed instance but a
+    controller counts."""
     no_lease_since: dict[str, int] = field(default_factory=dict)
     first_run: bool = False
     prev_ok: bool = True
     controllers: frozenset[str] = frozenset()
+    producers: frozenset[str] | None = None
 
 
 @dataclass
@@ -140,9 +145,12 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
         arp = [s for s in ss if s.source == "arp"]
         arp_ips = {s.ip for s in arp if s.ip}
         lease = next((s for s in dhcp if s.ip in arp_ips), dhcp[0] if dhcp else None)
-        wire = next((s for s in arp if lease and s.ip == lease.ip), arp[0] if arp else None)
+        wire = next((s for s in arp if lease and lease.ip and s.ip == lease.ip), arp[0] if arp else None)
         # no firewall sighting at all (a controller or scanner only): the best of the other kinds, so they still merge
-        loc = wire or lease or min(ss, key=lambda s: (_rank(FALLBACK_KINDS, s.source), s.source, not s.online) + pick(s))
+        # an empty-IP lease (a Kea reservation without ip_address) cannot be where the device is, as for `wire`, but
+        # it still names the network better than another kind's sighting that has no IP either
+        loc = wire or (lease if lease and lease.ip else None) or min(ss, key=lambda s: (
+            s.ip == "", s.source != "dhcp", _rank(FALLBACK_KINDS, s.source), s.source, not s.online) + pick(s))
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
                    sources={s.source for s in ss}, online=any(s.online for s in ss))
         if lease:
@@ -159,6 +167,11 @@ _STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease
                Attachment: ("link", "device", "port", "via", "ssid", "ap", "radio", "alias")}
 _BOOL_FIELDS = {Sighting: ("presence",), Attachment: ("uplink", "present")}
 _OPT_INT_FIELDS = {Sighting: (), Attachment: ("vlan", "signal")}
+# names the controller shows as given: an SSID may begin or end with a space, and two such SSIDs are different networks
+_UNSTRIPPED = ("ssid", "ap", "alias")
+# every line break (CR, VT, FF, NEL, LS, PS too, not only LF) separates words: _CTRL would delete it and glue them
+_SPACES = dict.fromkeys(map(ord, "\n\t\r\x0b\x0c\x85\u2028\u2029"), " ")
+_INT64 = 2 ** 63  # SQLite INTEGER is signed 64-bit; a larger int raises OverflowError at the write and fails the poll
 
 
 def _int(v: object) -> int | None:
@@ -166,19 +179,45 @@ def _int(v: object) -> int | None:
     if isinstance(v, bool) or v is None:
         return None
     try:
-        return int(float(str(v).strip().replace("\u2212", "-")))
+        s = str(v).strip().replace("\u2212", "-")
+        try:
+            n = int(s)  # first: a float round trip loses precision above 2**53 and turns 2**63-1 into 2**63
+        except ValueError:
+            n = int(float(s))
     except (TypeError, ValueError, OverflowError):
         return None
+    return n if -_INT64 <= n < _INT64 else None
+
+
+def _str(v: object, strip: bool) -> str:
+    """str(v) safe to store and show: a lone surrogate (a name cut inside an emoji pair) would make the SQLite write
+    raise UnicodeEncodeError for the whole poll, so it becomes "?"; control and bidi characters are removed and tab
+    and newline become spaces, as db.py does for a name, so a hostname cannot reverse or split the "old -> new" text
+    of an event."""
+    s = ("" if v is None else str(v)).encode("utf-8", "replace").decode("utf-8")
+    s = _CTRL.sub("", s.replace("\r\n", "\n").translate(_SPACES))  # _CTRL keeps tab/newline (for notes)
+    return s.strip() if strip else s
+
+
+def _flag(v: object) -> bool:
+    """A flag from a bool or a number, or from text by the words config.py accepts ("false", "0", "no" are False;
+    bool("false") would be True); text that is none of them is False, as it asserts nothing. Bytes are read as text:
+    bool(b"false") would be True too."""
+    if isinstance(v, (bytes, bytearray)):
+        v = v.decode("utf-8", "replace")
+    return parse_bool(v) is True if isinstance(v, str) else bool(v)
 
 
 def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachment:
     """A copy with every field of its declared type: a third-party connector's None or number in a str field would
     otherwise raise deep in the merge (sort keys, .strip(), the SQL write) and fail the whole poll. `link` keeps its
     value after the str conversion: anything but "wired"/"wifi" is ignored and logged later, as before."""
-    t = type(r)
+    t = Sighting if isinstance(r, Sighting) else Attachment  # a subclass has the same fields; type(r) is no table key
     ch: dict = {"mac": mac, "source": name, "observed_at": _int(r.observed_at) or 0}
-    ch.update({f: "" if getattr(r, f) is None else str(getattr(r, f)).strip() for f in _STR_FIELDS[t]})
-    ch.update({f: bool(getattr(r, f)) for f in _BOOL_FIELDS[t]})
+    ch.update({f: _str(getattr(r, f), f not in _UNSTRIPPED) for f in _STR_FIELDS[t]})
+    if t is Sighting:  # the merge compares kinds exactly: "DHCP" would silently lose its lease
+        ch["kind"] = ch["kind"].lower()
+    ch.update({f: _flag(getattr(r, f)) for f in _BOOL_FIELDS[t]})
     ch.update({f: _int(getattr(r, f)) for f in _OPT_INT_FIELDS[t]})
     return r if all(getattr(r, f) == v and type(getattr(r, f)) is type(v) for f, v in ch.items()) else replace(r, **ch)
 
@@ -187,33 +226,50 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     """The host's part of the record contract, for one instance's batch: `source` set to the instance name, `mac`
     normalised, records whose MAC fails norm_mac dropped (stats["dropped"], one WARNING per instance per process).
     Never raises: one connector's malformed batch must not fail the poll for the others, so a record of the wrong
-    type, a MAC that is not a str, and a sightings/attachments field that is not a list (counted as one) are
-    dropped the same way. A record with a valid MAC but a wrong-typed field is kept with its fields coerced (str
-    fields: None -> "", else str().strip(); flags -> bool; observed_at -> int or 0; vlan/signal -> int or None).
+    type, a MAC that is not a str, and a sightings/attachments field that is not a list or cannot be iterated
+    (counted as one) are dropped the same way, as is a record whose MAC or field cannot be converted (its str(),
+    bool() or str method raises). A record with a
+    valid MAC but a wrong-typed field is kept with its fields coerced (str fields: None -> "", else str() with lone
+    surrogates replaced, tab/line breaks as spaces and control/bidi characters removed, then .strip() except ssid/ap/alias; kind lower-cased;
+    flags -> bool, text by the config words; observed_at -> int or 0; vlan/signal -> int in int64 range or None).
     Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
     dropped = 0
 
     def fix(records: object, kind: type) -> list:
         nonlocal dropped
-        if not isinstance(records, (list, tuple)):
+        try:  # a list subclass may raise in __iter__
+            items = list(records) if isinstance(records, (list, tuple)) else None
+        except Exception:
+            items = None
+        if items is None:
             dropped += 1
             return []
         out = []
-        for r in records:
-            mac = norm_mac(r.mac) if isinstance(r, kind) and isinstance(r.mac, str) else ""
-            if mac:
-                out.append(_coerce(r, mac, name))
-            else:
-                dropped += 1
+        for r in items:
+            try:  # the MAC too: a str subclass's strip() or a `mac` property may raise
+                mac = norm_mac(r.mac) if isinstance(r, kind) and isinstance(r.mac, str) else ""
+                if mac:
+                    out.append(_coerce(r, mac, name))
+                    continue
+            except Exception:  # any: a MAC or field whose conversion raises is as malformed as a bad MAC
+                pass
+            dropped += 1
         return out
     sightings, attachments = fix(b.sightings, Sighting), fix(b.attachments, Attachment)
-    stats = b.stats if isinstance(b.stats, dict) else {}
+    try:  # a plain copy: a dict subclass's get() or items may raise
+        stats = dict(b.stats) if isinstance(b.stats, dict) else {}
+    except Exception:
+        stats = {}
     before = stats.get("dropped", 0)
+    # only a count: a negative value (or a bool) from the connector would cancel this poll's drops, and the partial
+    # check in _apply_attachments (dropped > 0) would take the batch as complete
+    before = before if type(before) is int and before > 0 else 0
     if dropped and name not in _mac_warned:
         _mac_warned.add(name)
-        log.warning("connector %s: %d malformed records dropped (invalid MAC or wrong type)", name, dropped)
+        log.warning("connector %s: %d malformed records dropped (invalid MAC, wrong type or unconvertible field)",
+                    name, dropped)
     return Batch(sightings=sightings, attachments=attachments,
-                 stats={**stats, "dropped": (before if isinstance(before, int) else 0) + dropped})
+                 stats={**stats, "dropped": before + dropped})
 
 
 def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], cfg: Config, now: int,
@@ -227,6 +283,10 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}
     changes = 0
+    # an instance that failed may be the one holding the lease: its absence is no evidence that the lease is gone
+    # (a switch or a controller lists no leases, so its failure does not count)
+    lease_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
+                      and (state.producers is None or n in state.producers) for n, b in batches.items())
     for mac, m in merged.items():
         sources = ",".join(sorted(m.sources))
         cur = rows.get(mac)
@@ -251,7 +311,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         lease_type = m.lease_type or cur["lease_type"]
         if m.lease_type:
             state.no_lease_since.pop(mac, None)
-        elif cur["lease_type"] and cfg.lease_type_mode != "keep":
+        elif cur["lease_type"] and cfg.lease_type_mode != "keep" and not lease_blind:
             since = state.no_lease_since.setdefault(mac, now)
             if cfg.lease_type_mode == "immediate" or now - since >= grace_s:
                 lease_type = ""
@@ -262,15 +322,21 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             days = (now - cur["last_online"]) // 86400
             ev.append(("back", f"back after {days} day{'' if days == 1 else 's'}"))
         res.events += [(mac, kind, detail) for kind, detail in ev]
+        # ip/vlan/iface come from one sighting (merge_sightings): when the device moved, an empty ip, vlan or iface is
+        # unknown at the new place, and the stored one would name the old place
+        # an unknown stored network becoming known is no move: the stored IP is still right
+        moved = (m.ip and m.ip != cur["ip"]) or (m.vlan and cur["vlan"] and m.vlan != cur["vlan"])
+        ip = m.ip if moved else m.ip or cur["ip"]
+        vlan, iface = (m.vlan, m.iface) if moved else (m.vlan or cur["vlan"], m.iface or cur["iface"])
         if any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
-            res.history.append((mac, {"ip": m.ip or cur["ip"], "hostname": m.hostname or cur["hostname"],
-                                      "vlan": m.vlan or cur["vlan"], "lease_type": lease_type}))
+            res.history.append((mac, {"ip": ip, "hostname": m.hostname or cur["hostname"],
+                                      "vlan": vlan, "lease_type": lease_type}))
             changes += 1
         # not on the wire right now: stays online until the grace period after its last sighting has passed
         online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= grace)
-        cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=m.ip or cur["ip"],
-                   hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=m.vlan or cur["vlan"],
-                   iface=m.iface or cur["iface"], lease_type=lease_type, sources=sources, online=int(online))
+        cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
+                   hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
+                   iface=iface, lease_type=lease_type, sources=sources, online=int(online))
     _apply_attachments(rows, merged, batches, ok, state, res)
     # only MACs with a device row: a switch FDB lists MACs no sighting ever named, which would leave orphan rows
     for n, b in ok.items():
@@ -319,11 +385,15 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 # FDBs age at different speeds): the switch that already holds the device (sticky, so a walk order
                 # or an FDB timing never makes it flap), then the instance order
                 sticky = n == rows.get(a.mac, {}).get("loc_source")
-                key = (bool(a.uplink), not sticky, i)
+                # an empty label ranks last: the row would drop it below, losing a labelled candidate of another switch
+                key = (not a.port, bool(a.uplink), not sticky, i)
                 if a.mac not in rank or key < rank[a.mac]:
                     wired[a.mac], rank[a.mac] = a, key
-    ctrl_ok = any(n in ok for n in controllers)
-    ctrl_failed = any(n not in ok for n in controllers)
+    # a batch normalise_batch dropped records from (here or in the collector) is not a complete list: what it leaves
+    # out is no evidence, so it counts as failed for "left Wi-Fi" and for releasing a held port
+    partial = {n for n, b in ok.items() if b.stats.get("dropped", 0) > 0}
+    ctrl_ok = any(n in ok and n not in partial for n in controllers)
+    ctrl_failed = any(n not in ok or n in partial for n in controllers)
     for mac, row in rows.items():
         cur = dict(row)
         upd: dict = {}  # later keys win, as the rightmost assignment of a repeated column in an SQL UPDATE does
@@ -336,13 +406,20 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         sw = wired.get(mac)
         # the switch that placed this wired device failed this poll: another switch can only offer a worse view (an
         # uplink towards it, an aged FDB entry), so the port stays as it is, as a Wi-Fi device does while blind
-        held = (cur["link"] == "wired" and cur["loc_source"] in batches and cur["loc_source"] not in ok
-                and cur["loc_source"] not in state.controllers)
+        held = (cur["link"] == "wired" and cur["loc_source"] in batches
+                and (cur["loc_source"] not in ok or cur["loc_source"] in partial) and cur["loc_source"] not in state.controllers)
         # on the wire this poll, not in grace: the FDB ages out slower than ARP, so a departed device would get a stale port
         # Wi-Fi beats any switch port, also an edge port: a controller's client list is first-hand, an FDB entry for a
         # Wi-Fi client can be an AP port that is not marked as an uplink
         if sw and on_wire and not on_wifi and not blind and not held and sw.port:
             # only the winner is compared with the row, so a losing candidate that moves writes no event
+            # another switch with the same port label (switches of one model share GE1/0/N): a move all the same, named
+            # by instance as the label alone would read "GE1/0/14 -> GE1/0/14"
+            other = (cur["sw_port"] == sw.port and cur["loc_source"] not in ("", sw.source)
+                     and cur["loc_source"] not in state.controllers)
+            if other:
+                res.events.append((mac, "port", f"{cur['sw_port']} ({cur['loc_source']}) -> {sw.port} ({sw.source})"
+                                                f"{' via ' + sw.via if sw.via else ''}"))
             if sw.port != cur["sw_port"] or sw.via != cur["sw_via"]:
                 if cur["sw_port"] and sw.port != cur["sw_port"]:
                     res.events.append((mac, "port", f"{cur['sw_port']} -> {sw.port}{' via ' + sw.via if sw.via else ''}"))
@@ -352,7 +429,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
             if w.ssid and (w.ssid != cur["wifi_ssid"] or w.ap != cur["wifi_ap"]):
                 if cur["wifi_ssid"]:
                     res.events.append((mac, "wifi", f"{cur['wifi_ssid']} @ {cur['wifi_ap'] or '?'} -> {w.ssid} @ {w.ap or '?'}"))
-            upd.update(wifi_ssid=w.ssid, wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
+            # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next roam is logged
+            upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
                        loc_source=w.source)
             if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale
                 upd.update(sw_port="", sw_via="")
@@ -362,11 +440,13 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
         # its last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
-        if ctrl_ok and not ctrl_failed and on_wire and cur["wifi_ssid"] and mac not in wifi:
+        # a client listed without an SSID has link "wifi" but no SSID: it left Wi-Fi too
+        if ctrl_ok and not ctrl_failed and on_wire and (cur["wifi_ssid"] or cur["link"] == "wifi") and mac not in wifi:
             # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
             # branch above already recorded its port, so a cable is shown in this same poll.
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if sw else "")
             upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
-        if cur["online"] and sw and not on_wifi and cur["link"] != "wifi":
+        # on the wire, as for the port above: a device only in grace would be called wired on a stale FDB entry
+        if on_wire and sw and not on_wifi and cur["link"] != "wifi":
             upd["link"] = "wired"
         row.update(upd)

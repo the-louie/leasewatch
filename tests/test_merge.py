@@ -4,7 +4,7 @@ from dataclasses import replace
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore
+from _env import FW1_ENV, clean_env, restore
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, HostContext, Sighting
 from leasewatch.connectors import merge as merge_mod
@@ -309,7 +309,7 @@ CASES = [
 class MergeTableTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
 
     def tearDown(self): self.tmp.cleanup(); restore(self._env)
 
@@ -371,7 +371,7 @@ class MergeTableTests(unittest.TestCase):
         with mock.patch.object(merge_mod, "_mac_warned", set()):
             with self.assertLogs("leasewatch.merge", "WARNING") as logs:
                 out = normalise_batch("fw2", b)
-            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector fw2: 2 malformed records dropped (invalid MAC or wrong type)"])
+            self.assertEqual(logs.output, ["WARNING:leasewatch.merge:connector fw2: 2 malformed records dropped (invalid MAC, wrong type or unconvertible field)"])
             with self.assertNoLogs("leasewatch.merge", "WARNING"):  # once per instance per process
                 normalise_batch("fw2", b)
         self.assertEqual([(s.mac, s.source) for s in out.sightings], [("02:00:00:00:00:0a", "fw2")])  # host fills source

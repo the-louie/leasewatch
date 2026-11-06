@@ -1,12 +1,11 @@
 import json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore
+from _env import FW1_ENV, clean_env, restore
 from leasewatch import snmp_profiles
 from leasewatch.config import Config
 from leasewatch.connectors import (API_VERSION, Attachment, Batch, Connector, ConnectorError, HostContext, Sighting,
-                                   make_redactor)
-from leasewatch.connectors.legacy import legacy_instances
+                                   build_instance, instances_context, make_redactor)
 from leasewatch.connectors.opnsense import OpnsenseConnector
 from leasewatch.connectors.snmp_switch import SnmpSwitchConnector
 from leasewatch.connectors.unifi import UnifiConnector
@@ -362,32 +361,39 @@ class UnifiConnectorTests(unittest.TestCase):
         self.assertEqual(str(cm.exception), "'NoneType' object has no attribute 'wired'")
 
 
-class LegacyTests(unittest.TestCase):
+class InstanceSettingsTests(unittest.TestCase):
+    """LW_CONNECTOR__<NAME>__<KEY> settings reach the clients the connectors wrap."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def cfg(self, env):
+    def instances(self, env, client=None):
         saved = clean_env({"DATA_DIR": self.tmp.name, **env})
         try:
-            return Config()
+            specs = Config().instances
         finally:
             restore(saved)
+        ctx = instances_context(specs)
+        return {sp.name: build_instance(sp, ctx, client=client if sp.name == "fw1" else None) for sp in specs}
 
-    def test_only_fw1_by_default(self):
-        conns = legacy_instances(self.cfg({"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s"}))
+    def test_fw1_defaults(self):
+        conns = self.instances(FW1_ENV)
         self.assertEqual(list(conns), ["fw1"])
         self.assertEqual(conns["fw1"].validate(), [])
         self.assertEqual(conns["fw1"].ignore_interfaces, ("wan", "lo0"))
+        self.assertEqual(conns["fw1"].client.dhcp_backend, "kea")
 
-    def test_all_three_with_settings_from_config(self):
-        cfg = self.cfg({"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s", "DHCP_BACKEND": "isc",
-                        "FW1_VERIFY_TLS": "0", "IGNORE_INTERFACES": "wan,opt6", "PROXY_FOR_LAN": "1",
-                        "SNMP_HOST": "10.0.0.2", "SNMP_NAME": "sw-rack", "SNMP_AUTH": "sha256", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8,
-                        "UNIFI_URL": "https://unifi.example.lan/", "UNIFI_USER": "ro", "UNIFI_PASSWORD": "pw-secret", "UNIFI_SITE": "home"})
-        conns = legacy_instances(cfg)
+    def test_all_three_with_their_settings(self):
+        conns = self.instances({
+            **FW1_ENV, "LW_CONNECTORS": "fw1,switch,unifi", "LW_CONNECTOR__FW1__DHCP_BACKEND": "isc",
+            "LW_CONNECTOR__FW1__VERIFY_TLS": "0", "LW_CONNECTOR__FW1__IGNORE_INTERFACES": "wan,opt6", "LW_CONNECTOR__FW1__PROXY": "1",
+            "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch", "LW_CONNECTOR__SWITCH__HOST": "10.0.0.2", "LW_CONNECTOR__SWITCH__NAME": "sw-rack",
+            "LW_CONNECTOR__SWITCH__AUTH": "sha256", "LW_CONNECTOR__SWITCH__AUTH_KEY": "a" * 8, "LW_CONNECTOR__SWITCH__PRIV_KEY": "p" * 8,
+            "LW_CONNECTOR__UNIFI__TYPE": "unifi", "LW_CONNECTOR__UNIFI__URL": "https://unifi.example.lan/",
+            "LW_CONNECTOR__UNIFI__USER": "ro", "LW_CONNECTOR__UNIFI__PASSWORD": "pw-secret", "LW_CONNECTOR__UNIFI__SITE": "home",
+            "LW_CONNECTOR__UNIFI__PROXY": "1"})
         self.assertEqual(list(conns), ["fw1", "switch", "unifi"])
         for c in conns.values():
             self.assertEqual(c.validate(), [], c)
@@ -405,10 +411,9 @@ class LegacyTests(unittest.TestCase):
 
     def test_injected_client_is_used(self):
         fake = FakeFw1([])
-        conns = legacy_instances(self.cfg({"FW1_KEY": "k", "FW1_SECRET": "s"}), fw1_client=fake)
+        conns = self.instances(FW1_ENV, client=fake)
         self.assertIs(conns["fw1"].client, fake)
         self.assertEqual(conns["fw1"].collect(), Batch(stats={"leases": 2, "arp": 1, "reservations": 0}))
-
 
 if __name__ == "__main__":
     unittest.main()

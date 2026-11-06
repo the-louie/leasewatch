@@ -1,5 +1,5 @@
 # leasewatch -- who is on the network (DHCP leases + ARP from an OPNsense firewall), behind nginx-proxy.
-# Secrets live in .env (FW1_KEY/FW1_SECRET = a read-only OPNsense API user; MAILGUN_KEY, SNMP_*, UNIFI_* optional).
+# Secrets live in .env (LW_CONNECTOR__FW1__KEY/__SECRET = a read-only OPNsense API user; MAILGUN_KEY and the switch/UniFi keys optional).
 # Without nginx-proxy: drop the VIRTUAL_* variables and the network, and publish the port instead (ports: ["8080:8080"]).
 services:
   leasewatch:

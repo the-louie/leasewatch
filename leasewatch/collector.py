@@ -14,19 +14,15 @@ import sqlite3
 import threading
 import time
 import traceback
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
 
 from .config import Config
 from .db import Database
 from .connectors import (Batch, ConnectorError, InstanceSpec, build_instance, instance_problems, instances_context,
                          registry)
-from .connectors.legacy import switch_settings, unifi_settings
 from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState,
                                normalise_batch, to_fw1, merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
-from .connectors.snmp_switch import SnmpSwitchConnector
-from .connectors.unifi import UnifiConnector
 from .fw1 import Fw1Client
 from . import notify
 
@@ -35,7 +31,7 @@ HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
-# meta aliases the 1.0 UI reads, for the instances the legacy mapping names (name and type must both match):
+# meta aliases the 1.0 UI reads, for the instances named "switch" and "unifi" (name and type must both match):
 # (type, ok, error, count key, Batch.stats key)
 ALIASES = {"switch": ("snmp_switch", "switch_ok", "switch_error", "switch_macs", "macs"),
            "unifi": ("unifi", "unifi_ok", "unifi_error", "unifi_clients", "clients")}
@@ -43,8 +39,8 @@ ALIASES = {"switch": ("snmp_switch", "switch_ok", "switch_error", "switch_macs",
 
 @dataclass
 class _Run:
-    """Collection state of one instance. Only the collector thread changes it, except `result`, which a worker
-    thread sets under Collector._lock and only while `gen` is still the generation it was started with."""
+    """Collection state of one instance. Only the collector thread changes it, except `result` and `phase`, which a
+    worker thread sets under Collector._lock and only while `gen` is still the generation it was started with."""
     name: str
     type: str
     timeout: int
@@ -55,19 +51,21 @@ class _Run:
     retry_at: float = 0.0       # monotonic time before which a failed check() is not retried
     failed: bool = False        # last outcome, so a change is logged once and not every poll
     error: str = ""
+    logged_unexpected: set = field(default_factory=set)  # unexpected failures (error, place) logged in this failed spell
     thread: threading.Thread | None = None
     started: float = 0.0
     gen: int = 0
     phase: str = ""             # the worker's phase ("check"/"collect"), so a timeout knows which call hung
     result: tuple | None = None
     skip_logged: bool = False
+    answered: bool = False      # collected successfully at least once in this process (the baseline waits for it)
 
 
 class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
-        self._lock = threading.Lock()  # guards _Run.result/_Run.gen between the worker threads and run_once
+        self._lock = threading.Lock()  # guards _Run.result/_Run.phase/_Run.gen between the worker threads and run_once
         specs = cfg.instances
         # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
         self._ctx = instances_context(specs)
@@ -75,33 +73,59 @@ class Collector:
         self._connectors: dict = {}
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
-            self._add(spec, client if spec.name == "fw1" else None, validate=cfg.connector_specs is not None)
+            self._add(spec, client if spec.name == "fw1" else None)
         # an instance removed from the configuration (or renamed) would keep its "Seen by" line forever: its rows never
         # update again. Disabled instances are still configured, so theirs stay (writes to the seen table).
         # devices.loc_source naming such an instance would credit the location to a source that no longer exists
         names = [spec.name for spec in specs]
         marks = ','.join('?' * len(names))
-        with db.tx() as c:
-            pruned = c.execute(f"DELETE FROM seen WHERE source NOT IN ({marks})", names).rowcount
-            cleared = c.execute(f"UPDATE devices SET loc_source='' WHERE loc_source != '' AND loc_source NOT IN ({marks})",
-                                names).rowcount
+        # housekeeping only: a database locked by another writer must not stop the start (the next start prunes)
+        try:
+            with db.tx() as c:
+                pruned = c.execute(f"DELETE FROM seen WHERE source NOT IN ({marks})", names).rowcount
+                cleared = c.execute(f"UPDATE devices SET loc_source='' WHERE loc_source != '' AND loc_source NOT IN ({marks})",
+                                    names).rowcount
+                # writes conn.<n>.enabled (and a disabled one's error) now: _collect writes them only after the first
+                # good firewall poll, and until then the page would draw a disabled instance as a red dot
+                for run in self._runs.values():
+                    # a fixed instance must not show the previous start's "disabled: ..." until its first poll
+                    if not run.disabled and c.execute("SELECT 1 FROM meta WHERE key=? AND value='0'",
+                                                      (f"conn.{run.name}.enabled",)).fetchone():
+                        self.db.set_meta(f"conn.{run.name}.error", "", c)
+                        # and the 1.0 alias written below at that start: while the firewall fails nothing else clears it
+                        if run.name in ALIASES and run.type == ALIASES[run.name][0]:
+                            self.db.set_meta(ALIASES[run.name][2], "", c)
+                    self.db.set_meta(f"conn.{run.name}.enabled", "0" if run.disabled else "1", c)
+                    if run.disabled:
+                        self.db.set_meta(f"conn.{run.name}.error", run.error, c)
+                        # the 1.0 aliases too: while the firewall fails, _collect never reaches the enricher's write
+                        if run.name in ALIASES and run.type == ALIASES[run.name][0]:
+                            self.db.set_meta(ALIASES[run.name][1], "0", c)
+                            self.db.set_meta(ALIASES[run.name][2], run.error, c)
+        except sqlite3.Error as e:
+            log.warning("cannot remove rows of instances that are no longer configured: %s", e)
+            pruned = cleared = 0
         if pruned or cleared:
             log.info("removed %d seen rows and %d location sources of instances that are no longer configured",
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
+        self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
+        self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
 
-    def _add(self, spec: InstanceSpec, client: object | None, validate: bool) -> None:
-        """Build one instance. validate: run validate() and disable the instance on problems (LW_CONNECTORS only;
-        the legacy variables are checked by Config.validate() under their own names)."""
+    def _add(self, spec: InstanceSpec, client: object | None) -> None:
+        """Build one instance; run validate() and disable the instance on problems."""
         cls = registry().get(spec.type)
         run = _Run(spec.name, spec.type, spec.timeout, cls.describe().produces if cls else frozenset(),
                    self.cfg.poll_seconds, checked=client is not None)  # C5: remove (an injected client is a test double without check())
         self._runs[spec.name] = run
         try:
-            conn = build_instance(spec, self._ctx, client=client)
-            problems = instance_problems(spec, conn) if validate else []
+            if cls is None:  # unknown or empty TYPE: validate()'s message, not the KeyError build_instance raises
+                conn, problems = None, instance_problems(spec)
+            else:
+                conn = build_instance(spec, self._ctx, client=client)
+                problems = instance_problems(spec, conn)
         except Exception as e:
             conn, problems = None, [f"connector {spec.name} ({spec.type or '?'}): cannot be set up ({type(e).__name__})"]
         if problems:
@@ -110,49 +134,6 @@ class Collector:
             log.error("%s (instance disabled)", "; ".join(problems))
             return
         self._connectors[spec.name] = conn
-
-    # C5: remove the client/_switch/_unifi shims (tests swap the wrapped client objects through them)
-    @property
-    def client(self) -> object:
-        return self._connectors["fw1"].client
-
-    @client.setter
-    def client(self, obj: object) -> None:
-        self._connectors["fw1"].client = obj
-        self._runs["fw1"].checked = True
-
-    def _get_client(self, name: str) -> object | None:
-        conn = self._connectors.get(name)
-        return conn.client if conn else None
-
-    def _set_client(self, name: str, factory: Callable[[str, object], object], obj: object | None) -> None:
-        """Swap the client a connector wraps; None removes the connector, a client without one gets a new wrapper."""
-        if obj is None:
-            self._connectors.pop(name, None)
-            self._runs.pop(name, None)
-            return
-        if name in self._connectors:
-            self._connectors[name].client = obj
-        else:
-            self._connectors[name] = conn = factory(name, obj)
-            self._runs[name] = _Run(name, conn.describe().type, 60, conn.describe().produces, self.cfg.poll_seconds)
-        self._runs[name].checked = True  # a test double: no check()
-
-    @property
-    def _switch(self) -> object | None:
-        return self._get_client("switch")
-
-    @_switch.setter
-    def _switch(self, obj: object | None) -> None:
-        self._set_client("switch", lambda n, o: SnmpSwitchConnector(n, switch_settings(self.cfg), self._ctx, client=o), obj)
-
-    @property
-    def _unifi(self) -> object | None:
-        return self._get_client("unifi")
-
-    @_unifi.setter
-    def _unifi(self, obj: object | None) -> None:
-        self._set_client("unifi", lambda n, o: UnifiConnector(n, unifi_settings(self.cfg), self._ctx, client=o), obj)
 
     def _device_names(self) -> dict[str, str]:
         """mac -> name, else hostname, as the rows will read once this poll's firewall data is merged in."""
@@ -186,14 +167,24 @@ class Collector:
 
     def _outcome(self, run: _Run, error: str, exc: BaseException | None) -> None:
         """Log a change of state once: ok -> failed (WARNING for ConnectorError and timeouts, ERROR with traceback
-        for anything else) and failed -> ok."""
-        if error and not run.failed:
-            if exc is None or isinstance(exc, ConnectorError):
+        for anything else) and failed -> ok. An unexpected exception that replaces another failure is logged too, so
+        its traceback is not lost while the instance stays failed."""
+        unexpected = exc is not None and not isinstance(exc, ConnectorError)
+        # keyed by error and the place it was raised, and remembered for the whole failed spell: failures that flap
+        # or alternate log each traceback once, and a second bug of the same type elsewhere still gets its own
+        tb_last = traceback.extract_tb(exc.__traceback__)[-1:] if unexpected else []
+        key = (error, *((tb_last[0].filename, tb_last[0].lineno) if tb_last else ()))
+        if error and (not run.failed or (unexpected and key not in run.logged_unexpected)):
+            if not unexpected:
                 log.warning("connector %s (%s) failed: %s", run.name, run.type, error)
             else:
                 # the traceback as redacted text, not exc_info: its last line is the raw exception text
                 tb = self._ctx.redact("".join(traceback.format_exception(exc)))
                 log.error("connector %s (%s) failed: %s\n%s", run.name, run.type, error, tb.rstrip())
+            if not run.failed:
+                run.logged_unexpected.clear()
+            if unexpected:
+                run.logged_unexpected.add(key)
         elif not error and run.failed:
             log.info("connector %s (%s) recovered", run.name, run.type)
         run.failed, run.error = bool(error), error
@@ -224,7 +215,12 @@ class Collector:
             run.thread = threading.Thread(target=self._work, args=(run, run.gen, self._connectors[n], not run.checked),
                                           name=f"connector-{n}", daemon=True)
             run.started = time.monotonic()
-            run.thread.start()
+            try:
+                run.thread.start()
+            except RuntimeError as e:  # out of threads: only this instance fails this poll; the others still run
+                run.thread = None
+                self._outcome(run, "cannot start a collection thread", e)
+                continue
             started.append(run)
         for run in started:
             run.thread.join(max(0.0, run.started + run.timeout - time.monotonic()))
@@ -284,7 +280,12 @@ class Collector:
                            f"conn.{n}.ts": ts, f"conn.{n}.enabled": "0" if run.disabled else "1"})
             status.setdefault(f"conn.{n}.ms", "0")
             status.setdefault(f"conn.{n}.count", "0")
-            if n in ALIASES and run.type == ALIASES[n][0] and not run.disabled:
+            # like count, a strategy this poll did not report is reset (a failed walk, a type without one): the
+            # stored one names a walk this poll did not make
+            if f"conn.{n}.strategy" not in status and self.db.get_meta(f"conn.{n}.strategy"):
+                status[f"conn.{n}.strategy"] = ""
+            # a disabled instance writes them too, or a 1.0 reader keeps the last good poll's green status
+            if n in ALIASES and run.type == ALIASES[n][0]:
                 _type, k_ok, k_err, k_count, stat = ALIASES[n]
                 status[k_ok], status[k_err] = ("1" if ok else "0"), error
                 if ok:
@@ -318,12 +319,47 @@ class Collector:
         # a listing without presence keeps the last time this source vouched for the device
         c.executemany("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,?,?) ON CONFLICT(mac,source) DO UPDATE "
                       "SET last_seen=excluded.last_seen, last_present=COALESCE(excluded.last_present, seen.last_present)", res.seen)
+        # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
         for mac in dict.fromkeys(mac for mac, _ in res.history):
-            c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
-        c.execute("DELETE FROM events WHERE ts<?", (now - EVENT_DAYS * 86400,))
+            c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
+        # a clock that jumps ahead must not wipe the event log, however many polls it stays wrong: the prune reference
+        # moves at most a day past the stored one at the first poll of a process, then at most twice as fast as the
+        # monotonic clock (so a lag left by downtime catches up). last_poll_ts follows a wrong clock, so it is only
+        # the fallback for a database without the stored reference.
+        mono = time.monotonic()
+        if self._prune_ref is None:
+            rows = dict(c.execute("SELECT key, value FROM meta WHERE key IN ('events_prune_ts', 'last_poll_ts')").fetchall())
+            # ASCII digits only: int() rejects some str.isdigit() characters ('²') and strings past 4300 digits;
+            # 18 digits holds any real epoch second (as db.py's schema_version). A bad row falls to the next
+            ts = {k: int(v) for k, v in rows.items() if isinstance(v, str) and len(v) <= 18 and v.isascii() and v.isdigit()}
+            prune, polled = ts.get("events_prune_ts"), ts.get("last_poll_ts")
+            # a future reference is trusted (a clock behind it cannot be told from a hand-edit; documented limit)
+            last = prune if prune is not None else polled
+            base, step = (last, 86400) if last is not None else (None, 0)
+        else:
+            base, step = self._prune_ref[0], int(2 * (mono - self._prune_ref[1]))
+        ref = min(now, base + step) if base is not None else now
+        if base is not None and ref < base:
+            # the clock is behind the reference (no RTC before NTP sync): keep the reference and its monotonic start,
+            # or the wrong clock would pin it in the past and pruning would lag for years. Pruned by the clock.
+            self._prune_ref = self._prune_ref or (base, mono)
+        else:
+            self._prune_ref = (ref, mono)
+            self.db.set_meta("events_prune_ts", str(ref), c)
+        c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
 
     def _notify(self, new_devices: list[dict]) -> None:
         if self.cfg.mail_enabled:
+            if self._unmailed:
+                # a queued device may have been acked, or changed IP or hostname, since its poll: mail what is true now
+                macs = [d["mac"] for d in self._unmailed]
+                try:
+                    cur = {r["mac"]: r for r in self.db.q(f"SELECT * FROM devices WHERE mac IN ({','.join('?' * len(macs))})", tuple(macs))}
+                except sqlite3.Error as e:  # the poll is committed: mail the old snapshots rather than lose this poll's new devices
+                    log.warning("cannot refresh queued new devices before mailing: %s", e)
+                    cur = {}
+                self._unmailed = [{k: cur[d["mac"]][k] for k in d} if d["mac"] in cur else d
+                                  for d in self._unmailed if not (d["mac"] in cur and cur[d["mac"]]["acked"])]
             pending = self._unmailed + new_devices
             if pending:
                 try:
@@ -348,7 +384,8 @@ class Collector:
         raw_stats: dict[str, int] = {}
         for b in ok.values():
             for k, v in b.stats.items():
-                raw_stats[k] = raw_stats.get(k, 0) + v
+                if isinstance(v, int):  # a string stat (e.g. a strategy) is not a count
+                    raw_stats[k] = raw_stats.get(k, 0) + v
         # this poll's hostnames, read by _device_names() while the switch names its uplink ports
         self._poll_hosts = {mac: m.hostname for mac, m in merge([to_fw1(s) for s in sightings]).items()}
         more, enrich_status = self._collect([n for n in self._runs if n not in producers])
@@ -357,37 +394,54 @@ class Collector:
         now = int(time.time())
         first_run = self.db.get_meta("first_run_done", "") != "1"
         prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
-        if first_run and not sightings:
+        # only a truly first poll: during the baseline wait (S05x) devices are already stored, and an empty poll then is
+        # an ordinary one that must run the merge (devices go offline), not fail as "first poll"
+        if first_run and not sightings and not self.db.q("SELECT 1 FROM devices LIMIT 1"):
             log.warning("first poll returned no devices (%s); not taking a baseline", raw_stats)
             return self._fail("first poll returned no devices", enrich_status)
+        # S05x: a baseline taken without a producer that has never answered would mail all of its devices as new once
+        # it does. Until every enabled producer has answered, merge still runs as the first run (devices are recorded
+        # as baseline, no "new" event, no mail) but the baseline is not stored as taken. A producer that never answers
+        # holds it back for good (owner decision 2026-11-06). Not persisted: a restart before the baseline waits again
+        # this poll's answers count here, but are kept only once the write below has committed (see after the tx)
+        waiting = [n for n in producers if not self._runs[n].disabled and not self._runs[n].answered and n not in ok] if first_run else []
+        if waiting and not self._baseline_wait_logged:
+            log.warning("baseline held back until %s has answered once", ", ".join(waiting))
+            self._baseline_wait_logged = True
         batches = {n: got[n] for n in self._runs if n in got}
         # the controller role, not the type: any instance whose describe() says so (getattr: a type without roles)
+        # producers: only an instance that lists sightings can hold a lease, so a failed switch does not hold lease types
         state = MergeState(self._no_lease_since, first_run, prev_ok,
                            frozenset(n for n, conn in self._connectors.items()
-                                     if "controller" in getattr(conn.describe(), "roles", frozenset())))
+                                     if "controller" in getattr(conn.describe(), "roles", frozenset())),
+                           producers=frozenset(producers))
         with self.db.tx() as c:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             res = merge_batches(prev, batches, self.cfg, now, state)
             self._write(c, prev, res, now)
             for k, v in enrich_status.items():
                 self.db.set_meta(k, v, c)
-            self.db.set_meta("first_run_done", "1", c)
+            if not waiting:
+                self.db.set_meta("first_run_done", "1", c)
             self.db.set_meta("last_poll_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "1", c)
             self.db.set_meta("last_error", "", c)
             self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
             last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
-            if self.cfg.dhcp_backend == "kea" and "reservations" in raw_stats:
+            if "reservations" in raw_stats:  # only a Kea firewall reports them
                 last_raw += f", {raw_stats['reservations']} reservations"
             self.db.set_meta("last_raw", last_raw, c)
-            if first_run:
+            if first_run and not waiting:
                 self.db.set_meta("baseline_ts", str(now), c)
+        # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
+        for n in ok:
+            self._runs[n].answered = True
         self._notify([{k: res.rows[mac][k] for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")} for mac in res.new])
         st = res.stats
         log.info("poll ok: %d devices, %d new, %d changed, %d ms", st["devices"], st["new"], st["changed"], int((time.time() - t0) * 1000))
         return {"ok": True, "devices": st["devices"], "new": st["new"], "changed": st["changed"], "first_run": first_run}
 
-    def loop(self, stop_event) -> None:
+    def loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             try:
                 self.run_once()
@@ -395,6 +449,6 @@ class Collector:
                 log.exception("collector crashed in run_once; continuing")
                 try:
                     self._fail("internal error in collector (see logs)")
-                except Exception:
-                    pass
+                except Exception:  # usually the same database error: the status stays stale until the stale check
+                    log.exception("cannot record the failed poll")
             stop_event.wait(self.cfg.poll_seconds)

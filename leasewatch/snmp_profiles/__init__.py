@@ -12,9 +12,11 @@ with both lists empty never matches.
 from __future__ import annotations
 
 import copy
+import errno
 import functools
 import json
 import math
+import os
 import re
 import stat
 import string
@@ -38,6 +40,22 @@ LLDP_LOCAL_PORT = ("auto", "ifindex")
 
 _DIR = Path(__file__).resolve().parent
 _NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+_OID_RE = re.compile(r"^\.?[0-9]+(\.[0-9]+)*$")  # switch.py walks oids values as numeric OIDs; a name would end the walk empty
+
+
+def _q(v: object) -> str:
+    """repr() of a value from the file, cut: a name or key can be as long as the file (256 KiB)."""
+    r = repr(v)
+    return r if len(r) <= 60 else r[:57] + "..."
+
+
+_PLAIN_KEY_RE = re.compile(r"[\w-]{1,40}")
+
+
+def _plain(k: str) -> str:
+    """A section key for a message: a plain name unquoted as before, anything else quoted and cut like a value, so a key
+    cannot start a fake line, fake a second "; " problem or send terminal escapes to snmp-detect."""
+    return k if _PLAIN_KEY_RE.fullmatch(k) else _q(k)
 
 
 class ProfileError(ValueError):
@@ -59,30 +77,69 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
 
 
 MAX_FILE_BYTES = 256 * 1024  # far above any real profile; bounds what a wrong path (a log, a device node) makes us read
+MAX_DEPTH = 32  # nesting of [ and {; real profiles use 3. Checked before parsing, so nothing recurses near the limit
+
+
+def _depth(text: str) -> int:
+    """The deepest [ / { nesting in JSON text, outside strings; iterative, so any depth is safe to measure."""
+    depth = deepest = 0
+    in_str = esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif ch in "]}":
+            depth -= 1
+    return deepest
 
 
 def _read(path: Path) -> dict:
-    # checked before reading: a FIFO or device would block or never end, a huge file would be parsed in full
+    # checked before reading: a FIFO or device would block or never end, a huge file would be parsed in full.
+    # O_NONBLOCK + fstat on the open fd: a stat() of the path and then open() could be raced by a FIFO swapped in
     try:
-        st = path.stat()
+        # O_NOCTTY: a tty given by mistake must not become our controlling terminal before fstat rejects it
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except OSError as e:
+        if e.errno == errno.ENXIO:  # a UNIX socket fails here, before fstat could say what it is
+            raise ProfileError(f"snmp profile {path.name}: not a regular file") from None
+        raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):  # before open(): a directory fd cannot become a file object
+            raise ProfileError(f"snmp profile {path.name}: not a regular file")
+        if st.st_size > MAX_FILE_BYTES:
+            raise ProfileError(f"snmp profile {path.name}: larger than {MAX_FILE_BYTES // 1024} KiB")
+        with open(fd, "rb", closefd=False) as f:
+            raw = f.read(MAX_FILE_BYTES + 1)  # bounded again: the file may have grown since fstat()
     except OSError as e:
         raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
-    if not stat.S_ISREG(st.st_mode):
-        raise ProfileError(f"snmp profile {path.name}: not a regular file")
-    if st.st_size > MAX_FILE_BYTES:
-        raise ProfileError(f"snmp profile {path.name}: larger than {MAX_FILE_BYTES // 1024} KiB")
-    try:
-        with open(path, "rb") as f:
-            raw = f.read(MAX_FILE_BYTES + 1)  # bounded again: the file may have grown since stat()
-    except OSError as e:
-        raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
+    finally:
+        os.close(fd)
     if len(raw) > MAX_FILE_BYTES:
         raise ProfileError(f"snmp profile {path.name}: larger than {MAX_FILE_BYTES // 1024} KiB")
     try:
-        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
+        # utf-8-sig: editors on Windows may save a BOM, which json rejects
+        text = raw.decode("utf-8-sig")
+    except ValueError as e:  # bad encodings
+        raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
+    if _depth(text) > MAX_DEPTH:  # before json and deepcopy, which recurse once per level
+        raise ProfileError(f"snmp profile {path.name}: nested too deeply")
+    try:
+        data = json.loads(text, object_pairs_hook=_no_duplicates)
     except _DuplicateKey as e:
         raise ProfileError(f"snmp profile {path.name}: duplicate key {e.args[0][:40]!r}") from None  # a key can be megabytes long
-    except (OSError, ValueError, RecursionError) as e:  # ValueError: JSONDecodeError, bad encodings; RecursionError: deep nesting
+    except json.JSONDecodeError as e:  # the position, not e.msg's text: points the operator at the fault in their own file
+        raise ProfileError(f"snmp profile {path.name}: JSONDecodeError at line {e.lineno} column {e.colno}") from None
+    except (OSError, ValueError, RecursionError) as e:  # ValueError: an integer past Python's int digit limit; the others never seen, kept so only ProfileError leaves
         raise ProfileError(f"snmp profile {path.name}: {type(e).__name__}") from None
     if not isinstance(data, dict):
         raise ProfileError(f"snmp profile {path.name}: not a JSON object")
@@ -110,15 +167,15 @@ def _merge(parent: dict, child: dict) -> dict:
 
 def _resolve(raw: dict, seen: tuple[str, ...]) -> dict:
     if raw.get("api_version") != API_VERSION:
-        raise ProfileError(f"snmp profile {raw.get('profile')!r}: api_version {raw.get('api_version')!r}, this leasewatch reads {API_VERSION}")
+        raise ProfileError(f"snmp profile {_q(raw.get('profile'))}: api_version {_q(raw.get('api_version'))}, this leasewatch reads {API_VERSION}")
     parent = raw.get("extends")
     if parent is None:
         return copy.deepcopy(raw)
     if not isinstance(parent, str) or not _NAME_RE.match(parent):
         # a path or an object is not quoted back: only built-in names are valid here
-        raise ProfileError(f"snmp profile {raw.get('profile')!r}: extends must be a built-in profile name")
+        raise ProfileError(f"snmp profile {_q(raw.get('profile'))}: extends must be a built-in profile name")
     if parent in seen:
-        raise ProfileError(f"snmp profile {raw.get('profile')!r}: circular extends {parent!r}")
+        raise ProfileError(f"snmp profile {_q(raw.get('profile'))}: circular extends {parent!r}")
     return _merge(_resolve(_builtin_raw(parent), seen + (parent,)), raw)
 
 
@@ -149,7 +206,7 @@ def _structure_problems(p: dict, std: dict) -> list[str]:
     itself (oids included); the value checks below index these keys, so they run only when this list is empty."""
     problems = []
     # typo guard: a key standard.json does not know would be silently ignored
-    problems += [f"unknown key {key!r}" for key in p if key not in std and key != "extends" and not key.startswith("_")]
+    problems += [f"unknown key {_q(key)}" for key in p if key not in std and key != "extends" and not key.startswith("_")]
     problems += [f"missing key {key!r}" for key in std if key not in p and not key.startswith("_")]
     for sec in SECTIONS + ("oids",):
         if sec not in p:
@@ -158,10 +215,14 @@ def _structure_problems(p: dict, std: dict) -> list[str]:
             problems.append(f"{sec} must be an object")
             continue
         if sec != "oids":  # oids may add names (private tables)
-            problems += [f"unknown key {sec}.{k}" for k in p[sec] if k not in std[sec]]
+            # "_" keys are comments, as at the top level
+            problems += [f"unknown key {sec}.{_plain(k)}" for k in p[sec] if k not in std[sec] and not k.startswith("_")]
         if sec != "match":  # an empty match is "never detected"
             problems += [f"missing key {sec}.{k}" for k in std[sec] if k not in p[sec]]
     return problems
+
+
+MAX_PROBLEMS = 20
 
 
 def _validate(p: dict) -> dict:
@@ -174,8 +235,14 @@ def _validate(p: dict) -> dict:
             _value_problems(p, problems)
         except Exception:  # a shape the checks did not foresee (incl. OverflowError, RecursionError); never Python's text
             problems.append("malformed value (compare with standard.json)")
+    if len(problems) > MAX_PROBLEMS:  # one per unknown key: a file of typos would otherwise give a message larger than itself
+        problems = problems[:MAX_PROBLEMS] + [f"{len(problems) - MAX_PROBLEMS} more"]
     if problems:
-        raise ProfileError(f"snmp profile {name!r}: " + "; ".join(problems))
+        raise ProfileError(f"snmp profile {_q(name)}: " + "; ".join(problems))
+    # longest key first: short_ifname replaces in dict order, so "GigabitEthernet" before "Ten-GigabitEthernet" would
+    # leave "Ten-GE"; sorted here once (stable for equal lengths) so an operator's file need not keep that order
+    short = p["port_name"]["short"]
+    p["port_name"]["short"] = dict(sorted(short.items(), key=lambda kv: -len(kv[0])))
     return p
 
 
@@ -192,13 +259,19 @@ def _value_problems(p: dict, problems: list[str]) -> None:
     fdb, bpm, snmp, match = p["fdb"], p["bridge_port_map"], p["snmp"], p["match"]
     if not _is_int(p.get("api_version")):
         problems.append("api_version must be an integer")
-    if not all(isinstance(k, str) and isinstance(v, str) for k, v in p["oids"].items()):
+    if not all(isinstance(k, str) and isinstance(v, str) and _OID_RE.match(v)
+               for k, v in p["oids"].items() if not k.startswith("_")):  # "_" keys are comments, as in every other section
         problems.append("oids must map names to OID strings")
     short = p["port_name"]["short"]
     if not isinstance(short, dict):
         problems.append("port_name.short must be an object")
-    elif not all(isinstance(v, str) for v in short.values()):
-        problems.append("port_name.short values must be strings")
+    else:
+        if not all(isinstance(v, str) for v in short.values()):
+            problems.append("port_name.short values must be strings")
+        # independent of the value check: every problem in one message.
+        # str.replace("", x) puts x between every character of every port name
+        if "" in short:
+            problems.append("port_name.short keys must not be empty")
     if not isinstance(snmp["bulk"], bool):
         problems.append("snmp.bulk must be true or false")
     if not _is_str_list(snmp["no_bulk"]) or not _is_str_list(snmp["allow_unordered"]):
@@ -215,6 +288,8 @@ def _value_problems(p: dict, problems: list[str]) -> None:
         problems.append("fdb.context_prefix must be a string")
     if not _is_str_list(fdb["private_oids"]):
         problems.append("fdb.private_oids must be a string list")
+    elif any(o.startswith("_") for o in fdb["private_oids"]):  # "_" oids keys are comments, not checked as OIDs
+        problems.append("fdb.private_oids must not name a \"_\" comment key")
     if bpm["strategy"] not in BRIDGE_PORT_STRATEGIES:
         problems.append(f"bridge_port_map.strategy {bpm['strategy']!r}")
     if bpm["fallback"] not in ("identity", "drop"):
@@ -245,7 +320,8 @@ def _value_problems(p: dict, problems: list[str]) -> None:
             re.compile(rx)
         except (re.error, OverflowError, RecursionError):  # huge repeat counts, deep nesting; the text is not quoted
             problems.append(f"match.sysdescr_regex entry {i + 1} is not a valid regular expression")
-    if fdb["strategy"] == "cisco_per_vlan" and not (isinstance(fdb["vlan_source"], str) and fdb["vlan_source"] in p["oids"]):
+    if fdb["strategy"] == "cisco_per_vlan" and not (isinstance(fdb["vlan_source"], str) and fdb["vlan_source"] in p["oids"]
+                                                    and not fdb["vlan_source"].startswith("_")):
         problems.append(f"fdb.vlan_source {fdb['vlan_source']!r} is not a key in oids")
     if (not isinstance(fdb["keep_status"], list) or not all(_is_int(v) for v in fdb["keep_status"])
             or not isinstance(fdb["skip_vlans"], list) or not all(_is_int(v) for v in fdb["skip_vlans"])):
@@ -264,6 +340,7 @@ def load_file(path: str | Path) -> dict:
     raw = _read(Path(path))
     # seen starts empty: a file may share its name with the built-in it extends (e.g. a local "comware"); a file
     # cannot be extended, so it cannot be part of a cycle
+    # no RecursionError guard: _read's MAX_DEPTH keeps _resolve's deepcopy far from the limit
     return _validate(_resolve(raw, ()))
 
 

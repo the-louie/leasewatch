@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 log = logging.getLogger("leasewatch.db")
@@ -81,13 +82,18 @@ class Database:
         if not self.get_meta("schema_version"):
             self.set_meta("schema_version", "1")
         raw = self.get_meta("schema_version")
-        try:
+        if isinstance(raw, bytes):  # a value stored by hand as a BLOB (X'32'); the str regex below would raise on it
+            raw = raw.decode("utf-8", "replace")
+        # only the plain ASCII form this code writes: int() also takes "1_0" (10), " 2 " and non-ASCII digits, and
+        # a damaged "1_0" read as 10 would block every later step for good. The digit cap keeps int() below its
+        # 4300-digit limit, where it would raise instead of parsing; no real version comes near 18 digits
+        if re.fullmatch(r"-?[0-9]{1,18}", raw):
             version = int(raw)
-        except ValueError:  # a hand-edited or damaged value: the steps are idempotent, so re-running them is safe
+        else:  # a hand-edited or damaged value: the steps are idempotent, so re-running them is safe
             log.warning("database schema_version %r is not a number; treated as 1", raw[:40])
             version = 1
         if version < 1:  # "0" or "-1" would ask for a step 1 that does not exist; same damage as a non-number
-            log.warning("database schema_version %r is not a number; treated as 1", raw[:40])
+            log.warning("database schema_version %r is below 1; treated as 1", raw[:40])
             version = 1
         if version > SCHEMA_VERSION:  # written by a newer leasewatch: never step it down or touch its tables
             log.warning("database schema %d is newer than this version (%d); no migration", version, SCHEMA_VERSION)
@@ -106,7 +112,7 @@ class Database:
                 self.set_meta("schema_version", str(step), c)
 
     @contextmanager
-    def tx(self):
+    def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
             if self._conn.in_transaction:  # a failed COMMIT+ROLLBACK must not wedge every later transaction
                 self._conn.execute("ROLLBACK")
@@ -130,9 +136,12 @@ class Database:
         r = self.q("SELECT value FROM meta WHERE key=?", (key,))
         return r[0]["value"] if r else default
 
-    def set_meta(self, key: str, value: str, conn=None) -> None:
+    def set_meta(self, key: str, value: str, conn: sqlite3.Connection | None = None) -> None:
+        # a lone surrogate (e.g. from a JSON-escaped controller error text) would raise UnicodeEncodeError here and
+        # roll back the whole poll transaction around it, so it is stored as "?"
+        value = str(value).encode("utf-8", "replace").decode("utf-8")
         with self._lock:  # RLock: harmless inside tx(), required outside it
-            (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+            (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def all_meta(self) -> dict:
         return {r["key"]: r["value"] for r in self.q("SELECT key, value FROM meta")}
@@ -144,6 +153,13 @@ class Database:
     def device(self, mac: str) -> dict | None:
         r = self.q("SELECT * FROM devices WHERE mac=?", (mac,))
         return dict(r[0]) if r else None
+
+    def device_detail(self, mac: str) -> dict | None:
+        """The drawer's device, history, events and seen rows, or None for an unknown MAC."""
+        with self._lock:  # one hold, as stats(): the four reads must not straddle a collector write
+            d = self.device(mac)
+            return {"device": d, "history": self.history(d["mac"]), "events": self.events(d["mac"]),
+                    "seen": self.seen(d["mac"])} if d else None
 
     def seen(self, mac: str) -> list[dict]:
         return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]
@@ -169,9 +185,9 @@ class Database:
                 if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
                     sets.append("acked_at=?"); params.append(int(time.time()) if acked else None)
             if name is not None:
-                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ")[:80].strip())
+                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
             if note is not None:
-                sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000])
+                sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
             if sets:
                 params.append(mac)
                 c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))

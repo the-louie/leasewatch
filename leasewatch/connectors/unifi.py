@@ -8,12 +8,12 @@ from typing import Mapping
 
 from ..unifi import UnifiClient, WifiInfo
 from . import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin,
-               parse_bool, url_problems)
+               mask_url_host, parse_bool, url_problems)
 
 
 @dataclass
 class _UnifiCfg:
-    """The Config attributes UnifiClient reads; the password kept out of repr like Config does."""
+    """The attributes UnifiClient reads (the 1.0 Config field names); the password kept out of repr."""
     unifi_url: str
     unifi_site: str
     unifi_user: str
@@ -48,11 +48,11 @@ class UnifiConnector(SettingsMixin):
     def __init__(self, name: str, settings: Mapping[str, str], ctx: HostContext | None = None, client: object | None = None) -> None:
         self._init_settings(name, settings, ctx)
         s = self.settings
-        s["url"] = s["url"].rstrip("/")
+        s["url"] = s["url"].rstrip("/") or s["url"]  # "/" stays, so validate() calls it malformed, not missing
         verify = parse_bool(s["verify_tls"])
         # read at call time: the host (and tests) may swap the client object
-        self.client = client or UnifiClient(_UnifiCfg(s["url"], s["site"], s["user"], s["password"],  # type: ignore[arg-type]
-                                                      True if verify is None else verify, bool(parse_bool(s["proxy"]))))
+        self.client = client if client is not None else UnifiClient(_UnifiCfg(s["url"], s["site"], s["user"], s["password"],  # type: ignore[arg-type]
+                                                                                  True if verify is None else verify, bool(parse_bool(s["proxy"]))))
 
     def validate(self) -> list[str]:
         problems = self._generic_problems()
@@ -68,8 +68,8 @@ class UnifiConnector(SettingsMixin):
             self.client.clients()  # login, two reads, logout: the smallest call the classic API offers
         except ConnectorError:
             raise
-        except Exception as e:  # the client's messages never contain the URL or the password
-            raise ConnectorError(str(e) or type(e).__name__) from e
+        except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host
+            raise ConnectorError(mask_url_host(str(e) or type(e).__name__, self.settings["url"])) from e
 
     def collect(self) -> Batch:
         try:
@@ -77,8 +77,8 @@ class UnifiConnector(SettingsMixin):
             return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
         except ConnectorError:
             raise
-        except Exception as e:  # the client's messages never contain the URL or the password
-            raise ConnectorError(str(e) or type(e).__name__) from e
+        except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host
+            raise ConnectorError(mask_url_host(str(e) or type(e).__name__, self.settings["url"])) from e
 
     def close(self) -> None:
         pass  # each call logs in and out on its own opener

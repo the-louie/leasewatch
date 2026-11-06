@@ -18,7 +18,7 @@ import re
 import ssl
 import time
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, ClassVar, Iterable, Mapping, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
@@ -165,9 +165,26 @@ def make_redactor(secrets: Iterable[str]) -> Callable[[str], str]:
         return _redact_nothing
 
     def redact(text: str) -> str:
+        # mark every occurrence of every form first, then mask each covered run once: replacing one secret after
+        # another would break an overlapping one ("pass1234" + "1234word" in "pass1234word") so it no longer matches
+        covered = bytearray(len(text))
         for v in values:
-            text = text.replace(v, "***")
-        return text
+            i = text.find(v)
+            while i != -1:
+                covered[i:i + len(v)] = b"\x01" * len(v)
+                i = text.find(v, i + 1)
+        if not any(covered):
+            return text
+        out, i = [], 0
+        while i < len(text):
+            if covered[i]:
+                while i < len(text) and covered[i]:
+                    i += 1
+                out.append("***")
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
     return redact
 
 
@@ -182,6 +199,9 @@ class HostContext:
     # mac -> the device's name, else its hostname, as the host knows it (read-only); lets a switch name an unnamed
     # uplink port after the AP or switch behind it
     device_names: Callable[[], dict[str, str]] = field(default=lambda: {})
+    # the instance's TIMEOUT (a host key, so absent from settings); set per instance by build_instance, so a
+    # connector can cap its own I/O there instead of running on after the host has abandoned the collect
+    timeout: int = 60
 
 
 @runtime_checkable
@@ -218,18 +238,63 @@ def parse_bool(value: str) -> bool | None:
     return None
 
 
+def mask_url_host(text: str, url: str) -> str:
+    """`text` with the host of `url` masked as "<host>" (whole occurrences, as the switch masks its host): a TLS
+    name mismatch echoes it, and the firewall's or controller's address is internal infrastructure, not for the UI.
+    The clients' own "fw1 <path>: " / "unifi: " label is kept as is, so a host named "fw1" does not mask it."""
+    from .snmp_switch import _bounded, _forms  # imported here: snmp_switch imports this module
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return text
+    forms = _forms(host)
+    try:  # ssl and the resolver use the IDNA (punycode) name, so a TLS name mismatch echoes that spelling
+        forms |= _forms(host.encode("idna").decode("ascii"))
+    except UnicodeError:  # a label idna cannot encode (empty, too long): such a host is never connected to
+        pass
+    head, sep, tail = text.partition(": ")
+    if not sep:
+        head, tail = "", text
+    for rx in _bounded(forms):
+        tail = rx.sub("<host>", tail)
+    return head + sep + tail
+
+
+_URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f]")  # what http.client refuses in a request URL
+
+
+def url_has_credentials(url: str) -> bool:
+    """True when a "user@" or "user:pass@" may precede the host. Config.validate() and url_problems() share it."""
+    if "@" not in url:
+        return False
+    # a "#", "/" or "?" in a password that starts with digits ("u:1234/x@fw") ends the netloc before the "@",
+    # so a "user:" before the first "/?#" and a later "@" counts too; an "@" in a path, query or fragment without
+    # such a ":" does not (a ":" after the "/?#" is path data). An empty user info ("https://@fw") counts:
+    # urllib keeps the "@" in the host. The ":"s of a leading IPv6 literal ("[::1]/a@b") are not a "user:".
+    # Limitation: a user name containing "/?#" ("us/er:pw@h") is not caught, as before 1.1
+    before_at = url.split("//", 1)[-1].split("@", 1)[0]
+    if before_at.startswith("[") and "]" in before_at:
+        before_at = before_at.split("]", 1)[1]  # user info cannot start with "["
+    authority = re.split(r"[/?#]", before_at, maxsplit=1)[0]
+    return ":" in authority or authority == before_at
+
+
 def url_problems(key: str, url: str, hint: str) -> list[str]:
-    """The URL checks Config.validate() makes: a scheme, a host, and no credentials in it (they would end up in logs)."""
-    if not url.startswith(("http://", "https://")):
+    """The URL checks Config.validate() makes: a scheme, a host, and no credentials in it (they would end up in logs).
+    Also a port that is a number in 1..65535 and no control characters or spaces, which otherwise pass here and
+    only fail at the first request."""
+    if not url.lower().startswith(("http://", "https://")):  # urllib reads the scheme case-insensitively
         return [f"{key} must be a URL ({hint})"]
+    out = []
     try:
         parsed = urlparse(url)
-        if not parsed.hostname:
-            return [f"{key} is not a valid URL"]
-        netloc = parsed.netloc
-    except ValueError:  # e.g. an unclosed "["
-        return [f"{key} is not a valid URL"]
-    return [f"{key} must not contain credentials"] if "@" in netloc else []
+        if not parsed.hostname or parsed.port == 0 or _URL_BAD_CHAR_RE.search(url):
+            out.append(f"{key} is not a valid URL")
+    except ValueError:  # e.g. an unclosed "[" or a port that is not a number in 0..65535
+        out.append(f"{key} is not a valid URL")
+    if url_has_credentials(url):
+        out.append(f"{key} must not contain credentials")
+    return out
 
 
 class SettingsMixin:
@@ -253,20 +318,26 @@ class SettingsMixin:
         # declared secrets, plus anything that looks like one (a key outside describe(), a path to a secret file)
         secret = {s.key for s in self.INFO.settings if s.secret}
         hidden = lambda k: (k in secret or k.lower().endswith("_file")
-                            or any(w in k.lower() for w in ("key", "secret", "password", "token")))
+                            or any(w in k.lower() for w in ("key", "secret", "pass", "token", "community", "credential")))
         shown = {k: ("***" if hidden(k) and v else v) for k, v in self.settings.items()}
         return f"{type(self).__name__}({self.name!r}, {shown!r})"
 
 
 # --- instances: the registry of types and the configured instances built from it -------------------------------
 
-NAME_RE = re.compile(r"^[a-z0-9-]+$")
+# letters and digits only: LW_CONNECTOR__<NAME>__<KEY> must be a name a POSIX shell can export
+NAME_RE = re.compile(r"^[a-z0-9]+$")
 # keys every instance accepts besides its type's own settings; the host reads them, the connector never sees them
 HOST_SETTINGS = (
     Setting("type", required=True, help="connector type (opnsense, snmp_switch, unifi)"),
     Setting("timeout", default="60", kind="int", min=1, max=3600, help="seconds a collect may run before this poll abandons it"),
 )
 HOST_KEYS = frozenset(s.key for s in HOST_SETTINGS)
+
+
+# an integer with its leading zeros split off; "[1-9][0-9]*|0" leaves one way to split a zero run, so a long run
+# of zeros before a non-digit fails in linear time ("0*([0-9]+)" backtracks quadratically)
+_INT_RE = re.compile(r"\s*([+-]?)0*([1-9][0-9]*|0)\s*")
 
 
 def setting_problems(name: str, type_: str, settings: Iterable[Setting], values: Mapping[str, str]) -> list[str]:
@@ -278,14 +349,31 @@ def setting_problems(name: str, type_: str, settings: Iterable[Setting], values:
         if not v:
             if s.required:
                 out.append(f"{label} is required")
+            elif s.choices and s.default and s.key in values:  # absent: the connector applies the default
+                # an explicitly empty value overrides the default; with choices it would silently pick another path
+                # (an empty dhcp_backend would read ISC leases)
+                out.append(f"{label} must be one of {', '.join(s.choices)}")
         elif s.choices and v not in s.choices:
             out.append(f"{label} must be one of {', '.join(s.choices)}")
         elif s.kind == "int":
             try:
                 n = int(v)
             except ValueError:
-                out.append(f"{label} must be an integer")
-                continue
+                # more digits than int() converts (sys.int_info.str_digits_check_threshold) is still an integer.
+                # Leading zeros add no value, so it is retried without them; what is still too long is out of range
+                m = _INT_RE.fullmatch(v)
+                try:
+                    if not m:
+                        raise ValueError(v)
+                    n = int(m.group(1) + m.group(2))
+                except ValueError:
+                    if m and s.max is not None and m.group(1) != "-":
+                        out.append(f"{label} must be at most {s.max}")
+                    elif m and s.min is not None and m.group(1) == "-":
+                        out.append(f"{label} must be at least {s.min}")
+                    else:
+                        out.append(f"{label} must be an integer")
+                    continue
             if s.min is not None and n < s.min:
                 out.append(f"{label} must be at least {s.min}")
             elif s.max is not None and n > s.max:
@@ -295,7 +383,7 @@ def setting_problems(name: str, type_: str, settings: Iterable[Setting], values:
 
 @dataclass(frozen=True, repr=False)
 class InstanceSpec:
-    """One configured instance: its name ([a-z0-9-]+), its type, and its settings (lower-case keys, TYPE excluded,
+    """One configured instance: its name ([a-z0-9]+), its type, and its settings (lower-case keys, TYPE excluded,
     TIMEOUT included). The repr names the keys only, so secrets never reach a log line."""
     name: str
     type: str
@@ -306,8 +394,10 @@ class InstanceSpec:
 
     @property
     def timeout(self) -> int:
+        v = self.settings.get("timeout") or "60"
+        m = _INT_RE.fullmatch(v)  # without leading zeros, as setting_problems() reads it
         try:
-            return max(1, int(self.settings.get("timeout") or 60))
+            return max(1, int(m.group(1) + m.group(2)) if m else int(v))
         except ValueError:
             return 60  # reported by instance_problems()
 
@@ -335,16 +425,18 @@ def instances_context(specs: Iterable[InstanceSpec]) -> HostContext:
 
 
 def build_instance(spec: InstanceSpec, ctx: HostContext, client: object | None = None) -> Connector:
-    """The connector object for a spec (no I/O). Raises KeyError for an unknown type. client: an already built
-    client to wrap instead of a new one (the built-in wrappers accept it)."""
+    """The connector object for a spec (no network I/O; an snmp_switch with PROFILE_FILE reads that local file).
+    Raises KeyError for an unknown type. client: an already built client to wrap instead of a new one (the built-in
+    wrappers accept it)."""
     cls = registry()[spec.type]
     settings = {k: v for k, v in spec.settings.items() if k not in HOST_KEYS}
+    ctx = replace(ctx, timeout=spec.timeout)  # a copy: the shared context is lent to every instance
     return cls(spec.name, settings, ctx, client=client) if client is not None else cls(spec.name, settings, ctx)
 
 
 def instance_problems(spec: InstanceSpec, conn: Connector | None = None) -> list[str]:
     """Everything wrong with one instance, as "connector <name> (<type>): ..." lines: the type, the host keys,
-    unknown keys, the type's declared settings, then the instance's own validate(). No I/O."""
+    unknown keys, the type's declared settings, then the instance's own validate(). No network I/O (see build_instance)."""
     if not spec.type:
         return [f"connector {spec.name}: TYPE is required"]
     cls = registry().get(spec.type)

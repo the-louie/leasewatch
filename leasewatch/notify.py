@@ -30,7 +30,7 @@ def _send(cfg: Config, subject: str, text: str) -> None:
         # inside the try: a base without a scheme raises ValueError here, not in urlopen
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Authorization", "Basic " + base64.b64encode(f"api:{cfg.mailgun_key}".encode()).decode())
-        # urlopen honours http(s)_proxy on purpose: Mailgun is on the internet (PROXY_FOR_LAN only covers LAN clients)
+        # urlopen honours http(s)_proxy on purpose: Mailgun is on the internet (the instances' proxy setting only covers LAN clients)
         with urllib.request.urlopen(req, timeout=20) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
@@ -45,17 +45,24 @@ def _send(cfg: Config, subject: str, text: str) -> None:
     except ValueError as e:
         # no exception text: an InvalidURL/ValueError can echo the URL
         raise MailError("mailgun: bad MAILGUN_API_BASE") from e
-    log.info("mail sent: %s", subject)
 
 
 def new_devices(cfg: Config, devices: list[dict]) -> None:
     n = len(devices)
     lines = [f"{n} new device{'s' if n != 1 else ''} on the network:", ""]
     for d in devices:
-        lines.append(f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or '(no hostname)':28}  {d['vendor'] or '?'}  [{d['vlan']}{', ' + d['lease_type'] if d['lease_type'] else ''}]")
+        # empty network or lease type: leave the part out, as the "new" event does
+        tags = ", ".join(filter(None, [d["vlan"], d["lease_type"]]))
+        line = f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or '(no hostname)':28}  {d['vendor'] or '?'}" + (f"  [{tags}]" if tags else "")
+        # a CR/LF in a DHCP hostname would forge whole lines of the body (e.g. a fake review link)
+        lines.append(_CTRL.sub(" ", line))
     if cfg.public_url:
         lines += ["", f"Review and acknowledge: {cfg.public_url}/?filter=unacked"]
     first = devices[0]
     who = first["hostname"] or first["vendor"] or first["mac"]
-    subject = f"New device: {who} ({first['ip']}, {first['vlan']})" if n == 1 else f"{n} new devices on the network"
+    where = ", ".join(filter(None, [first["ip"], first["vlan"]]))
+    # no IP and no network: no "()" either
+    subject = (f"New device: {who}" + (f" ({where})" if where else "")) if n == 1 else f"{n} new devices on the network"
     _send(cfg, _CTRL.sub(" ", subject), "\n".join(lines))
+    # a count only: the subject carries hostname, IP and network, which do not belong in the logs
+    log.info("mail sent: %d new device%s", n, "s" if n != 1 else "")

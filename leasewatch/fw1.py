@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
-Only read-only endpoints are used: the DHCPv4 lease list (ISC or Kea, see DHCP_BACKEND), under Kea also the
-reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+Only read-only endpoints are used: the DHCPv4 lease list (ISC or Kea, the instance's dhcp_backend setting), under
+Kea also the reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def kea_leases(rows: list[dict]) -> list[dict]:
     numeric (0 = default/active, 1 = declined, 2 = expired-reclaimed), hostnames may be FQDNs with a trailing dot,
     and reservations are flagged "is_reserved" (newer OPNsense also sends a precomputed "lease_type", preferred).
     Kea has no online status: ARP decides. "if" is the device (vlan0110), "if_name" the identifier (opt3): the
-    identifier goes to "if" for parity with ISC, the device to "if_dev" so IGNORE_INTERFACES can still name it.
+    identifier goes to "if" for parity with ISC, the device to "if_dev" so ignore_interfaces can still name it.
     Kea always sends "state" as an int; a row with "state": null is malformed and is treated as not active."""
     out = []
     for l in rows:
@@ -161,7 +161,8 @@ class Fw1Client:
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
         # build_opener uses _NoRedirect in place of the default redirect handler. An empty ProxyHandler ignores
-        # http(s)_proxy: the firewall is on the LAN, and a proxy would see the Basic auth header (PROXY_FOR_LAN turns it on).
+        # http(s)_proxy: the firewall is on the LAN, and a proxy would see the Basic auth header (the instance's proxy
+        # setting turns it on).
         handlers = [_NoRedirect(), urllib.request.HTTPSHandler(context=self._ctx)]
         if not use_env_proxy:
             handlers.append(urllib.request.ProxyHandler({}))
@@ -171,8 +172,8 @@ class Fw1Client:
         data = json.dumps(body).encode() if body is not None else None
         try:
             req = urllib.request.Request(self.url + path, data=data, method="POST" if data is not None else "GET")
-        except ValueError as e:  # e.g. an unclosed "[" in FW1_URL; the message would only repeat the URL
-            raise Fw1Error(f"fw1 {path}: bad FW1_URL") from e
+        except ValueError as e:  # e.g. an unclosed "[" in the URL; the message would only repeat the URL
+            raise Fw1Error(f"fw1 {path}: bad URL") from e
         req.add_header("Authorization", self._auth)
         req.add_header("Accept", "application/json")
         if data is not None:
@@ -193,14 +194,14 @@ class Fw1Client:
 
     # --- raw ---------------------------------------------------------------
     def leases_raw(self) -> list[dict]:
-        # dhcp_backend comes from DHCP_BACKEND (default kea); this class's own "isc" default only applies when built directly
+        # dhcp_backend comes from the instance's dhcp_backend setting (default kea); this class's own "isc" default only applies when built directly
         path = "/api/kea/leases4/search" if self.dhcp_backend == "kea" else "/api/dhcpv4/leases/searchLease"
         r = self._call(path, {"current": 1, "rowCount": LEASE_ROWS})
         if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
             raise Fw1Error("fw1 leases: unexpected response shape")
         try:
             total = int(r.get("total") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: a JSON 1e999 or Infinity
             total = 0
         if total > len(r["rows"]):
             log.warning("lease list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)
@@ -213,7 +214,7 @@ class Fw1Client:
             raise Fw1Error("fw1 reservations: unexpected response shape")
         try:
             total = int(r.get("total") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: a JSON 1e999 or Infinity
             total = 0
         if total > len(r["rows"]):
             log.warning("reservation list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)

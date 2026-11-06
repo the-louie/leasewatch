@@ -1,7 +1,7 @@
 import os, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore
+from _env import FW1_ENV, clean_env, restore, sources, swap_client
 from leasewatch.collector import Collector, merge
 from leasewatch.config import Config
 from leasewatch.db import Database
@@ -19,10 +19,16 @@ def S(mac, ip, host="", src="dhcp", vlan="Clients", lt="dynamic", online=True, v
     return Sighting(mac=mac, ip=ip, hostname=host, vendor=vendor, vlan=vlan, iface="opt3", source=src, lease_type=lt if src == "dhcp" else "", online=online)
 
 
+def cfg_with(*names):
+    """Config with the instances "switch"/"unifi" (in that order after fw1) configured; the test swaps in their fakes."""
+    os.environ.update(sources(*names))  # the test's tearDown restores the environment
+    return Config()
+
+
 class CollectorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
     def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
@@ -66,7 +72,7 @@ class CollectorTests(unittest.TestCase):
 class CollectorRegressionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
     def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
@@ -103,7 +109,7 @@ class CollectorRegressionTests(unittest.TestCase):
 class FixRegressionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
     def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
@@ -112,10 +118,10 @@ class FixRegressionTests(unittest.TestCase):
         from leasewatch.unifi import WifiInfo
         from leasewatch.switch import build_snapshot
         mac = "aa:bb:cc:dd:ee:01"
-        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        col = Collector(cfg_with("switch", "unifi"), self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
         wifi = {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz")}
-        col._unifi = type("U", (), {"clients": lambda self: wifi})()
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.170.187.204.221.238.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: wifi})())
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([("1.170.187.204.221.238.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})())
         col.run_once(); d = self.db.device(mac)
         self.assertEqual((d["link"], d["wifi_ssid"]), ("wifi", "HomeNet"))
         wifi[mac] = WifiInfo(wired=True, alias="laptop")
@@ -124,11 +130,11 @@ class FixRegressionTests(unittest.TestCase):
 
     def test_bad_log_level_falls_back_to_info(self):
         import subprocess
-        env = dict(os.environ, LOG_LEVEL="verbose", FW1_URL="", PYTHONPATH=os.path.join(os.path.dirname(__file__), ".."))
+        env = dict(os.environ, LOG_LEVEL="verbose", LW_CONNECTOR__FW1__URL="", PYTHONPATH=os.path.join(os.path.dirname(__file__), ".."))
         out = subprocess.run([sys.executable, "-m", "leasewatch"], env=env, capture_output=True, text=True, timeout=30)
         self.assertNotIn("Traceback", out.stderr)
         self.assertIn("not a log level", out.stderr)
-        self.assertEqual(out.returncode, 2)  # stops at the (deliberately) missing FW1_URL, not at the log level
+        self.assertEqual(out.returncode, 2)  # stops at the (deliberately) empty firewall URL, not at the log level
 
     def test_dhcp_device_leaving_arp_keeps_online_during_grace(self):
         mac = "aa:bb:cc:dd:ee:01"
@@ -142,22 +148,24 @@ class FixRegressionTests(unittest.TestCase):
         from leasewatch.unifi import WifiInfo
         from leasewatch.switch import build_snapshot
         mac = "aa:bb:cc:dd:ee:01"
-        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        col = Collector(cfg_with("switch", "unifi"), self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
         wifi = {}
-        col._unifi = type("U", (), {"clients": lambda self: wifi})()
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.170.187.204.221.238.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: wifi})())
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([("1.170.187.204.221.238.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})())
         col.run_once(); self.assertEqual((self.db.device(mac)["sw_port"], self.db.device(mac)["link"]), ("GE1/0/5", "wired"))
         wifi[mac] = WifiInfo(ssid="HomeNet", ap="ap-hall")
         col.run_once(); d = self.db.device(mac)
         self.assertEqual((d["sw_port"], d["sw_via"], d["link"], d["wifi_ssid"]), ("", "", "wifi", "HomeNet"))
 
     def test_config_validation(self):
-        for env, msg in [({"FW1_URL": "httpfoo"}, "FW1_URL must be set"), ({"NEW_DAYS": "0"}, "NEW_DAYS"), ({"ONLINE_GRACE_MINUTES": "-1"}, "ONLINE_GRACE"),
-                         ({"PUBLIC_URL": "leases.example"}, "PUBLIC_URL"), ({"SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "a", "SNMP_PRIV_KEY": "b", "SNMP_AUTH": "MD5"}, "SNMP_AUTH")]:
-            os.environ.update({"FW1_URL": "https://fw"}); os.environ.update(env)
+        sw = sources("switch")
+        for env, msg in [({"LW_CONNECTOR__FW1__URL": "httpfoo"}, "connector fw1 (opnsense): url must be a URL"), ({"NEW_DAYS": "0"}, "NEW_DAYS"),
+                         ({"ONLINE_GRACE_MINUTES": "-1"}, "ONLINE_GRACE"), ({"PUBLIC_URL": "leases.example"}, "PUBLIC_URL"),
+                         ({**sw, "LW_CONNECTOR__SWITCH__AUTH": "MD5"}, "connector switch (snmp_switch): AUTH must be one of SHA, SHA256")]:
+            os.environ.update({"LW_CONNECTOR__FW1__URL": "https://fw"}); os.environ.update(env)
             self.assertTrue(any(msg in p for p in Config().validate()), (env, Config().validate()))
             for k in env: os.environ.pop(k)
-        os.environ.update({"FW1_URL": "https://fw", "SNMP_AUTH": "MD5"})  # SNMP off: its auth setting is not checked
+            os.environ.update(FW1_ENV)
         self.assertEqual(Config().validate(), [])
 
     def test_host_allowed(self):
@@ -187,14 +195,14 @@ class FixRegressionTests(unittest.TestCase):
         self.assertEqual(notify._send.__name__, "_send")
 
     def test_dhcp_backend_is_validated(self):
-        os.environ["DHCP_BACKEND"] = "dnsmasq"
-        self.assertIn("DHCP_BACKEND must be isc or kea", Config().validate())
+        os.environ["LW_CONNECTOR__FW1__DHCP_BACKEND"] = "dnsmasq"
+        self.assertIn("connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea", Config().validate())
 
 
 class ReviewFixTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
     def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
@@ -220,10 +228,10 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch.unifi import WifiInfo
         from leasewatch.switch import build_snapshot
         mac = "02:00:00:00:00:01"
-        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        col = Collector(cfg_with("switch", "unifi"), self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
         wifi = {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz", alias="laptop")}
-        col._unifi = type("U", (), {"clients": lambda self: wifi})()
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: wifi})())
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})())
         col.run_once(); d = self.db.device(mac)
         self.assertEqual((d["link"], d["wifi_ssid"], d["sw_port"]), ("wifi", "HomeNet", ""))
         wifi.clear()  # UniFi answers, but no longer lists the device
@@ -236,11 +244,11 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch.switch import build_snapshot
         mac = "02:00:00:00:00:01"
         c = FakeClient([S(mac, "10.0.0.5", src="arp"), S("02:00:00:00:00:09", "10.0.0.9", src="arp")])
-        col = Collector(self.cfg, self.db, c)
+        col = Collector(cfg_with("switch", "unifi"), self.db, c)
         wifi = {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz")}
-        col._unifi = type("U", (), {"clients": lambda self: wifi})()
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: wifi})())
         # the FDB keeps the phone on port 5, the AP uplink, after it has left
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})())
         col.run_once()
         wifi.clear(); c.sightings_data = [S("02:00:00:00:00:09", "10.0.0.9", src="arp")]  # gone from ARP and UniFi
         col.run_once(); d = self.db.device(mac)
@@ -250,15 +258,15 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch.unifi import WifiInfo
         from leasewatch.switch import build_snapshot
         mac = "02:00:00:00:00:01"
-        col = Collector(self.cfg, self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
+        col = Collector(cfg_with("switch", "unifi"), self.db, FakeClient([S(mac, "10.0.0.5", src="arp")]))
         state = {"down": False}
         def clients(_self):
             if state["down"]:
                 raise TimeoutError()
             return {mac: WifiInfo(ssid="HomeNet", ap="ap-hall", signal=-50, radio="5 GHz")}
-        col._unifi = type("U", (), {"clients": clients})()
+        swap_client(col, "unifi", type("U", (), {"clients": clients})())
         # port 5 is the AP uplink: the FDB lists the Wi-Fi device there
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})()
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([("1.2.0.0.0.0.1", 5)], [("5", 5)], [("5", "GigabitEthernet1/0/5")], [])})())
         col.run_once()
         state["down"] = True
         col.run_once(); d = self.db.device(mac)
@@ -271,9 +279,9 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch.connectors.unifi import UnifiConnector
         from leasewatch.switch import build_snapshot
         from leasewatch import collector as collector_mod
-        col = Collector(self.cfg, self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5", src="arp")]))
-        col._unifi = type("U", (), {"clients": lambda self: {}})()
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})()
+        col = Collector(cfg_with("switch", "unifi"), self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5", src="arp")]))
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: {}})())
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})())
         for sw_roles, uf_roles, want in ((frozenset(), frozenset({"controller"}), {"unifi"}),
                                          (frozenset({"controller"}), frozenset(), {"switch"})):
             with self.subTest(want=want), \
@@ -287,16 +295,16 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch.switch import build_snapshot
         c = FakeClient([S("02:00:00:00:00:01", "10.0.0.5", src="arp")])
         c.sightings = lambda ignore=(): ([S("02:00:00:00:00:01", "10.0.0.5", src="arp")], {})
-        col = Collector(self.cfg, self.db, c)
-        col._unifi = type("U", (), {"clients": lambda self: {}})()
-        col._switch = type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})()
+        col = Collector(cfg_with("switch", "unifi"), self.db, c)
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: {}})())
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: build_snapshot([], [], [], [])})())
         self.assertTrue(col.run_once()["ok"])
         self.assertEqual((self.db.get_meta("last_raw"), self.db.get_meta("switch_macs"), self.db.get_meta("unifi_clients")),
                          ("0 leases, 0 arp", "0", "0"))
 
     def test_enrich_error_names_a_bare_exception(self):
-        col = Collector(self.cfg, self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5")]))
-        col._switch = type("W", (), {"snapshot": lambda self: (_ for _ in ()).throw(TimeoutError())})()
+        col = Collector(cfg_with("switch"), self.db, FakeClient([S("02:00:00:00:00:01", "10.0.0.5")]))
+        swap_client(col, "switch", type("W", (), {"snapshot": lambda self: (_ for _ in ()).throw(TimeoutError())})())
         col.run_once()
         self.assertEqual(self.db.get_meta("switch_error"), "TimeoutError")
 
@@ -377,7 +385,7 @@ class LeaseTypeModeTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         os.environ.pop("LEASE_TYPE_MODE", None)
 
     def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
@@ -532,7 +540,7 @@ class SchemaVersionTests(unittest.TestCase):
                 with self.assertLogs("leasewatch.db", "WARNING") as logs:
                     db = Database(self.path)  # crashed with KeyError: VERSION_STEPS has no step 1 or 0
                 try:
-                    self.assertIn("not a number; treated as 1", logs.output[0])
+                    self.assertIn("below 1; treated as 1", logs.output[0])
                     self.assertEqual(db.get_meta("schema_version"), "2")
                     self.assertEqual(db.seen("02:00:00:00:00:01"), [])
                 finally:
@@ -565,7 +573,7 @@ class SchemaVersionTests(unittest.TestCase):
             db._conn.close()
 
     def test_seen_rows_of_unconfigured_instances_are_pruned_at_startup(self):
-        env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         try:
             cfg = Config(); db = Database(cfg.db_path)
             try:
@@ -590,7 +598,7 @@ class SchemaVersionTests(unittest.TestCase):
             restore(env)
 
     def test_seen_upsert_keeps_last_present_on_a_listing_without_presence(self):
-        env = clean_env({"FW1_KEY": "k", "FW1_SECRET": "s", "DATA_DIR": self.tmp.name})
+        env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
         try:
             cfg = Config(); db = Database(cfg.db_path)
             try:

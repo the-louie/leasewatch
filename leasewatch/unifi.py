@@ -13,9 +13,12 @@ import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from .config import Config
 from .fw1 import MAX_BODY, _NoRedirect, norm_mac
+
+if TYPE_CHECKING:  # only for the annotation: connectors.unifi imports this module
+    from .connectors.unifi import _UnifiCfg
 
 log = logging.getLogger("leasewatch.unifi")
 
@@ -46,24 +49,32 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
             continue
         wired = bool(c.get("is_wired"))
         sig = c.get("signal")  # dBm; "rssi" is an SNR-like positive number, not a usable fallback
+        # parsed as the merge's _int does ("-61.5", a Unicode minus), so the merge never sees a value it would read
+        # differently; a bool is no signal (int(True) would be 1 dBm)
         try:
-            sig = int(sig) if sig is not None else None
-        except (TypeError, ValueError):
+            sig = None if sig is None or isinstance(sig, bool) else int(float(str(sig).strip().replace("\u2212", "-")))
+        except (TypeError, ValueError, OverflowError):
             sig = None
         radio = str(c.get("radio") or "")
+        # isdigit() is also true for "²" and int() refuses over 4300 digits: an odd value drops this one field,
+        # it must not fail the whole poll
+        try:
+            channel = int(c["channel"]) if str(c.get("channel", "")).isdigit() else None
+        except ValueError:
+            channel = None
         out[mac] = WifiInfo(
             ssid="" if wired else str(c.get("essid") or ""),
             ap="" if wired else ap_names.get(norm_mac(c.get("ap_mac", "")), ""),
             signal=None if wired else sig,
             radio="" if wired else RADIO_NAMES.get(radio, radio),
-            channel=None if wired else (int(c["channel"]) if str(c.get("channel", "")).isdigit() else None),
+            channel=None if wired else channel,
             wired=wired, alias=str(c.get("name") or ""),
         )
     return out
 
 
 class UnifiClient:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: _UnifiCfg):
         self.cfg = cfg
         self._ctx = ssl.create_default_context()
         if not cfg.unifi_verify_tls:
@@ -74,7 +85,7 @@ class UnifiClient:
         cj = http.cookiejar.CookieJar()
         # no redirects: a 3xx on /api/login would carry the password to wherever it points
         handlers = [urllib.request.HTTPCookieProcessor(cj), urllib.request.HTTPSHandler(context=self._ctx), _NoRedirect()]
-        if not self.cfg.lan_proxy:  # the controller is on the LAN: ignore http(s)_proxy unless PROXY_FOR_LAN is set
+        if not self.cfg.lan_proxy:  # the controller is on the LAN: ignore http(s)_proxy unless the instance's proxy setting is set
             handlers.append(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener(*handlers)
 
@@ -111,7 +122,7 @@ class UnifiClient:
         except (urllib.error.URLError, TimeoutError, ssl.SSLError, json.JSONDecodeError, OSError) as e:
             raise RuntimeError(f"unifi: {e}") from e
         except (TypeError, AttributeError, ValueError, OverflowError, RecursionError, http.client.HTTPException) as e:
-            # no exception text: an InvalidURL/ValueError can echo UNIFI_URL, credentials included
+            # no exception text: an InvalidURL/ValueError can echo the URL, credentials included
             raise RuntimeError("unifi: unexpected response") from e
         finally:
             try:

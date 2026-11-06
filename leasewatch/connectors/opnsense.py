@@ -9,7 +9,7 @@ from typing import Mapping
 from ..fw1 import Fw1Client, Fw1Error
 from ..fw1 import Sighting as Fw1Sighting
 from . import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin, Sighting,
-               parse_bool, url_problems)
+               mask_url_host, parse_bool, url_problems)
 
 
 def to_sighting(s: Fw1Sighting, source: str, observed_at: int) -> Sighting:
@@ -40,9 +40,9 @@ class OpnsenseConnector(SettingsMixin):
         verify = parse_bool(self.settings["verify_tls"])
         proxy = parse_bool(self.settings["proxy"])
         # building the client is no I/O (an SSL context and an opener); read at call time so the host can swap it
-        self.client = client or Fw1Client(self.settings["url"], self.settings["key"], self.settings["secret"],
-                                          True if verify is None else verify, dhcp_backend=self.settings["dhcp_backend"],
-                                          use_env_proxy=bool(proxy))
+        self.client = client if client is not None else Fw1Client(self.settings["url"], self.settings["key"], self.settings["secret"],
+                                                                  True if verify is None else verify, dhcp_backend=self.settings["dhcp_backend"],
+                                                                  use_env_proxy=bool(proxy))
 
     def validate(self) -> list[str]:
         problems = self._generic_problems()
@@ -57,13 +57,13 @@ class OpnsenseConnector(SettingsMixin):
         try:
             self.client.arp_raw()
         except Fw1Error as e:
-            raise ConnectorError(str(e)) from e
+            raise ConnectorError(mask_url_host(str(e), self.settings["url"])) from e
 
     def collect(self) -> Batch:
         try:
             sightings, stats = self.client.sightings(self.ignore_interfaces)
         except Fw1Error as e:
-            raise ConnectorError(str(e)) from e
+            raise ConnectorError(mask_url_host(str(e), self.settings["url"])) from e
         now = self.ctx.now()
         return Batch(sightings=[to_sighting(s, self.name, now) for s in sightings], stats=dict(stats))
 

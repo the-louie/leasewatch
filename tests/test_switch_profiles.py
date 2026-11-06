@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore
+from _env import clean_env, restore, sources
 from leasewatch import snmp_profiles, switch
 from leasewatch.__main__ import main
 from leasewatch.snmp_profiles import ProfileError
@@ -807,7 +807,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("environment variable UNSET_X (from --auth-key-env) is not set", out)
 
     def test_snmp_detect_by_instance_uses_its_settings(self):
-        os.environ.update({"SNMP_HOST": "10.0.0.3", "SNMP_AUTH_KEY": "test-auth", "SNMP_PRIV_KEY": "test-priv", "FW1_URL": "https://fw1.example.lan"})
+        os.environ.update({**sources("switch"), "LW_CONNECTOR__SWITCH__HOST": "10.0.0.3",
+                           "LW_CONNECTOR__SWITCH__AUTH_KEY": "test-auth", "LW_CONNECTOR__SWITCH__PRIV_KEY": "test-priv"})
         with FakePysnmp(FakeWalker("cisco_ios")) as fake:
             rc, out = cli("snmp-detect", "switch")
             self.assertEqual(rc, 0, out)

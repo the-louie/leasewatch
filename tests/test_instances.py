@@ -13,12 +13,11 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
+from _env import clean_env, restore, sources, swap_client  # noqa: E402
 from leasewatch.collector import MAX_BACKOFF, SKIPPED, Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, InstanceSpec,  # noqa: E402
                                    Setting, SettingsMixin, Sighting, registry)
-from leasewatch.connectors.legacy import fw1_settings, legacy_specs  # noqa: E402
 from leasewatch import snmp_profiles  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Fw1Error  # noqa: E402
@@ -106,10 +105,10 @@ class Base(unittest.TestCase):
 
 class ParseTests(Base):
     def test_names_order_and_delimiter(self):
-        cfg = self.cfg({"LW_CONNECTORS": " fw1, sw-rack ,unifi", **FW1, "LW_CONNECTOR__SW-RACK__TYPE": "SNMP_SWITCH",
-                        "LW_CONNECTOR__SW-RACK__HOST": " 10.0.0.2 ", "LW_CONNECTOR__SW-RACK__AUTH_KEY": "a" * 8,
+        cfg = self.cfg({"LW_CONNECTORS": " fw1, swrack ,unifi", **FW1, "LW_CONNECTOR__SWRACK__TYPE": "SNMP_SWITCH",
+                        "LW_CONNECTOR__SWRACK__HOST": " 10.0.0.2 ", "LW_CONNECTOR__SWRACK__AUTH_KEY": "a" * 8,
                         "LW_CONNECTOR__UNIFI__TYPE": "unifi", "LW_CONNECTOR__OTHER__TYPE": "unifi"})
-        self.assertEqual([(s.name, s.type) for s in cfg.instances], [("fw1", "opnsense"), ("sw-rack", "snmp_switch"), ("unifi", "unifi")])
+        self.assertEqual([(s.name, s.type) for s in cfg.instances], [("fw1", "opnsense"), ("swrack", "snmp_switch"), ("unifi", "unifi")])
         self.assertEqual(cfg.instances[1].settings, {"host": "10.0.0.2", "auth_key": "a" * 8})
         self.assertEqual(cfg.instances[0].settings, {"url": "https://fw1.example.lan", "key": "fw1-key", "secret": "fw1-secret"})
 
@@ -146,9 +145,9 @@ class ParseTests(Base):
 
     def test_settings_for_unlisted_instance_or_case_twins(self):
         p = self.cfg({"LW_CONNECTORS": "fw1", **FW1, "LW_CONNECTOR__FW2__URL": "https://fw2.example.lan",
-                      "LW_CONNECTOR__FW2__TYPE": "opnsense", "LW_CONNECTOR__SW-A__HOST": "10.0.0.2"}).validate()
+                      "LW_CONNECTOR__FW2__TYPE": "opnsense", "LW_CONNECTOR__SWA__HOST": "10.0.0.2"}).validate()
         self.assertEqual(p, ["LW_CONNECTOR__FW2__TYPE set but fw2 is not in LW_CONNECTORS",
-                             "LW_CONNECTOR__SW-A__HOST set but sw-a is not in LW_CONNECTORS"])
+                             "LW_CONNECTOR__SWA__HOST set but swa is not in LW_CONNECTORS"])
         p = self.cfg({"LW_CONNECTORS": "fw1", **FW1, "LW_CONNECTOR__fw1__key": "sekret-other"}).validate()
         self.assertEqual(p, ["LW_CONNECTOR__FW1__KEY and LW_CONNECTOR__fw1__key differ only in case"])
 
@@ -157,74 +156,27 @@ class ParseTests(Base):
         p = self.cfg({**FW1, "LW_CONNECTORS": "fw1,x,y,Bad_Name,fw1", "LW_CONNECTOR__X__TYPE": "dnsmasq"}).validate()
         self.assertIn("connector x: unknown type 'dnsmasq' (known: fake, fakefw, opnsense, snmp_switch, unifi)", p)
         self.assertIn("connector y: TYPE is required", p)
-        self.assertIn("LW_CONNECTORS: 'Bad_Name' is not a valid instance name (a-z, 0-9 and -)", p)
+        self.assertIn("LW_CONNECTORS: 'Bad_Name' is not a valid instance name (only a-z and 0-9)", p)
         self.assertIn("LW_CONNECTORS: fw1 is listed twice", p)
-
-    def test_legacy_mapping_unchanged(self):
-        legacy = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s", "DHCP_BACKEND": "isc",
-                  "FW1_VERIFY_TLS": "0", "IGNORE_INTERFACES": "wan,opt6", "PROXY_FOR_LAN": "1",
-                  "SNMP_HOST": "10.0.0.2", "SNMP_NAME": "sw-rack", "SNMP_AUTH": "sha256", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8,
-                  "UNIFI_URL": "https://unifi.example.lan/", "UNIFI_USER": "ro", "UNIFI_PASSWORD": "pw", "UNIFI_SITE": "home"}
-        cfg = self.cfg(legacy)
-        self.assertIsNone(cfg.connector_specs)
-        expected = [
-            InstanceSpec("fw1", "opnsense", {"url": "https://fw1.example.lan", "key": "k", "secret": "s", "verify_tls": "0",
-                                             "dhcp_backend": "isc", "ignore_interfaces": "wan,opt6", "proxy": "1"}),
-            InstanceSpec("switch", "snmp_switch", {"host": "10.0.0.2", "name": "sw-rack", "user": "leasewatch", "auth": "SHA256",
-                                                   "auth_key": "a" * 8, "priv_key": "p" * 8}),
-            InstanceSpec("unifi", "unifi", {"url": "https://unifi.example.lan", "site": "home", "user": "ro", "password": "pw",
-                                            "verify_tls": "1", "proxy": "1"}),
-        ]
-        self.assertEqual(cfg.instances, expected)
-        self.assertEqual(legacy_specs(cfg), expected)
-        # the same instance written in the new form is the same spec
-        new = self.cfg({"LW_CONNECTORS": "fw1", "LW_CONNECTOR__FW1__TYPE": "opnsense",
-                        **{f"LW_CONNECTOR__FW1__{k.upper()}": v for k, v in fw1_settings(cfg).items()}})
-        self.assertEqual(new.instances, expected[:1])
-        # only fw1 without the optional sources; LW_CONNECTORS="" counts as unset
-        self.assertEqual([s.name for s in self.cfg({"FW1_KEY": "k", "LW_CONNECTORS": ""}).instances], ["fw1"])
-
-
-    def test_legacy_snmp_profile_variables(self):
-        snmp = {"FW1_URL": "https://fw1.example.lan", "FW1_KEY": "k", "FW1_SECRET": "s", "SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "a" * 8, "SNMP_PRIV_KEY": "p" * 8}
-        path = os.path.join(self.tmp.name, "mine.json")
-        with open(path, "w") as f:
-            json.dump({"profile": "mine", "api_version": 1, "extends": "standard"}, f)
-        cfg = self.cfg({**snmp, "SNMP_PROFILE": "cisco_ios", "SNMP_PROFILE_FILE": path, "SNMP_MIN_MACS": "4"})
-        sw = next(s for s in cfg.instances if s.name == "switch")
-        self.assertEqual((sw.settings["profile"], sw.settings["profile_file"], sw.settings["min_macs"]), ("cisco_ios", path, "4"))
-        # unset: not in the spec, so the wrapper's defaults (detection, the profile's min_macs) apply
-        sw = next(s for s in self.cfg(snmp).instances if s.name == "switch")
-        self.assertFalse({"profile", "profile_file", "min_macs"} & set(sw.settings))
-        # wrong values are reported at start under the variable names the operator set
-        p = self.cfg({**snmp, "SNMP_PROFILE": "nope", "SNMP_MIN_MACS": "0"}).validate()
-        self.assertIn("SNMP_PROFILE must be one of " + ", ".join(snmp_profiles.BUILTIN), p)
-        self.assertIn("SNMP_MIN_MACS must be an integer >= 1", p)
-        p = self.cfg({**snmp, "SNMP_PROFILE_FILE": os.path.join(self.tmp.name, "missing.json")}).validate()
-        self.assertEqual(p, ["SNMP_PROFILE_FILE cannot be read"])
-        self.assertEqual(self.cfg({**snmp, "SNMP_PROFILE_FILE": path, "SNMP_MIN_MACS": "4"}).validate(), [])
 
 
 class ValidateTests(Base):
     def test_messages(self):
-        p = self.cfg({"LW_CONNECTORS": "fw1,sw-rack,x", **FW1, "LW_CONNECTOR__FW1__URL": "ftp://fw1.example.lan",
+        p = self.cfg({"LW_CONNECTORS": "fw1,swrack,x", **FW1, "LW_CONNECTOR__FW1__URL": "ftp://fw1.example.lan",
                       "LW_CONNECTOR__FW1__DHCP_BACKEND": "dnsmasq", "LW_CONNECTOR__FW1__TIMEOUT": "0",
-                      "LW_CONNECTOR__SW-RACK__TYPE": "snmp_switch", "LW_CONNECTOR__SW-RACK__AUTH_KEY": "sekret-a",
-                      "LW_CONNECTOR__SW-RACK__PRIV_KEY": "sekret-p",
+                      "LW_CONNECTOR__SWRACK__TYPE": "snmp_switch", "LW_CONNECTOR__SWRACK__AUTH_KEY": "sekret-a",
+                      "LW_CONNECTOR__SWRACK__PRIV_KEY": "sekret-p",
                       "LW_CONNECTOR__X__TYPE": "fake", "LW_CONNECTOR__X__PORT": "70000", "LW_CONNECTOR__X__TIMEOUT": "abc",
                       "LW_CONNECTOR__X__TOKEN": "sekret-t"}).validate()
         for msg in ("connector fw1 (opnsense): TIMEOUT must be at least 1",
                     "connector fw1 (opnsense): DHCP_BACKEND must be one of isc, kea",
                     "connector fw1 (opnsense): url must be a URL (https://<opnsense>)",
-                    "connector sw-rack (snmp_switch): HOST is required",
+                    "connector swrack (snmp_switch): HOST is required",
                     "connector x (fake): TIMEOUT must be an integer",
                     "connector x (fake): PORT must be at most 65535"):
             self.assertIn(msg, p)
         self.assertEqual(len(p), len(set(p)), p)  # the generic check and validate() report a problem once
         self.assertNotIn("sekret", "\n".join(p))
-
-    def test_legacy_checks_do_not_apply(self):
-        self.assertEqual(self.cfg({"LW_CONNECTORS": "fw1", **FW1, "SNMP_HOST": "10.0.0.2", "DHCP_BACKEND": "dnsmasq"}).validate(), [])
 
     def test_one_sighting_producer_required(self):
         p = self.cfg({"LW_CONNECTORS": "x", "LW_CONNECTOR__X__TYPE": "fake"}).validate()
@@ -360,7 +312,7 @@ class ThreadTests(Base):
                 self.assertNotIn(f, out)
 
     def test_short_secret_is_not_masked(self):
-        """A one-letter secret (FW1_SECRET=s in tests) must not mangle unrelated text; a 4-character one is masked."""
+        """A one-letter secret (LW_CONNECTOR__FW1__SECRET=s in tests) must not mangle unrelated text; a 4-character one is masked."""
         from leasewatch.connectors import make_redactor
         self.assertEqual(make_redactor(["s"])("snmp timeout"), "snmp timeout")
         self.assertEqual(make_redactor(["s", "abcd"])("snmp abcd timeout"), "snmp *** timeout")
@@ -417,8 +369,8 @@ class ThreadTests(Base):
 
 class StatusTests(Base):
     def test_meta_keys_and_legacy_aliases(self):
-        col, db = self.collector({"FW1_KEY": "k", "FW1_SECRET": "s"})
-        col._unifi = type("U", (), {"clients": lambda self: {}})()
+        col, db = self.collector(sources("unifi"))
+        swap_client(col, "unifi", type("U", (), {"clients": lambda self: {}})())
         col.run_once()
         m = db.all_meta()
         for name, typ, count in (("fw1", "opnsense", "1"), ("unifi", "unifi", "0")):
