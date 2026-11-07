@@ -429,6 +429,7 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
     partial = {n for n, b in ok.items() if b.stats.get("dropped", 0) > 0}
     ctrl_ok = any(n in ok and n not in partial for n in controllers)
     ctrl_failed = any(n not in ok or n in partial for n in controllers)
+    new = set(res.new)  # a device new this poll already has its "new" event: joining Wi-Fi is no change of its own
     for mac, row in rows.items():
         cur = dict(row)
         upd: dict = {}  # later keys win, as the rightmost assignment of a repeated column in an SQL UPDATE does
@@ -461,15 +462,20 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 upd.update(sw_port=sw.port, sw_via=sw.via)
             upd["loc_source"] = sw.source
         if on_wifi:
-            if w.ssid and (w.ssid != cur["wifi_ssid"] or w.ap != cur["wifi_ap"]):
+            # B-13 (owner decision): only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
+            if w.ssid and w.ssid != cur["wifi_ssid"]:
                 if cur["wifi_ssid"]:
-                    res.events.append((mac, "wifi", f"{cur['wifi_ssid']} @ {cur['wifi_ap'] or '?'} -> {w.ssid} @ {w.ap or '?'}"))
-            # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next roam is logged
+                    res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> {w.ssid}"))
+                elif mac not in new:
+                    res.events.append((mac, "wifi", f"- -> {w.ssid}"))
+            # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next change is logged
             upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
                        loc_source=w.source)
             if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale
                 upd.update(sw_port="", sw_via="")
         elif w is not None:  # the controller says wired now: drop the old Wi-Fi details
+            if cur["wifi_ssid"]:
+                res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> wired"))
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
             if not held:  # the failed holder switch keeps the device: taking loc_source would unlock a port move next poll
                 upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
@@ -479,6 +485,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         if ctrl_ok and not ctrl_failed and on_wire and (cur["wifi_ssid"] or cur["link"] == "wifi") and mac not in wifi:
             # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
             # branch above already recorded its port, so a cable is shown in this same poll.
+            if cur["wifi_ssid"]:
+                res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> off Wi-Fi"))
             upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if sw else "")
             upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
         # on the wire, as for the port above: a device only in grace would be called wired on a stale FDB entry

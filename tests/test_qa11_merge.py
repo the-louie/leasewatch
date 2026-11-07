@@ -188,7 +188,7 @@ class Attachments(Base):
         res = self.merge(prev, {"fw1": Batch(sightings=[sight()]), "swA": Batch(attachments=[swp(A, "GE1/0/14", "swA")])})
         self.assertEqual(res.events, [])
 
-    def test_R37_empty_ssid_keeps_the_stored_ssid_and_the_next_roam_is_logged(self):
+    def test_R37_empty_ssid_keeps_the_stored_ssid_and_the_next_ssid_change_is_logged(self):
         prev = row(A, link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall", loc_source="unifi")
         res = self.merge([prev], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi(ssid="")])},
                          controllers=CTRL)
@@ -196,7 +196,7 @@ class Attachments(Base):
         res = self.merge([res.rows[A]], {"fw1": Batch(sightings=[sight()]),
                                          "unifi": Batch(attachments=[wifi(ssid="GuestNet", ap="ap-office")])},
                          controllers=CTRL)
-        self.assertEqual(res.events, [(A, "wifi", "HomeNet @ ap-hall -> GuestNet @ ap-office")])
+        self.assertEqual(res.events, [(A, "wifi", "HomeNet -> GuestNet")])
 
     def test_R38_device_in_grace_gets_no_wired_link_from_the_fdb(self):
         prev = [row(A, lease_type="dynamic")]
@@ -385,6 +385,54 @@ class Round3(Base):
         r = self.merge([p1.rows[A]], {"fw1": Batch(sightings=[]), "unifi": Batch(attachments=[])},
                        controllers=CTRL).rows.get(A, p1.rows[A])  # not in rows: the stored row is not touched
         self.assertEqual((r["link"], r["wifi_ap"]), ("wifi", "ap-hall"))
+
+
+class WifiEvents(Base):
+    """B-13: a wifi event only for an SSID change or a start/stop of Wi-Fi; an AP roam is silent."""
+    ON = dict(link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall", wifi_signal=-50, wifi_radio="5 GHz", loc_source="unifi")
+
+    def test_T07a_roam_on_the_same_ssid_writes_no_event_and_updates_the_row(self):
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]),
+                                               "unifi": Batch(attachments=[wifi(ap="ap-attic", signal=-70, radio="2.4 GHz")])},
+                         controllers=CTRL)
+        self.assertEqual(res.events, [])
+        self.assertEqual(res.history, [])
+        r = res.rows[A]
+        self.assertEqual((r["wifi_ssid"], r["wifi_ap"], r["wifi_signal"], r["wifi_radio"]), ("HomeNet", "ap-attic", -70, "2.4 GHz"))
+
+    def test_T07b_ssid_change_writes_an_event(self):
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]),
+                                               "unifi": Batch(attachments=[wifi(ssid="GuestNet", ap="ap-attic")])},
+                         controllers=CTRL)
+        self.assertEqual(res.events, [(A, "wifi", "HomeNet -> GuestNet")])
+
+    def test_T07c_start_on_wifi_writes_an_event(self):
+        res = self.merge([row(A, link="wired", sw_port="GE1/0/5")],
+                         {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])}, controllers=CTRL)
+        self.assertEqual(res.events, [(A, "wifi", "- -> HomeNet")])
+
+    def test_T07d_new_device_on_wifi_writes_only_the_new_event(self):
+        res = self.merge([], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])}, controllers=CTRL)
+        self.assertEqual([e[1] for e in res.events], ["new"])
+
+    def test_T07e_stop_through_controller_wired_writes_an_event(self):
+        wired = Attachment(mac=A, source="unifi", observed_at=NOW, link="wired")
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wired])},
+                         controllers=CTRL)
+        self.assertEqual(res.events, [(A, "wifi", "HomeNet -> wired")])
+
+    def test_T07f_stop_through_left_wifi_writes_an_event(self):
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch()}, controllers=CTRL)
+        self.assertEqual(res.events, [(A, "wifi", "HomeNet -> off Wi-Fi")])
+
+    def test_T07g_walk_out_and_return_to_the_same_ssid_writes_no_event(self):
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight(mac="02:00:00:00:00:09", ip="10.0.0.9")]),
+                                               "unifi": Batch()}, controllers=CTRL)
+        self.assertEqual([e for e in res.events if e[0] == A], [])
+        res = self.merge([res.rows.get(A, row(A, **self.ON))], {"fw1": Batch(sightings=[sight()]),
+                                                                "unifi": Batch(attachments=[wifi(ap="ap-attic")])},
+                         controllers=CTRL)
+        self.assertEqual(res.events, [])
 
 
 if __name__ == "__main__":

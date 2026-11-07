@@ -18,6 +18,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **Device table:** the Type column now shows from a 1280 px wide window (was 1601 px); the table width is the same at every width from 1280 px.
 - **Search:** the table and the URL follow the search box 150 ms after the last key instead of on every key (a rebuild of 2000 rows takes about 100 ms); Enter and Escape in the box still apply at once (Enter with no search waiting does nothing).
 - **Baseline:** while the baseline waits for a sighting producer, no change events (ip, hostname, network, lease type, port, Wi-Fi, back) and no history rows are written, so a late producer no longer logs its details as changes (e.g. "hostname - -> laptop"). Devices are still recorded and updated; the poll that takes the baseline writes one history row per device with its complete values.
+- **Wi-Fi events:** a `wifi` event is written only when the SSID changes ("HomeNet -> GuestNet") or the device joins or leaves Wi-Fi ("- -> HomeNet", "HomeNet -> wired", "HomeNet -> off Wi-Fi"); roaming between access points on the same SSID no longer writes an event and only updates the AP, signal and radio. A device that is new this poll gets only its `new` event.
 
 ### Removed
 
