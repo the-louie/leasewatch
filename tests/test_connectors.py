@@ -54,7 +54,7 @@ class DescribeTests(unittest.TestCase):
     def test_settings_cover_the_config_fields(self):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy"})
-        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "port", "name", "user", "auth", "auth_key", "priv_key", "profile", "profile_file", "min_macs"})
+        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "port", "name", "user", "auth", "auth_key", "priv", "priv_key", "profile", "profile_file", "min_macs"})
         self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "verify_tls", "proxy", "platform"})
 
     def test_wrappers_are_connectors(self):
@@ -99,7 +99,7 @@ class ValidateTests(unittest.TestCase):
     def test_switch(self):
         p = SnmpSwitchConnector("switch", {"host": "10.0.0.2", "auth": "md5"}, CTX).validate()
         self.assertTrue("connector switch (snmp_switch): AUTH_KEY is required" in p and "connector switch (snmp_switch): PRIV_KEY is required" in p, p)
-        self.assertTrue("connector switch (snmp_switch): AUTH must be one of SHA, SHA256" in p, p)
+        self.assertTrue("connector switch (snmp_switch): AUTH must be one of SHA, SHA256, SHA224, SHA384, SHA512" in p, p)
         self.assertEqual(SnmpSwitchConnector("switch", {**SW, "auth": "sha-256"}, CTX).validate(), [])
 
     def test_unifi(self):

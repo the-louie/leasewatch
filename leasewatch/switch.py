@@ -7,6 +7,7 @@ pysnmp (7.x) is imported lazily so the rest of leasewatch works without it.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -17,6 +18,63 @@ if TYPE_CHECKING:  # only for the annotation: connectors.snmp_switch imports thi
     from .connectors.snmp_switch import _SnmpCfg
 
 log = logging.getLogger("leasewatch.switch")
+
+# setting value -> (camelCase name, UPPER_CASE name) of the pysnmp constant. pysnmp 7 documents the UPPER_CASE names
+# and may keep the camelCase ones as aliases; which release has which is not known, so both spellings are tried.
+# SHA256 comes before the SHA-2 names that are new: it was the only other choice before them.
+AUTH_NAMES = {
+    "SHA": ("usmHMACSHAAuthProtocol", "USM_AUTH_HMAC96_SHA"),
+    "SHA256": ("usmHMAC192SHA256AuthProtocol", "USM_AUTH_HMAC192_SHA256"),
+    "SHA224": ("usmHMAC128SHA224AuthProtocol", "USM_AUTH_HMAC128_SHA224"),
+    "SHA384": ("usmHMAC256SHA384AuthProtocol", "USM_AUTH_HMAC256_SHA384"),
+    "SHA512": ("usmHMAC384SHA512AuthProtocol", "USM_AUTH_HMAC384_SHA512"),
+}
+# AES192/AES256 extend the key the way Cisco does (Reeder); the "B" ones follow the Blumenthal draft, which net-snmp's
+# plain AES-192/AES-256 and some other agents use. A wrong variant shows as a wrong digest or a timeout.
+PRIV_NAMES = {
+    "AES": ("usmAesCfb128Protocol", "USM_PRIV_CFB128_AES"),
+    "AES192": ("usmAesCfb192Protocol", "USM_PRIV_CFB192_AES"),
+    "AES256": ("usmAesCfb256Protocol", "USM_PRIV_CFB256_AES"),
+    "AES192B": ("usmAesBlumenthalCfb192Protocol", "USM_PRIV_CFB192_AES_BLUMENTHAL"),
+    "AES256B": ("usmAesBlumenthalCfb256Protocol", "USM_PRIV_CFB256_AES_BLUMENTHAL"),
+}
+HLAPI = "pysnmp.hlapi.v3arch.asyncio"
+
+
+def _usm(mod: object, name_camel: str, name_upper: str) -> object | None:
+    """The pysnmp constant under either spelling, None when the module has neither."""
+    for n in (name_upper, name_camel):
+        if hasattr(mod, n):
+            return getattr(mod, n)
+    return None
+
+
+def usm_protocols(mod: object, auth: str, priv: str) -> tuple[object, object]:
+    """(auth protocol, privacy protocol) of the pysnmp module `mod` for the AUTH and PRIV settings.
+    RuntimeError with a plain text when the installed pysnmp lacks one."""
+    found = []
+    for label, value, table in (("AUTH", auth, AUTH_NAMES), ("PRIV", priv, PRIV_NAMES)):
+        names = table.get(value)
+        proto = _usm(mod, *names) if names else None
+        if proto is None:
+            raise RuntimeError(f"{label} {value} is not supported by the installed pysnmp")
+        found.append(proto)
+    return found[0], found[1]
+
+
+def unsupported_protocols(auth: str, priv: str) -> list[str]:
+    """The texts of usm_protocols() for what the installed pysnmp lacks; [] when it has both or cannot be imported
+    (a missing pysnmp is reported elsewhere)."""
+    try:
+        mod = importlib.import_module(HLAPI)
+    except ImportError:
+        return []
+    out = []
+    for label, value, table in (("AUTH", auth, AUTH_NAMES), ("PRIV", priv, PRIV_NAMES)):
+        names = table.get(value)
+        if names and _usm(mod, *names) is None:
+            out.append(f"{label} {value} is not supported by the installed pysnmp")
+    return out
 
 # 1.0 names, kept for importers; the walks now use the profile's "oids" (same values in standard.json)
 OID_FDB_PORT = "1.3.6.1.2.1.17.7.1.2.2.1.2"      # dot1qTpFdbPort: index vlan.mac6 -> bridge port
@@ -437,13 +495,13 @@ class SwitchClient:
 
     async def _session(self, snmp: dict) -> tuple[object, object, object]:
         """(engine, target, user) for one snapshot or probe; the caller closes the engine's dispatcher."""
-        from pysnmp.hlapi.v3arch.asyncio import (SnmpEngine, UdpTransportTarget, UsmUserData, usmAesCfb128Protocol,
-                                                 usmHMAC192SHA256AuthProtocol, usmHMACSHAAuthProtocol)
-        auth = {"SHA": usmHMACSHAAuthProtocol, "SHA256": usmHMAC192SHA256AuthProtocol}[self.cfg.snmp_auth]
+        mod = importlib.import_module(HLAPI)
+        auth, priv = usm_protocols(mod, self.cfg.snmp_auth, getattr(self.cfg, "snmp_priv", "AES"))
+        SnmpEngine, UdpTransportTarget, UsmUserData = mod.SnmpEngine, mod.UdpTransportTarget, mod.UsmUserData
         eng = SnmpEngine()
         try:
             tgt = await UdpTransportTarget.create((self.cfg.snmp_host, getattr(self.cfg, "snmp_port", 161)), timeout=snmp["timeout"], retries=snmp["retries"])
-            user = UsmUserData(self.cfg.snmp_user, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, authProtocol=auth, privProtocol=usmAesCfb128Protocol)
+            user = UsmUserData(self.cfg.snmp_user, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, authProtocol=auth, privProtocol=priv)
         except BaseException:
             eng.close_dispatcher()
             raise

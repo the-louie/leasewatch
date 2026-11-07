@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 from .. import snmp_profiles
-from ..switch import SwitchClient, SwitchSnapshot
+from ..switch import AUTH_NAMES, PRIV_NAMES, SwitchClient, SwitchSnapshot, unsupported_protocols
 from . import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin,
                _bounded, _forms, make_redactor)
 
@@ -27,6 +27,7 @@ class _SnmpCfg:
     snmp_auth_key: str = field(repr=False)
     snmp_priv_key: str = field(repr=False)
     snmp_port: int = 161
+    snmp_priv: str = "AES"
 
 
 def name_uplinks(snap: SwitchSnapshot, device_names: Callable[[], dict[str, str]]) -> None:
@@ -62,9 +63,10 @@ class SnmpSwitchConnector(SettingsMixin):
             Setting("name", default="switch", help="switch name shown in the UI"),
             Setting("user", default="leasewatch", help="SNMPv3 user"),
             Setting("port", default="161", kind="int", min=1, max=65535, help="switch SNMP UDP port"),
-            Setting("auth", default="SHA", choices=("SHA", "SHA256"), help="SNMPv3 auth protocol"),
+            Setting("auth", default="SHA", choices=tuple(AUTH_NAMES), help="SNMPv3 auth protocol"),
             Setting("auth_key", required=True, secret=True, help="SNMPv3 auth key"),
-            Setting("priv_key", required=True, secret=True, help="SNMPv3 privacy key (AES-128)"),
+            Setting("priv_key", required=True, secret=True, help="SNMPv3 privacy key"),
+            Setting("priv", default="AES", choices=tuple(PRIV_NAMES), help="SNMPv3 privacy protocol: AES = AES-128; AES192/AES256 extend the key as Cisco does, AES192B/AES256B as the Blumenthal draft"),
             Setting("profile", choices=snmp_profiles.BUILTIN, help="built-in SNMP profile; empty = detect from sysObjectID/sysDescr"),
             Setting("profile_file", help="path to a JSON SNMP profile; wins over profile"),
             Setting("min_macs", help="MACs on a port without LLDP that make it an uplink; empty = the profile's uplink.min_macs"),
@@ -74,9 +76,10 @@ class SnmpSwitchConnector(SettingsMixin):
     def __init__(self, name: str, settings: Mapping[str, str], ctx: HostContext | None = None, client: object | None = None) -> None:
         self._init_settings(name, settings, ctx)
         # stripped before validate()'s choices check, which compares the value as given
-        for k in ("auth", "profile", "profile_file", "min_macs"):
+        for k in ("auth", "priv", "profile", "profile_file", "min_macs"):
             self.settings[k] = self.settings[k].strip()
         self.settings["auth"] = self.settings["auth"].upper().replace("-", "")
+        self.settings["priv"] = self.settings["priv"].upper().replace("-", "")
         s = self.settings
         # problems with profile/profile_file/min_macs, reported by validate(); collect()/check() refuse to run with one,
         # so a bad profile setting never falls back to detection unnoticed
@@ -85,7 +88,7 @@ class SnmpSwitchConnector(SettingsMixin):
         profile = self._profile()
         min_macs = self._min_macs()
         # read at call time: the host (and tests) may swap the client object
-        self.client = client if client is not None else SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"], self._port()),  # type: ignore[arg-type]
+        self.client = client if client is not None else SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"], self._port(), s["priv"]),  # type: ignore[arg-type]
                                                                      profile=profile, min_macs=min_macs, name=name, timeout=self.ctx.timeout)
 
     def _profile(self) -> dict | None:
@@ -136,11 +139,18 @@ class SnmpSwitchConnector(SettingsMixin):
     def validate(self) -> list[str]:
         # an explicitly empty USER overrides the default and can never authenticate
         user = [] if self.settings["user"].strip() else [f"connector {self.name} ({self.INFO.type}): USER is required"]
-        return self._generic_problems() + user + self.profile_problems
+        generic = self._generic_problems()
+        # only a known value: an unknown one is already reported above
+        crypto = [] if generic else unsupported_protocols(self.settings["auth"], self.settings["priv"])
+        where = f"connector {self.name} ({self.INFO.type}): "
+        return generic + user + self.profile_problems + [where + t for t in crypto]
 
     def _refuse_if_invalid(self) -> None:
         if self.profile_problems or self._bad_profile_name:
             raise ConnectorError("invalid profile settings (see the configuration check)")
+        crypto = unsupported_protocols(self.settings["auth"], self.settings["priv"])
+        if crypto:
+            raise ConnectorError(crypto[0])
 
     def redact(self, text: str) -> str:
         """`text` with the host, the USM user name and the secret settings (via make_redactor: repr/JSON forms, not
