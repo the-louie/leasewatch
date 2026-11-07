@@ -236,13 +236,13 @@
       const vm = $(".dev-meta .badge", tr); vm.textContent = d.vlan || "?"; vm.style.setProperty("--vc", vlanColor(d.vlan));
       $(".dev-meta .last", tr).textContent = d.online ? "online" : (d.last_online ? `last ${rel(d.last_online)}` : "offline");
       $(".dev-meta .where", tr).textContent = onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || "?"}` : d.sw_port ? `${d.sw_port}${d.sw_via ? " → " + d.sw_via : ""}` : "";
-      $(".c-where", tr).innerHTML = whereHtml(d, false);
+      const wh = $(".c-where", tr); wh.innerHTML = whereHtml(d, false); wh.title = wh.textContent.replace(/\s+/g, " ").trim(); // the full text, signal included, when the cell is cut
       if (d.ip) copyable($(".c-ip .cp", tr), d.ip); else $(".c-ip", tr).textContent = "–"; // nothing to copy
       copyable($(".c-mac .cp", tr), d.mac);
       // a private (locally administered) MAC: tinted row border, the sleuth and its "private address" hint
       if (d.private) { tr.classList.add("is-private"); $(".c-mac .priv", tr).classList.remove("hidden"); }
       const vb = $(".c-vlan .badge", tr); vb.textContent = d.vlan || "?"; vb.style.setProperty("--vc", vlanColor(d.vlan));
-      $(".c-type", tr).textContent = typeText(d);
+      const ty = $(".c-type", tr); ty.textContent = ty.title = typeText(d);
       const fs = $(".c-first", tr); fs.textContent = d.baseline ? "since the start" : rel(d.first_seen); fs.title = d.baseline ? `Already present when leasewatch started (${abs(state.meta.baseline_ts)})` : abs(d.first_seen);
       if (isNew(d)) fs.classList.add("recent");
       const ls = $(".c-last", tr); ls.textContent = d.online ? "now" : (d.last_online ? rel(d.last_online) : "not since the start"); ls.title = d.last_online ? `last online ${abs(d.last_online)} · last listed by the firewall ${abs(d.last_seen)}` : `listed by the firewall but not seen on the wire since leasewatch started; last listed ${abs(d.last_seen)}`;

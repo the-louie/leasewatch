@@ -162,6 +162,25 @@ const scenarios = {
     }));
     return res;
   },
+  // long Type and "Connected via" text: per width the horizontal scroll of the table and the page, and per row the
+  // text of the Type and Connected-via cells next to their title (the full text a cut cell must still offer)
+  async longtext(page) {
+    const res = {};
+    for (const width of [1280, 1366, 1440, 1920]) {
+      await page.setViewport({ width, height: 900 });
+      res[width] = await page.evaluate(() => {
+        const wrap = document.querySelector('.table-wrap'), th = [...document.querySelectorAll('#tbl thead th')];
+        return { table_scroll: wrap.scrollWidth - wrap.clientWidth,
+                 page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                 col_widths: Object.fromEntries(th.filter(t => t.offsetWidth).map(t => [t.className, t.offsetWidth])) };
+      });
+    }
+    res.cells = await page.$$eval('#rows tr', trs => Object.fromEntries(trs.map(t => {
+      const c = s => { const e = t.querySelector(s); return { text: e.textContent, title: e.title }; };
+      return [t.dataset.mac, { type: c('.c-type'), where: c('.c-where') }];
+    })));
+    return res;
+  },
   // against the 2000-device server: type a query at a fast typist's pace, count the table renders, time the last one
   async perf(page) {
     const Q = 'dev-12';

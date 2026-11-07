@@ -111,6 +111,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Webhook: an invalid character in `WEBHOOK_URL` is reported as "webhook: bad WEBHOOK_URL" instead of "webhook: bad response".
 - A bug in a notification channel is logged with the exception type and the stack (file, line, function) only: no exception text, source lines or chained exceptions, which could carry device names or e-mail addresses.
 - With stdout closed (`>&-`), a command keeps the exit code it set (e.g. 2 for a usage error) instead of 1.
+- Device table: long "Connected via" text (Wi-Fi SSID @ AP with signal, switch port → device) is cut with an ellipsis and shown in full as a tooltip; the Type cell has a tooltip too, so the table no longer scrolls sideways at 1280–1920 px.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

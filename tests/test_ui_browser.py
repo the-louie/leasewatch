@@ -392,6 +392,52 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(d["after_click"]["widths"], d["before"])
 
 
+class BrowserLongTextTest(_BrowserCase):
+    """Long Type and "Connected via" text (B-28): neither the table nor the page scrolls sideways at laptop and desktop
+    widths, and a cell that is cut short still offers its full text as a title."""
+    WIFI, WIFI2, PORT, PLAIN = "02:00:00:00:20:01", "02:00:00:00:20:02", "02:00:00:00:20:03", "02:00:00:00:20:04"
+    WHERE = {WIFI: ("HomeNet-Upstairs-Guest-5GHz-Extended", "ap-upstairs-hallway-ceiling-east", -67, "", ""),
+             WIFI2: ("HomeNet-Downstairs-IoT-2GHz-Legacy", "ap-basement-workshop-wall-north", -81, "", ""),
+             PORT: ("", "", None, "GigabitEthernet1/0/24", "sw-garage-poe-16-port-desk"),
+             PLAIN: ("", "", None, "", "")}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, lease_type: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=f"alex-workstation-upstairs-{n}", vendor="Acme Networks",
+                            vlan="HomeNet", iface="lan", source="dhcp" if lease_type else "arp", lease_type=lease_type,
+                            online=True)
+        # "fixed address" is the longest Type text
+        base, db = start(cls, [s(cls.WIFI, 20, ""), s(cls.WIFI2, 21, "static"), s(cls.PORT, 22, ""),
+                               s(cls.PLAIN, 23, "dynamic")])
+        for m, (ssid, ap, sig, port, via) in cls.WHERE.items():
+            db.q("UPDATE devices SET wifi_ssid=?, wifi_ap=?, wifi_signal=?, sw_port=?, sw_via=? WHERE mac=?",
+                 (ssid, ap, sig, port, via, m))
+        cls.run_scenarios(base, ("longtext",))
+
+    def test_no_horizontal_scroll(self) -> None:
+        d = self.result("longtext")
+        for width in ("1280", "1366", "1440", "1920"):
+            with self.subTest(width=width):
+                self.assertLessEqual(d[width]["table_scroll"], 0, d[width])
+                self.assertLessEqual(d[width]["page_scroll"], 0, d[width])
+
+    def test_full_text_in_title(self) -> None:
+        cells = self.result("longtext")["cells"]
+        self.assertEqual(set(cells), set(self.WHERE))
+        for m, (ssid, ap, sig, port, via) in self.WHERE.items():
+            with self.subTest(mac=m):
+                c = cells[m]
+                self.assertEqual(c["type"]["title"], c["type"]["text"])
+                self.assertEqual(c["where"]["title"], " ".join(c["where"]["text"].split()))  # the signal too
+                for part in (ssid, ap, port, via) + ((f"{sig} dBm",) if sig is not None else ()):
+                    self.assertIn(part, c["where"]["title"])
+        self.assertEqual(cells[self.WIFI]["type"]["title"], "fixed address")
+        self.assertEqual(cells[self.PLAIN]["where"]["title"], "")
+
+
 class BrowserPerfTest(_BrowserCase):
     """Search on 2000 devices (hostnames dev-0000 .. dev-1999, all on HomeNet)."""
     N = 2000
