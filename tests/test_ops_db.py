@@ -45,7 +45,7 @@ class IndexTests(unittest.TestCase):
     def test_reopen_current_schema_has_indexes(self):
         self.open()._conn.close()
         db = self.open()
-        self.assertEqual(db.get_meta("schema_version"), "3")
+        self.assertEqual(db.get_meta("schema_version"), "4")
         self.assertTrue(NAMES <= self.index_names(db))
 
     def test_newer_schema_gets_indexes_and_keeps_version(self):

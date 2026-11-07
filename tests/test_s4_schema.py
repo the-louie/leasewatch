@@ -103,7 +103,7 @@ class SchemaV3Test(unittest.TestCase):
         return db, versions
 
     def assert_v3(self, db: Database) -> None:
-        self.assertEqual(db.get_meta("schema_version"), "3")
+        self.assertEqual(db.get_meta("schema_version"), "4")
         cols = {r[1] for r in db.q("PRAGMA table_info(devices)")}
         self.assertLessEqual(set(NEW_COLUMNS), cols)
         self.assertEqual([r[1] for r in db.q("PRAGMA table_info(aliases)")], ALIAS_COLUMNS)
@@ -116,14 +116,14 @@ class SchemaV3Test(unittest.TestCase):
     def test_fresh_file_is_v3(self) -> None:
         db, versions = self.open()
         self.assert_v3(db)
-        self.assertEqual(versions, ["1", "2", "3"])
+        self.assertEqual(versions, ["1", "2", "3", "4"])
         db.q("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,1,1)", (A,))
         self.assert_defaults(db)
 
     def test_v2_with_data_migrates_and_keeps_every_row(self) -> None:
         before = self.build(2)
         db, versions = self.open()
-        self.assertEqual(versions, ["3"])  # only step 3 runs on a v2 file
+        self.assertEqual(versions, ["3", "4"])  # steps 3 and 4 run on a v2 file
         self.assert_v3(db)
         self.assert_defaults(db)
         self.assertEqual(len(db.q("SELECT 1 FROM devices")), 2)
@@ -133,7 +133,7 @@ class SchemaV3Test(unittest.TestCase):
     def test_v1_with_data_migrates_through_v2(self) -> None:
         before = self.build(1)
         db, versions = self.open()
-        self.assertEqual(versions, ["1", "2", "3"])
+        self.assertEqual(versions, ["1", "2", "3", "4"])
         self.assert_v3(db)
         self.assert_defaults(db)
         after = dump(db._conn)
@@ -161,7 +161,7 @@ class SchemaV3Test(unittest.TestCase):
         conn.execute("ALTER TABLE devices ADD COLUMN archived_ts INTEGER")
         conn.commit(); conn.close()
         db, versions = self.open()
-        self.assertEqual(versions, ["3"])
+        self.assertEqual(versions, ["3", "4"])
         self.assert_v3(db)
         self.assert_defaults(db)
         self.assertEqual(dump(db._conn), before)

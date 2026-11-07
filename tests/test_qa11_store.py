@@ -53,7 +53,7 @@ class SchemaVersionTest(DbBase):
                 with self.assertLogs("leasewatch.db", "WARNING") as cm:
                     db = self.reopen_with_version(raw, drop_seen=True)
                 self.assertIn("not a number", "\n".join(cm.output))
-                self.assertEqual(db.get_meta("schema_version"), "3")
+                self.assertEqual(db.get_meta("schema_version"), "4")
                 self.assertTrue(db.q("SELECT 1 FROM sqlite_master WHERE name='seen'"))
 
     def test_r132_below_one_is_not_called_not_a_number(self) -> None:
@@ -64,11 +64,11 @@ class SchemaVersionTest(DbBase):
                 text = "\n".join(cm.output)
                 self.assertNotIn("not a number", text)
                 self.assertIn("below 1", text)
-                self.assertEqual(db.get_meta("schema_version"), "3")
+                self.assertEqual(db.get_meta("schema_version"), "4")
 
     def test_v08_blob_version_does_not_crash_startup(self) -> None:
-        # b"3" is version 3 (nothing to do, the value stays as stored); b"x" is damage and repaired to "3"
-        for blob, want in ((b"3", b"3"), (b"x", "3")):
+        # b"4" is the current version (nothing to do, the value stays as stored); b"x" is damage and repaired to "4"
+        for blob, want in ((b"4", b"4"), (b"x", "4")):
             with self.subTest(blob=blob):
                 self.db._conn.close()
                 c = sqlite3.connect(self.path)
@@ -82,7 +82,7 @@ class SchemaVersionTest(DbBase):
         with self.assertLogs("leasewatch.db", "WARNING") as cm:
             db = self.reopen_with_version("9" * 5000, drop_seen=True)
         self.assertIn("not a number", "\n".join(cm.output))
-        self.assertEqual(db.get_meta("schema_version"), "3")
+        self.assertEqual(db.get_meta("schema_version"), "4")
         self.assertTrue(db.q("SELECT 1 FROM sqlite_master WHERE name='seen'"))
 
 
@@ -122,16 +122,17 @@ class DeviceDetailTest(DbBase):
             c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(1,?,'new','')", (MAC,))
             c.execute("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,'fw1',1,1)", (MAC,))
         owned = []
-        orig = self.db.aliases
+        orig = self.db.wifi_presence
 
-        def aliases(mac: str) -> list[dict]:  # the last of the reads (S4 T-05 added it): the lock must still be held
+        def wifi_presence(mac: str) -> list[dict]:  # the last of the reads: the lock must still be held
             owned.append(self.db._lock._is_owned())
             return orig(mac)
-        with mock.patch.object(self.db, "aliases", aliases):
+        with mock.patch.object(self.db, "wifi_presence", wifi_presence):
             out = self.db.device_detail(MAC)
         self.assertEqual(owned, [True])
         self.assertEqual(out, {"device": self.db.device(MAC), "history": self.db.history(MAC),
-                               "events": self.db.events(MAC), "seen": self.db.seen(MAC), "aliases": []})
+                               "events": self.db.events(MAC), "seen": self.db.seen(MAC), "aliases": [],
+                               "wifi_presence": []})
         self.assertEqual((len(out["history"]), len(out["events"]), len(out["seen"])), (1, 1, 1))
 
 

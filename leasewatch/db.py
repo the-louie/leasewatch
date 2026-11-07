@@ -77,13 +77,16 @@ MIGRATIONS = [
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 VERSION_STEPS = {
     # per-source freshness: when each connector instance last listed a MAC and last saw it on the wire
     2: "CREATE TABLE IF NOT EXISTS seen (mac TEXT, source TEXT, last_seen INTEGER NOT NULL, last_present INTEGER, PRIMARY KEY(mac, source))",
     # merged private MACs: each alias MAC points to the device key (devices.mac, the first MAC seen) it was merged
     # into, so the key and every row keyed by it stay valid; one statement, as the loop and the table regex expect
     3: "CREATE TABLE IF NOT EXISTS aliases (mac TEXT PRIMARY KEY, device TEXT NOT NULL, reason TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', merged_ts INTEGER NOT NULL, last_seen INTEGER NOT NULL)",
+    # which SSIDs each device was ever seen on: one row per device key and SSID (as the controller sends it);
+    # no ssid index, the per-SSID read scans a table of a few hundred rows
+    4: "CREATE TABLE IF NOT EXISTS wifi_presence (mac TEXT NOT NULL, ssid TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, seconds_seen INTEGER NOT NULL, polls_seen INTEGER NOT NULL, last_ap TEXT NOT NULL DEFAULT '', PRIMARY KEY (mac, ssid))",
 }
 # run on every open (after the version steps, also for a newer schema); CREATE INDEX IF NOT EXISTS is cheap when present
 INDEXES = (
@@ -262,7 +265,8 @@ class Database:
         with self._lock:  # one hold, as stats(): the five reads must not straddle a collector write
             d = self.device(mac) or self.device(self._alias_owner(self._c(), mac))  # design-s4 §1: an alias MAC opens its device
             return {"device": d, "history": self.history(d["mac"]), "events": self.events(d["mac"]),
-                    "seen": self.seen(d["mac"]), "aliases": self.aliases(d["mac"])} if d else None
+                    "seen": self.seen(d["mac"]), "aliases": self.aliases(d["mac"]),
+                    "wifi_presence": self.wifi_presence(d["mac"])} if d else None
 
     @staticmethod
     def _alias_owner(c: sqlite3.Connection, mac: str) -> str:
@@ -273,6 +277,20 @@ class Database:
     def aliases(self, mac: str) -> list[dict]:
         """The private MACs merged into the device mac, newest merge first."""
         return [dict(r) for r in self.q("SELECT mac, reason, detail, merged_ts, last_seen FROM aliases WHERE device=? ORDER BY merged_ts DESC, mac", (mac,))]
+
+    _WIFI_COLS = "mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap"
+
+    def wifi_presence(self, mac: str) -> list[dict]:
+        """The SSIDs the device key mac was seen on, most recently seen first."""
+        return [{k: r[k] for k in r.keys() if k != "mac"} for r in self.q(
+            f"SELECT {self._WIFI_COLS} FROM wifi_presence WHERE mac=? ORDER BY last_seen DESC, ssid", (mac,))]
+
+    def wifi_presence_all(self) -> dict[str, list[dict]]:
+        """wifi_presence of every device that has rows, by device key, in one query."""
+        out: dict[str, list[dict]] = {}
+        for r in self.q(f"SELECT {self._WIFI_COLS} FROM wifi_presence ORDER BY last_seen DESC, ssid"):
+            out.setdefault(r["mac"], []).append({k: r[k] for k in r.keys() if k != "mac"})
+        return out
 
     def seen(self, mac: str) -> list[dict]:
         return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]
