@@ -34,6 +34,17 @@ EVENT_DAYS = 365
 MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
+SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_down event (6 min at default polls)
+
+
+def outage_text(seconds: int) -> str:
+    """An outage in whole minutes: "Ym", "XhYm", or "XdYh" from a day on."""
+    m = max(0, seconds) // 60
+    if m < 60:
+        return f"{m}m"
+    if m < 1440:
+        return f"{m // 60}h{m % 60}m"
+    return f"{m // 1440}d{m % 1440 // 60}h"
 
 
 def setup_instance(spec: InstanceSpec, ctx: HostContext, client: object | None = None) -> tuple[object | None, list[str]]:
@@ -111,6 +122,9 @@ class _Run:
     skip_logged: bool = False
     answered: bool = False      # collected successfully at least once in this process (the baseline waits for it)
     waited: int = 0             # seconds of failed check()s retried every poll while the baseline waited (B-08.4)
+    fail_polls: int = 0         # polls in a row with conn.<name>.ok written 0, counted once the baseline is taken
+    fail_since: int = 0         # wall clock of the first of those polls
+    down_since: int | None = None  # start of the spell a source_down event was written for (conn.<name>.down_since)
 
 
 class Collector:
@@ -133,6 +147,10 @@ class Collector:
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
+        # source_down/source_up events (ts, kind, detail) and conn.<name>.down_since changes ("" deletes) not yet
+        # committed: written by whichever outcome transaction comes next, dropped only after it committed
+        self._pending_src: list[tuple[int, str, str]] = []
+        self._pending_down: dict[str, str] = {}
         for spec in specs:
             self._add(spec, client if spec.name == "fw1" else None)
         # an instance removed from the configuration (or renamed) would keep its "Seen by" line forever: its rows never
@@ -156,6 +174,16 @@ class Collector:
                     self.db.set_meta(f"conn.{run.name}.enabled", "0" if run.disabled else "1", c)
                     if run.disabled:
                         self.db.set_meta(f"conn.{run.name}.error", run.error, c)
+                # an outage of a removed instance never gets its source_up: its marker goes. "conn." is 5 characters
+                # and ".down_since" 11, so the substr is the instance name
+                c.execute(f"DELETE FROM meta WHERE key LIKE 'conn.%.down_since' "
+                          f"AND substr(key, 6, length(key) - 16) NOT IN ({marks})", names)
+                # an outage that outlived a restart: no second source_down, and source_up gets the whole length
+                for run in self._runs.values():
+                    row = c.execute("SELECT value FROM meta WHERE key=?", (f"conn.{run.name}.down_since",)).fetchone()
+                    v = row[0] if row else ""
+                    if isinstance(v, str) and 0 < len(v) <= 18 and v.isascii() and v.isdigit():
+                        run.down_since = int(v)
         except sqlite3.Error as e:
             log.warning("cannot remove rows of instances that are no longer configured: %s", e)
             pruned = cleared = 0
@@ -352,6 +380,7 @@ class Collector:
             self._outcome(run, error, exc)
             status[f"conn.{run.name}.ms"] = str(ms)
         ts = str(int(time.time()))
+        counting = self.db.get_meta("first_run_done", "") == "1"
         for n in names:
             run = self._runs[n]
             if n in out:
@@ -370,7 +399,44 @@ class Collector:
             # stored one names a walk this poll did not make
             if f"conn.{n}.strategy" not in status and self.db.get_meta(f"conn.{n}.strategy"):
                 status[f"conn.{n}.strategy"] = ""
+            if not run.disabled:
+                self._source_spell(run, ok, error, int(ts), counting)
         return out, status
+
+    def _source_spell(self, run: _Run, ok: bool, error: str, now: int, counting: bool) -> None:
+        """Count failed polls of one instance; queue source_down on the SOURCE_DOWN_POLLS-th in a row (back-dated to
+        the first) and source_up at the first ok poll after it. counting: the baseline is taken; before it a first
+        install fixing its settings gets no events."""
+        if ok:
+            if run.down_since is not None:
+                self._pending_src.append((now, "source_up", f"{run.name}: up after {outage_text(now - run.down_since)}"))
+                self._pending_down[run.name] = ""
+                run.down_since = None
+            run.fail_polls = 0
+            return
+        if not counting:
+            return
+        run.fail_polls += 1
+        if run.fail_polls == 1:
+            run.fail_since = now
+        if run.fail_polls >= SOURCE_DOWN_POLLS and run.down_since is None:
+            run.down_since = run.fail_since
+            self._pending_src.append((run.fail_since, "source_down", f"{run.name}: {error[:200]}"))
+            self._pending_down[run.name] = str(run.fail_since)
+
+    def _write_source_events(self, c: sqlite3.Connection) -> None:
+        """Insert the queued source events (no device: mac '') and down_since changes in the caller's transaction."""
+        c.executemany("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
+                      [(ts, "", kind, detail) for ts, kind, detail in self._pending_src])
+        for name, since in self._pending_down.items():
+            if since:
+                self.db.set_meta(f"conn.{name}.down_since", since, c)
+            else:
+                c.execute("DELETE FROM meta WHERE key=?", (f"conn.{name}.down_since",))
+
+    def _source_events_written(self) -> None:
+        self._pending_src.clear()
+        self._pending_down.clear()
 
     def _fail(self, msg: str, status: dict[str, str] | None = None) -> dict:
         now = int(time.time())
@@ -383,6 +449,8 @@ class Collector:
             self.db.set_meta("last_attempt_ts", str(now), c)  # a failed poll is still a poll: the loop is alive
             # the grace rule still applies while fw1 is unreachable: nothing stays "online" forever
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
+            self._write_source_events(c)
+        self._source_events_written()
         return {"ok": False, "error": msg}
 
     def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int,
@@ -578,6 +646,8 @@ class Collector:
             self.db.set_meta("last_raw", last_raw, c)
             if first_run and not waiting:
                 self.db.set_meta("baseline_ts", str(now), c)
+            self._write_source_events(c)
+        self._source_events_written()
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
             self._runs[n].answered = True

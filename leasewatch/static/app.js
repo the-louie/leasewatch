@@ -290,6 +290,15 @@
     if (!state.events.length) { ul.innerHTML = '<li><span class="t">–</span><span></span><span class="muted">No events yet. New devices, address changes and acknowledgements show up here.</span></li>'; return; }
     for (const e of state.events.slice(0, 60)) {
       const li = document.createElement("li");
+      const t = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span>`;
+      if (e.kind === "source_down" || e.kind === "source_up") {
+        // a connector instance, not a device (mac ""): "<instance>: <text>", named as plain text with no drawer to open
+        const d = String(e.detail || ""), i = d.indexOf(": ");
+        const inst = i < 0 ? d : d.slice(0, i), text = i < 0 ? "" : d.slice(i + 2);
+        li.innerHTML = `${t}<span><span class="src">${esc(connLabel(inst))}</span> <span class="muted">${esc(text)}</span></span>`;
+        ul.appendChild(li);
+        continue;
+      }
       const who = e.name || e.hostname || e.mac;
       let detail = String(e.detail || "").replace(" -> ", " → ");
       if (e.kind === "new") {
@@ -299,13 +308,13 @@
         if (e.vlan && detail.endsWith(net)) detail = detail.slice(0, -net.length);
         if (e.hostname && who === e.hostname) detail = ` ${detail} `.replace(` ${who} `, " ").trim();
       }
-      li.innerHTML = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span><span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" data-vc="${esc(vlanColor(e.vlan))}" title="current network of the device">${esc(e.vlan)}</span>` : ""}</span>`;
+      li.innerHTML = `${t}<span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" data-vc="${esc(vlanColor(e.vlan))}" title="current network of the device">${esc(e.vlan)}</span>` : ""}</span>`;
       paintVc(li);
       $(".who", li).onclick = () => openDrawer(e.mac);
       ul.appendChild(li);
     }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,

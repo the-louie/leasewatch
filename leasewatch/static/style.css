@@ -148,6 +148,7 @@ tr.row.is-private td:last-child { box-shadow: inset -1px 0 0 var(--priv), inset 
 .event-list .k { font-weight: 600; }
 .k.new { color: var(--new); } .k.ip, .k.hostname, .k.vlan, .k.lease_type, .k.port, .k.wifi { color: var(--accent); } .k.back { color: var(--ok); } .k.acked { color: var(--ok); } .k.unacked { color: var(--warn); }
 .k.archived { color: var(--muted); } .k.restored { color: var(--ok); } .k.merged { color: var(--accent); }
+.k.source_down { color: var(--danger); } .k.source_up { color: var(--ok); } .event-list .src { font-weight: 600; }
 .who { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; color: inherit; font-weight: 600; }
 .who:hover { text-decoration: underline; }
 
