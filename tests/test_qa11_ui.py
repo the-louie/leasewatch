@@ -272,7 +272,8 @@ out.behind = seenHtml([{ source: "fw1", last_seen: srv - 700, last_present: srv 
         self.assertIn("on the wire", out["ahead"])
         self.assertIn("fw1 · 12 min ago · ", out["behind"])
 
-    DRAWER = r"""const server = { mac: "02:00:00:00:00:01", name: "", note: "", acked: 0, baseline: 0, vlan: "LAN", ip: "10.0.0.5", first_seen: 1, last_seen: 1, sources: "arp" };
+    DRAWER = r"""const history = { replaceState() {} }, location = { pathname: "/" };
+const server = { mac: "02:00:00:00:00:01", name: "", note: "", acked: 0, baseline: 0, vlan: "LAN", ip: "10.0.0.5", first_seen: 1, last_seen: 1, sources: "arp" };
 let typing = null, failGet = false, posts = [];
 const api = async (path, opts) => {
   if (opts?.method) { posts.push(JSON.parse(opts.body)); await null; if (typing) await typing(); Object.assign(server, JSON.parse(opts.body)); server.acked = server.acked ? 1 : 0; return { ok: true }; }
@@ -550,7 +551,7 @@ out.hasForm = !!byId.fName; out.name = byId.fName ? byId.fName.value : null; out
             'const g = {}; g.p = new Promise((ok, fail) => { g.ok = ok; g.fail = fail; }); gets.push(g); '
             'opts?.signal?.addEventListener("abort", () => g.fail(new Error("aborted"))); await g.p;')
         pre = pre.replace("let typing = null", "const gets = []; let typing = null")
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"],
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"],
                    pre + "//--" + self.DRAWER.split("//--")[1] + r"""
 const row = new El("TR"); row.focus();
 const o1 = openDrawer(server.mac); // the older open: its GET will fail
@@ -566,7 +567,7 @@ out.hasForm = !!byId.fName; out.focusedIsName = !!byId.fName && document.activeE
     # close and reopen of the same drawer while a save's POST runs: after the save's refresh the inputs show the
     # saved values, and a later Save does not post the pre-save ones back
     def test_close_reopen_during_save_shows_saved_values(self) -> None:
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], self.DRAWER + r"""
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], self.DRAWER + r"""
 await openDrawer(server.mac);
 byId.fName.value = "Printer";
 typing = async () => { typing = null; closeDrawer(); await openDrawer(server.mac); }; // the reopen is served the pre-save row
@@ -582,7 +583,7 @@ await byId.fSave.onclick(); out.posted = posts[posts.length - 1].name; out.serve
     # S3R01/S3R04: a close while a save's POST runs asks only about text typed after Save
     def test_close_during_save_asks_only_for_text_typed_after_save(self) -> None:
         pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return true; };')
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], pre + r"""
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], pre + r"""
 await openDrawer(server.mac);
 byId.fName.value = "Printer";
 typing = () => { typing = null; closeDrawer(); out.openAfterClose = state.open; };
@@ -603,7 +604,7 @@ out.askedTyped = asked.length - out.askedPlain; out.saving = state.saving;
     # S3R01: after a failed save the posted text counts as unsaved again
     def test_close_after_failed_save_asks(self) -> None:
         pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return false; };')
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], pre + r"""
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], pre + r"""
 await openDrawer(server.mac);
 byId.fName.value = "Printer";
 typing = () => { typing = null; throw new Error("HTTP 500"); };
@@ -623,7 +624,7 @@ out.asked = asked.length; out.open = state.open;
 
     # S3R03: opening another device from a drawer control keeps the control outside the drawer to return to
     def test_switch_from_drawer_control_keeps_return_target(self) -> None:
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], self.DRAWER + r"""
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], self.DRAWER + r"""
 const drawer = $("#drawer"); body.parent = drawer; $("#dClose").parent = drawer;
 const rowA = new El("TR"); rowA.focus();
 await openDrawer(server.mac);

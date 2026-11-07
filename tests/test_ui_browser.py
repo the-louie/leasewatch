@@ -372,12 +372,13 @@ class BrowserPrivateTest(_BrowserCase):
         logging.disable(logging.CRITICAL)
         cls.addClassCleanup(logging.disable, logging.NOTSET)
         def s(m: str, n: int, host: str, cid: str = "") -> Sighting:
-            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+            # OTHER is alone on a network that sorts before HomeNet: archiving it must not recolour HomeNet
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="Aaa" if m == cls.OTHER else "HomeNet", iface="lan",
                             source="dhcp", lease_type="dynamic", online=True, client_id=cid)
         first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
         base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
         assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
-        cls.run_scenarios(base, ("private", "copy", "aliassearch", "archive"))  # archive changes server state: last
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "archive", "vlancolor"))  # archive changes server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -390,13 +391,40 @@ class BrowserPrivateTest(_BrowserCase):
                 self.assertTrue(r["shown"])
                 self.assertTrue(r["emoji"])
                 self.assertEqual(r["title"], "private address")
-                self.assertEqual(r["sr"], "private address")
+                self.assertEqual(r["hint"], "private address")  # in words, at 1400 px
+                self.assertTrue(r["hint_shown"])
+                self.assertEqual(r["ico_in_mac"], True)  # the sleuth stays next to the MAC at 1400 px
+                self.assertEqual(r["ico_in_hint"], False)
                 self.assertEqual(r["copy_text"], m)  # the sleuth is not part of the copied text
+        self.assertEqual(rows[self.DEV]["sub_start"], "private address")
         ua = rows[self.UA]
+        self.assertIsNone(ua["hint"])
         self.assertFalse(ua["cls"])
         self.assertEqual(ua["shadow"], "none")
         self.assertFalse(ua["shown"])
         self.assertEqual(ua["copy_text"], self.UA)
+
+    def test_private_hint_at_800_px_has_the_sleuth_and_no_scroll(self) -> None:
+        d = self.result("private")["narrow"]
+        self.assertLessEqual(d["scroll"], 0)
+        for m in (self.DEV, self.OTHER):
+            with self.subTest(mac=m):
+                r = d["rows"][m]
+                self.assertEqual(r["hint"], "private address")
+                self.assertTrue(r["hint_shown"])
+                self.assertFalse(r["mac_shown"])  # .c-mac is hidden here
+                self.assertTrue(r["ico_in_hint"])
+        self.assertIsNone(d["rows"][self.UA]["hint"])
+
+    def test_network_colour_survives_archiving_an_earlier_networks_last_device(self) -> None:
+        d = self.result("vlancolor")
+        self.assertEqual(d["before"]["chips"].keys(), {"Aaa", "HomeNet"})
+        self.assertEqual(d["after"]["chips"].keys(), {"HomeNet"})  # the chip of the emptied network is gone
+        self.assertTrue(d["before"]["chips"]["HomeNet"])
+        self.assertEqual(d["after"]["chips"]["HomeNet"], d["before"]["chips"]["HomeNet"])
+        self.assertEqual(d["after"]["row"], d["before"]["row"])
+        self.assertEqual(d["before"]["chips"]["HomeNet"], d["before"]["row"])
+        self.assertNotEqual(d["before"]["chips"]["Aaa"], d["before"]["chips"]["HomeNet"])
 
     def test_drawer_lists_merged_macs(self) -> None:
         d = self.result("private")
@@ -415,6 +443,38 @@ class BrowserPrivateTest(_BrowserCase):
     def test_search_by_merged_mac_lists_only_its_device(self) -> None:
         rows = self.result("aliassearch")["rows"]
         self.assertEqual([r["mac"] for r in rows], [self.DEV])
+
+    def test_device_link_opens_the_drawer(self) -> None:
+        r = self.result("deeplink")
+        self.assertTrue(r["direct"]["open"])
+        self.assertEqual(r["direct"]["title"], "tablet")
+        self.assertEqual(r["direct"]["search"], f"?device={self.DEV}")
+        self.assertIn(self.DEV, r["direct"]["shown"])
+        self.assertEqual(r["upper"]["search"], f"?device={self.DEV}")  # the key is lower case
+        self.assertTrue(r["upper"]["open"])
+
+    def test_device_link_with_a_merged_mac_opens_its_device(self) -> None:
+        r = self.result("deeplink")["alias"]
+        self.assertTrue(r["open"])
+        self.assertEqual(r["title"], "tablet")
+        self.assertIn(self.DEV, r["shown"])
+        self.assertNotIn(self.NEWP, r["shown"])
+        self.assertEqual(r["search"], f"?device={self.DEV}")  # the address names the device
+
+    def test_closing_the_drawer_removes_the_key(self) -> None:
+        d = self.result("deeplink")
+        for k in ("closed", "alias_closed"):
+            with self.subTest(k=k):
+                self.assertFalse(d[k]["open"])
+                self.assertEqual(d[k]["search"], "")
+
+    def test_unknown_device_link_opens_nothing(self) -> None:
+        d = self.result("deeplink")
+        for k in ("unknown", "junk"):
+            with self.subTest(k=k):
+                self.assertFalse(d[k]["open"])
+                self.assertFalse(d[k]["banner"])
+                self.assertEqual(d[k]["search"], "")
 
     def test_merged_event_has_a_label(self) -> None:
         d = self.result("private")

@@ -66,6 +66,8 @@ class Message:
     text: str  # control characters removed per line
     devices: list[dict] = field(default_factory=list)  # the rows as queued (raw values, for the webhook JSON)
     url: str = ""  # the review link, "" without PUBLIC_URL
+    links: list[str] = field(default_factory=list)  # per device (aligned with `devices`) its page, [] without PUBLIC_URL
+    blocks: list[str] = field(default_factory=list)  # per device its text lines (the device line, then its link line)
 
 
 class Channel(Protocol):
@@ -86,8 +88,12 @@ def _device_line(d: dict) -> str:
 def build_message(cfg: Config, devices: list[dict]) -> Message:
     n = len(devices)
     lines = [f"{n} new device{'s' if n != 1 else ''} on the network:", ""]
-    lines += [_device_line(d) for d in devices]
-    url = f"{cfg.public_url}/?filter=unacked" if cfg.public_url else ""
+    base = cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
+    # the MAC is stored normalised (hex pairs and colons): it needs no quoting
+    links = [f"{base}/?device={d['mac']}" for d in devices] if base else []
+    blocks = [_device_line(d) + (f"\n    {_CTRL.sub(' ', links[i])}" if links else "") for i, d in enumerate(devices)]
+    lines += blocks
+    url = f"{base}/?filter=unacked" if base else ""
     if url:
         lines += ["", f"Review and acknowledge: {url}"]
     first = devices[0]
@@ -95,7 +101,7 @@ def build_message(cfg: Config, devices: list[dict]) -> Message:
     where = ", ".join(filter(None, [first["ip"], first["vlan"]]))
     # no IP and no network: no "()" either
     subject = (f"New device: {who}" + (f" ({where})" if where else "")) if n == 1 else f"{n} new devices on the network"
-    return Message(_CTRL.sub(" ", subject), "\n".join(lines), list(devices), url)
+    return Message(_CTRL.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
 
 
 def _send(cfg: Config, subject: str, text: str) -> None:
@@ -266,19 +272,24 @@ class WebhookChannel:
             root, _, topic = parts.path.rstrip("/").rpartition("/")
             text = msg.text
             if len(text.encode()) >= NTFY_MAX:  # ntfy takes a body that reaches the limit as an attachment
-                # build_message's layout: two head lines, one line per device, then the review link (if any)
+                # build_message's layout: two head lines, one block per device (its line, then its link line), then
+                # the review link (if any). A block is kept or cut whole, so no link is left without its device line
                 rows = text.split("\n")
-                k = 2 + len(msg.devices)
+                k = 2 + sum(b.count("\n") + 1 for b in msg.blocks)
                 head, tail = rows[:2], rows[k:]
                 budget = NTFY_MAX - len("\n".join(head + tail).encode()) - 40  # the newlines and the "more" line
-                text = "\n".join(head + _fit_lines(rows[2:k], budget, lambda s: len(s.encode())) + tail)
+                text = "\n".join(head + _fit_lines(msg.blocks, budget, lambda s: len(s.encode())) + tail)
             body = {"topic": topic, "title": msg.subject, "message": text}
-            if msg.url:
-                body["click"] = msg.url
+            # one new device: tapping the notification opens that device, else the list of unchecked ones
+            click = msg.links[0] if len(msg.links) == 1 else msg.url
+            if click:
+                body["click"] = click
             return urllib.parse.urlunsplit(parts._replace(path=root + "/")), body
         if cfg.webhook_format == "discord":
             head = _md_escape(msg.subject)
-            tail = f"\n{msg.url}" if msg.url else ""
+            # one link, after the code block (a link inside it is not clickable): the device for one, else the list
+            link = msg.links[0] if len(msg.links) == 1 else msg.url
+            tail = f"\n{link}" if link else ""
             # a code block keeps the columns and shows hostnames as plain text; a backtick cannot close it
             lines = [_device_line(d).replace("`", "'") for d in msg.devices]
             shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
@@ -286,8 +297,8 @@ class WebhookChannel:
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}
         return url, {"event": "new_devices", "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
                      "message": msg.text, "url": msg.url or None,
-                     "devices": [{k: d.get(k) or "" for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")}
-                                 for d in msg.devices]}
+                     "devices": [{**{k: d.get(k) or "" for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")},
+                                  "url": msg.links[i] if msg.links else None} for i, d in enumerate(msg.devices)]}
 
     def _signature_headers(self, body: bytes) -> dict:
         """Standard Webhooks: v1 = HMAC-SHA256 over "<id>.<timestamp>.<body>"."""

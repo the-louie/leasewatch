@@ -181,7 +181,7 @@ class NotifyTest(MailBase):
         self.assertNotIn("\r", body)
         lines = body.split("\n")
         self.assertFalse(any(ln.startswith("Review") and "evil" in ln for ln in lines))
-        self.assertEqual(len(lines), 5)  # header, blank, one device line, blank, the real link
+        self.assertEqual(len(lines), 6)  # header, blank, one device line + its link, blank, the real link
 
     def test_s40x_empty_network_leaves_no_empty_part(self) -> None:
         subject, body = self.capture([{**self.DEV, "hostname": "", "vlan": "", "lease_type": "static"}])

@@ -45,6 +45,13 @@ class BaselineStatsTest(unittest.TestCase):
         self.db.q("UPDATE devices SET acked=1")
         self.assertEqual(self.db.stats(7)["baseline_unchecked"], 0)
 
+    def test_all_vlans_keeps_a_network_whose_only_device_is_archived(self) -> None:
+        for n, v in ((1, "Zed"), (2, "Zed"), (3, "Aaa"), (4, "Mid"), (5, "")):  # device 3 is archived, 5 has no network
+            self.db.q("UPDATE devices SET vlan=? WHERE mac=?", (v, f"02:00:00:00:00:{n:02x}"))
+        st = self.db.stats(7)
+        self.assertEqual(st["all_vlans"], ["Aaa", "Mid", "Zed"])
+        self.assertEqual(sorted(x["vlan"] for x in st["vlans"]), ["", "Mid", "Zed"])  # the chips leave Aaa out
+
     def test_empty_db(self) -> None:
         empty = Database(os.path.join(self.tmp, "e.db"))
         self.addCleanup(empty._conn.close)

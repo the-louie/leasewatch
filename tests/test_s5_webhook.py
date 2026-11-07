@@ -107,7 +107,7 @@ class JsonTests(WebhookBase):
         self.assertEqual(body["title"], "2 new devices on the network")
         self.assertIn("Alex's iPad", body["message"])
         self.assertEqual(body["url"], "https://lw.example.lan/?filter=unacked")
-        self.assertEqual(body["devices"][0], DEV)
+        self.assertEqual(body["devices"][0], {**DEV, "url": "https://lw.example.lan/?device=02:00:00:00:00:09"})
         self.assertEqual(body["devices"][1]["hostname"], "evil\r\nline")  # data, JSON-escaped
         self.assertNotIn("\r", body["message"])
         for k in ("webhook-id", "webhook-timestamp", "webhook-signature"):
@@ -142,7 +142,7 @@ class FormatTests(WebhookBase):
         self.assertEqual(body["topic"], "lw-alerts")
         self.assertEqual(body["title"], "New device: Alex's iPad (10.0.0.9, HomeNet)")
         self.assertIn("Alex's iPad", body["message"])
-        self.assertEqual(body["click"], "https://lw.example.lan/?filter=unacked")
+        self.assertEqual(body["click"], "https://lw.example.lan/?device=02:00:00:00:00:09")  # one device: its own page
 
     def test_discord(self) -> None:
         h = self.hook()
@@ -151,7 +151,7 @@ class FormatTests(WebhookBase):
         body = json.loads(h.requests[0][2])
         self.assertEqual(body["allowed_mentions"], {"parse": []})  # a hostname cannot ping anyone
         self.assertIn("```", body["content"])
-        self.assertIn("https://lw.example.lan/?filter=unacked", body["content"])
+        self.assertTrue(body["content"].endswith("```\nhttps://lw.example.lan/?device=02:00:00:00:00:09"))
         self.assertNotIn("[x](https://evil.example.com)", body["content"].split("```")[0])  # escaped outside the code block
         self.assertLessEqual(len(body["content"]), 2000)
 

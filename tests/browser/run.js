@@ -293,11 +293,27 @@ const scenarios = {
   async private(page) {
     const rows = await page.$$eval('#rows tr', trs => trs.map(t => {
       const p = t.querySelector('.c-mac .priv'), s = p && getComputedStyle(p);
-      return { mac: t.dataset.mac, cls: t.classList.contains('is-private'), shadow: getComputedStyle(t.querySelector('td')).boxShadow,
+      const h = t.querySelector('.dev-sub .priv-hint'), sub = t.querySelector('.dev-sub');
+      return { mac: t.dataset.mac, hint: h ? h.textContent.replace(/^\s*\u{1F575}\u{FE0F}/u, '') : null,
+               hint_shown: !!h && h.offsetWidth > 0 && getComputedStyle(h).visibility !== 'hidden',
+               sub_start: h ? sub.textContent.replace(/^\s*\u{1F575}\u{FE0F}?/u, '').slice(0, 15) : null,
+               ico_in_mac: !!t.querySelector('.c-mac .priv') && t.querySelector('.c-mac .priv').offsetWidth > 0,
+               ico_in_hint: !!h && h.querySelector('.ico').offsetWidth > 0,
+               cls: t.classList.contains('is-private'), shadow: getComputedStyle(t.querySelector('td')).boxShadow,
                shown: !!p && s.display !== 'none' && p.offsetWidth > 0, emoji: p ? p.textContent.includes('\u{1F575}\u{FE0F}') : false,
-               title: p ? p.getAttribute('title') : null, sr: p && p.querySelector('.sr') ? p.querySelector('.sr').textContent : null,
+               title: p ? p.getAttribute('title') : null,
                copy_text: t.querySelector('.c-mac .cp') ? t.querySelector('.c-mac .cp').textContent : null };
     }));
+    // below 900 px the MAC column is hidden: the sleuth moves into the hint, and the page does not scroll sideways
+    await page.setViewport({ width: 800, height: 900 });
+    const narrow = { scroll: await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+      rows: await page.$$eval('#rows tr', trs => Object.fromEntries(trs.map(t => {
+        const h = t.querySelector('.dev-sub .priv-hint'), m = t.querySelector('.c-mac');
+        return [t.dataset.mac, { hint: h ? h.textContent.replace(/^\s*\u{1F575}\u{FE0F}/u, '') : null,
+          hint_shown: !!h && h.offsetWidth > 0, mac_shown: m.offsetWidth > 0,
+          ico_in_hint: !!h && h.querySelector('.ico').offsetWidth > 0 }];
+      }))) };
+    await page.setViewport({ width: 1400, height: 900 });
     // the merged device's drawer lists the MAC merged into it and why
     const DEV = '02:00:00:00:10:01';
     await page.click(`${row(DEV)} .c-dev`);
@@ -320,7 +336,7 @@ const scenarios = {
     await page.waitForSelector('#events .k.merged');
     const merged_event = await page.$$eval('#events li', ls => ls.filter(l => l.querySelector('.k.merged'))
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
-    return { rows, drawer, plain, merged_event };
+    return { rows, narrow, drawer, plain, merged_event };
   },
   // a merged MAC typed into the search finds the device it was merged into, and no other row
   async aliassearch(page) {
@@ -328,6 +344,34 @@ const scenarios = {
     await page.type('#q', '06:00:00:00:10:02');
     await page.waitForFunction(v => new URLSearchParams(location.search).get('q') === v, {}, '06:00:00:00:10:02');
     return { rows: await visibleRows(page) };
+  },
+  // ?device=<mac> opens that device's drawer after the load (an alias MAC opens its owner); closing removes the key;
+  // an unknown MAC opens nothing, shows no banner and leaves no key
+  async deeplink(page, base) {
+    const DEV = '02:00:00:00:10:01', ALIAS = '06:00:00:00:10:02', UNKNOWN = '02:00:00:00:99:99';
+    const go = async q => { await page.goto(`${base}?device=${q}`, { waitUntil: 'domcontentloaded' }); await page.waitForSelector('#rows tr'); };
+    const state = () => page.evaluate(() => ({ search: location.search, title: document.querySelector('#dTitle').textContent,
+      open: document.querySelector('#drawer').classList.contains('open'), banner: !document.querySelector('#banner').classList.contains('hidden'),
+      shown: [...document.querySelectorAll('#dBody dd.mono')].map(d => d.textContent) }));
+    const res = {};
+    await go(DEV); await waitOpen(page, DEV);
+    res.direct = await state();
+    await page.click('#dClose'); await waitClosed(page);
+    res.closed = await state();
+    await go(ALIAS); await waitOpen(page, DEV);
+    res.alias = await state();
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    res.alias_closed = await state();
+    await go(DEV.toUpperCase()); await waitOpen(page, DEV);
+    res.upper = await state();
+    page.__allow = [404]; // the server is asked about a MAC the list does not have
+    await go(UNKNOWN);
+    await page.waitForFunction(() => !location.search.includes('device'));
+    res.unknown = await state();
+    page.__allow = null;
+    await go('junk');
+    res.junk = await state();
+    return res;
   },
   // MAC and IP text copy on click, Enter and Space; hovering or copying does not change any column width
   async copy(page) {
@@ -390,6 +434,21 @@ const scenarios = {
     await page.keyboard.press('Escape'); await waitClosed(page);
     await filter('all');
     res.restored.rows = await macs(); res.restored.total = await total();
+    return res;
+  },
+  // archiving the only device of an earlier network leaves the colour of a later network as it was
+  async vlancolor(page) {
+    const snap = async () => ({
+      chips: await page.$$eval('#vlans .chip', cs => Object.fromEntries(cs.map(c => [c.textContent.replace(/\s*\d+\/\d+$/, '').trim(),
+        getComputedStyle(c.querySelector('.sw')).getPropertyValue('--vc').trim()]))),
+      row: await page.$eval('#rows tr:not([data-mac="0a:00:00:00:10:03"]) .c-vlan .badge', b => getComputedStyle(b).getPropertyValue('--vc').trim()) });
+    const M = '0a:00:00:00:10:03';
+    const res = { before: await snap() };
+    await page.click(`${row(M)} .c-dev`); await waitOpen(page, M);
+    await page.click('#fArch');
+    await page.waitForFunction(s => !document.querySelector(s), {}, row(M));
+    await page.waitForFunction(() => ![...document.querySelectorAll('#vlans .chip')].some(c => c.textContent.startsWith('Aaa')));
+    res.after = await snap();
     return res;
   },
   // connector events (mac ""): plain text, no who button, nothing to open
@@ -502,7 +561,8 @@ async function runScenario(browser, base, name) {
     }
     // listeners before goto, or the first load's errors are missed
     page.on('console', m => {
-      if (m.type() === 'error') res.console_errors.push(m.text());
+      // a scenario that asks for a known 404 (page.__allow) does not fail on Chrome's console line for it
+      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \(Not Found\)/.test(m.text()))) res.console_errors.push(m.text());
       if (/^Refused to|Content Security Policy/.test(m.text())) res.csp_violations.push(`console: ${m.text()}`);
     });
     // the page's own report of anything the CSP blocked, from every document the page loads
@@ -520,7 +580,7 @@ async function runScenario(browser, base, name) {
     });
     page.on('pageerror', e => res.console_errors.push(`pageerror: ${e.message}`));
     page.on('requestfailed', r => res.failed_requests.push(`${r.failure() ? r.failure().errorText : 'failed'} ${r.url()}`));
-    page.on('response', r => { if (r.status() >= 400) res.failed_requests.push(`http ${r.status()} ${r.url()}`); });
+    page.on('response', r => { if (r.status() >= 400 && !(page.__allow || []).includes(r.status())) res.failed_requests.push(`http ${r.status()} ${r.url()}`); });
     if (!scenarios[name]) throw new Error(`unknown scenario ${name}`);
     await page.setViewport({ width: 1400, height: 900 });
     const doc = await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 15000 });

@@ -7,6 +7,7 @@
   const state = {
     devices: [], meta: null, stats: null, events: [],
     q: "", status: "all", vlan: null, sort: "first_desc", open: null, returnTo: null, apiDown: false,
+    deepLink: null, // the ?device= MAC from the address, until the first load has opened its drawer
     renderError: null, // kept so the 15 s status refresh does not hide a page error while the table is still broken
     loadSeq: 0, // number of the newest load(): an older one that answers later must not write its snapshot over it
     drawerGet: null, // {mac, focus, ctl} of the one drawer GET in flight: only its reply is applied; replacing it aborts it
@@ -18,10 +19,11 @@
     revalidated: new Map(),
   };
   const VLAN_COLORS = ["--vlan1", "--vlan2", "--vlan3", "--vlan4", "--vlan5", "--vlan6", "--vlan7", "--vlan8"];
-  // stable colour per network: alphabetical position, so colours do not shift when counts change
+  // stable colour per network: alphabetical position among every network of any device (archived too), so colours
+  // shift neither when counts change nor when a network's last listed device is archived
   const vlanColor = v => {
     if (!v) return "var(--vlan0)";
-    const all = (state.stats?.vlans || []).map(x => x.vlan).filter(Boolean).sort();
+    const all = (state.stats?.all_vlans || []).filter(Boolean).sort();
     const i = all.indexOf(v);
     return `var(${i < 0 ? "--vlan0" : VLAN_COLORS[i % VLAN_COLORS.length]})`;
   };
@@ -250,6 +252,8 @@
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
       if (!sub.length && !d.name && !d.wifi_alias && !d.hostname) sub.push(`<span class="host">${esc(d.mac)}</span>`);
+      // a private address says so in words at every width; the sleuth shows here only where the MAC column is hidden
+      if (d.private) sub.unshift('<span class="priv-hint"><span class="ico" aria-hidden="true">\u{1F575}\u{FE0F}</span>private address</span>');
       $(".dev-sub", tr).innerHTML = sub.join(" · ");
       $(".dev-meta .ip", tr).textContent = d.ip || "–";
       const vm = $(".dev-meta .badge", tr); vm.textContent = d.vlan || "?"; vm.style.setProperty("--vc", vlanColor(d.vlan));
@@ -354,7 +358,7 @@
     if (state.open !== mac) { $("#dTitle").textContent = "Device"; $("#dBody").innerHTML = '<p class="muted">loading…</p>'; state.form = null; }
     // a switch from inside the drawer keeps the control outside it to return to (a drawer control is inert after close)
     if (!$("#drawer").contains(document.activeElement)) state.returnTo = document.activeElement;
-    state.open = mac;
+    state.open = mac; syncUrl();
     $("#drawer").classList.add("open"); $("#scrim").classList.add("show"); $("#drawer").setAttribute("aria-hidden", "false"); $("#drawer").inert = false;
     // the page behind the modal drawer takes no focus or clicks until it closes (Tab wraps inside it, see the keydown)
     $$("body > header, body > main, body > footer").forEach(e => { e.inert = true; });
@@ -364,7 +368,7 @@
     if (!state.open || !discardOk()) return;
     const mac = state.open;
     state.drawerGet?.ctl.abort(); state.drawerGet = null;
-    state.open = null; $("#drawer").classList.remove("open"); $("#scrim").classList.remove("show"); $("#drawer").setAttribute("aria-hidden", "true"); $("#drawer").inert = true;
+    state.open = null; syncUrl(); $("#drawer").classList.remove("open"); $("#scrim").classList.remove("show"); $("#drawer").setAttribute("aria-hidden", "true"); $("#drawer").inert = true;
     $$("body > header, body > main, body > footer").forEach(e => { e.inert = false; }); // before the focus goes back to a row
     // the row that opened the drawer may have been re-rendered by a poll: fall back to its replacement, then the search box
     const back = state.returnTo?.isConnected ? state.returnTo : ($$("#rows tr").find(tr => tr.dataset.mac === mac) || $("#q"));
@@ -503,16 +507,35 @@
     clearTimeout(urlRetry);
     const p = new URLSearchParams();
     if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan !== null) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
+    // the open drawer is part of the address, so a copied URL shows the same device; a link not yet opened stays
+    const dev = state.open || state.deepLink;
     // WebKit throws after ~100 calls in a short window (fast typing): retry until the window ends, or the URL keeps
     // the last state written before it
-    try { history.replaceState(null, "", p.toString() ? `?${p}` : location.pathname); } catch (_) { urlRetry = setTimeout(syncUrl, 1000); }
+    // the colons stay as they are, as in the links of the notifications
+    const qs = [p.toString(), dev ? `device=${encodeURIComponent(dev).replace(/%3A/gi, ":")}` : ""].filter(Boolean).join("&");
+    try { history.replaceState(null, "", qs ? `?${qs}` : location.pathname); } catch (_) { urlRetry = setTimeout(syncUrl, 1000); }
   }
   function readUrl() {
     const p = new URLSearchParams(location.search);
     state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan"); state.sort = p.get("sort") || "first_desc";
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
+    // lower case, colon form only: anything else is ignored, and the next syncUrl() drops it from the address
+    const dl = (p.get("device") || "").toLowerCase();
+    state.deepLink = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(dl) ? dl : null;
     if (!$("#fStatus").value) { state.status = "all"; $("#fStatus").value = "all"; }
     if (!$("#sort").value) { state.sort = "first_desc"; $("#sort").value = "first_desc"; }
+  }
+  // the drawer of the ?device= link, once the first load has the list and meta the drawer needs. The MAC may be one that
+  // was merged into a device (the rows list their aliases); one in no row is asked of the server, which also knows
+  // merged MACs and devices newer than the list. One that nothing knows opens no drawer
+  async function openDeepLink() {
+    const m = state.deepLink;
+    if (!state.meta) return; // the API was unreachable: the key stays in the address
+    if (!m) { syncUrl(); return; } // no link, or a malformed one: leave no stray key in the address
+    state.deepLink = null;
+    let key = state.devices.find(d => d.mac === m || (d.aliases || []).includes(m))?.mac;
+    if (!key) { try { key = (await api(`/api/devices/${m}`)).device.mac; } catch (_) { syncUrl(); return; } }
+    await openDrawer(key);
   }
   function clearFilters() { state.q = ""; state.vlan = null; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderTable(); syncUrl(); }
 
@@ -542,7 +565,7 @@
   const theme = store.get("theme"); if (theme) document.documentElement.dataset.theme = theme;
   $("#themeBtn").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; store.set("theme", next); };
 
-  readUrl(); load();
+  readUrl(); load().then(openDeepLink);
   setInterval(load, 60000);
   setInterval(() => { if (state.meta && !state.apiDown) renderStatus(); }, 15000);
 })();
