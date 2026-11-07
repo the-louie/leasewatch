@@ -67,6 +67,11 @@ def _dev(d: dict) -> dict:
     return {**d, "private": is_private_mac(d["mac"])}
 
 
+def _wifi_row(w: dict) -> dict:
+    """A wifi_presence row for the list: without the AP and the poll count, which only the detail route sends."""
+    return {k: v for k, v in w.items() if k not in ("last_ap", "polls_seen")}
+
+
 def _connector_label(s: InstanceSpec, instances: list[InstanceSpec]) -> str:
     """The dot text in the page: the switch's own NAME, "Wi-Fi"; the instance name stays the id."""
     if s.type == "snmp_switch":
@@ -493,7 +498,9 @@ class Handler(BaseHTTPRequestHandler):
         etag = self._etag(version, meta)
         if self._matches(etag):
             return self._not_modified(etag)
-        self._json_vary({"meta": meta, "devices": [_dev(d) for d in self.db.devices()]}, etag)
+        devices = self.db.devices()
+        wifi = self.db.wifi_presence_all()  # one query for all rows, in the same body build as the devices
+        self._json_vary({"meta": meta, "devices": [_dev({**d, "wifi_presence": [_wifi_row(w) for w in wifi.get(d["mac"], [])]}) for d in devices]}, etag)
 
     def _api_status(self) -> None:
         self._json_vary({"meta": self._meta()})

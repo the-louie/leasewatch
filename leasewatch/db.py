@@ -417,10 +417,16 @@ class Database:
             # archiving a network's last device must not shift the colours of the networks after it
             allv = self._c().execute("SELECT DISTINCT vlan FROM devices WHERE vlan != '' ORDER BY vlan").fetchall()
             recent = self._c().execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
+            ever = self._c().execute("SELECT ssid, COUNT(*) n FROM wifi_presence GROUP BY ssid").fetchall()
+            now_on = self._c().execute("SELECT wifi_ssid, COUNT(*) n FROM devices WHERE online=1 AND wifi_ssid != '' GROUP BY wifi_ssid").fetchall()
             tot = self._c().execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=1 AND acked=0 THEN 1 ELSE 0 END) baseline_unchecked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
+        now_by = {r["wifi_ssid"]: r["n"] for r in now_on}
+        ssids = sorted(({"ssid": r["ssid"], "devices_ever": r["n"], "devices_now": now_by.get(r["ssid"], 0)} for r in ever),
+                       key=lambda x: (-x["devices_ever"], x["ssid"]))
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "baseline_unchecked": tot["baseline_unchecked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],
             "all_vlans": [r["vlan"] for r in allv],
+            "ssids": ssids,
             "new_recent": [r["first_seen"] for r in recent],  # epochs; the browser buckets them by its own local day
         }
