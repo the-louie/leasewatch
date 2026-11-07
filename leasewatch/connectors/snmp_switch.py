@@ -26,6 +26,7 @@ class _SnmpCfg:
     snmp_auth: str
     snmp_auth_key: str = field(repr=False)
     snmp_priv_key: str = field(repr=False)
+    snmp_port: int = 161
 
 
 def name_uplinks(snap: SwitchSnapshot, device_names: Callable[[], dict[str, str]]) -> None:
@@ -60,6 +61,7 @@ class SnmpSwitchConnector(SettingsMixin):
             Setting("host", required=True, help="switch address"),
             Setting("name", default="switch", help="switch name shown in the UI"),
             Setting("user", default="leasewatch", help="SNMPv3 user"),
+            Setting("port", default="161", kind="int", min=1, max=65535, help="switch SNMP UDP port"),
             Setting("auth", default="SHA", choices=("SHA", "SHA256"), help="SNMPv3 auth protocol"),
             Setting("auth_key", required=True, secret=True, help="SNMPv3 auth key"),
             Setting("priv_key", required=True, secret=True, help="SNMPv3 privacy key (AES-128)"),
@@ -83,7 +85,7 @@ class SnmpSwitchConnector(SettingsMixin):
         profile = self._profile()
         min_macs = self._min_macs()
         # read at call time: the host (and tests) may swap the client object
-        self.client = client if client is not None else SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"]),  # type: ignore[arg-type]
+        self.client = client if client is not None else SwitchClient(_SnmpCfg(s["host"], s["user"], s["auth"], s["auth_key"], s["priv_key"], self._port()),  # type: ignore[arg-type]
                                                                      profile=profile, min_macs=min_macs, name=name, timeout=self.ctx.timeout)
 
     def _profile(self) -> dict | None:
@@ -109,6 +111,14 @@ class SnmpSwitchConnector(SettingsMixin):
                     self.profile_problems.append(f"{where}: built-in PROFILE {name} cannot be loaded")
                 return None
         return None
+
+    def _port(self) -> int:
+        """The PORT setting; a bad value is reported by validate(), so the client gets the default meanwhile."""
+        try:
+            n = int(self.settings["port"].strip())
+        except ValueError:
+            return 161
+        return n if 1 <= n <= 65535 else 161
 
     def _min_macs(self) -> int | None:
         v = self.settings["min_macs"].strip()

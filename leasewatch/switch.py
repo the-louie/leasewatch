@@ -442,7 +442,7 @@ class SwitchClient:
         auth = {"SHA": usmHMACSHAAuthProtocol, "SHA256": usmHMAC192SHA256AuthProtocol}[self.cfg.snmp_auth]
         eng = SnmpEngine()
         try:
-            tgt = await UdpTransportTarget.create((self.cfg.snmp_host, 161), timeout=snmp["timeout"], retries=snmp["retries"])
+            tgt = await UdpTransportTarget.create((self.cfg.snmp_host, getattr(self.cfg, "snmp_port", 161)), timeout=snmp["timeout"], retries=snmp["retries"])
             user = UsmUserData(self.cfg.snmp_user, self.cfg.snmp_auth_key, self.cfg.snmp_priv_key, authProtocol=auth, privProtocol=usmAesCfb128Protocol)
         except BaseException:
             eng.close_dispatcher()
@@ -570,7 +570,7 @@ class SwitchClient:
                 if (self.profile["snmp"]["timeout"], self.profile["snmp"]["retries"]) != (snmp["timeout"], snmp["retries"]):
                     from pysnmp.hlapi.v3arch.asyncio import UdpTransportTarget
                     snmp = self.profile["snmp"]
-                    tgt = await UdpTransportTarget.create((self.cfg.snmp_host, 161), timeout=snmp["timeout"], retries=snmp["retries"])
+                    tgt = await UdpTransportTarget.create((self.cfg.snmp_host, getattr(self.cfg, "snmp_port", 161)), timeout=snmp["timeout"], retries=snmp["retries"])
             p = self.profile
             if self.min_macs is not None:  # a copy: the cached profile keeps the profile's own value
                 p = {**p, "uplink": {**p["uplink"], "min_macs": self.min_macs}}

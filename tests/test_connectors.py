@@ -54,7 +54,7 @@ class DescribeTests(unittest.TestCase):
     def test_settings_cover_the_config_fields(self):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy"})
-        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "name", "user", "auth", "auth_key", "priv_key", "profile", "profile_file", "min_macs"})
+        self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "port", "name", "user", "auth", "auth_key", "priv_key", "profile", "profile_file", "min_macs"})
         self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "verify_tls", "proxy", "platform"})
 
     def test_wrappers_are_connectors(self):
