@@ -165,6 +165,7 @@ def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
             "if": ifc, "if_descr": descr, "if_dev": dev, "type": "static", "status": "",
             # "description" is the field name in the OPNsense Kea reservation model; a row without it gives ""
             "label": _s(r.get("description"))[:LABEL_MAX].strip(),
+            "subnet": _s(r.get("subnet")),  # picks the reservation of a leased MAC reserved in several subnets
         })
     return out
 
@@ -207,6 +208,20 @@ def _cidr_map(reservations: list, lease_rows: list[dict], arp: list) -> dict:
             if ip is not None and text not in out and ip in net:
                 out[text] = ("", _s(a.get("intf_description")), _s(a.get("intf")))
     return out
+
+
+def _res_label(rows: list[dict] | None, lease: dict) -> str:
+    """The label of a leased MAC's reservation: the one whose subnet holds the lease's IP, else the first labelled
+    row in API order (so a MAC reserved in two subnets does not get whichever row the API returns last)."""
+    if not rows:
+        return ""
+    ip = _addr(_s(lease.get("address"))) if _s(lease.get("address")) else None
+    if ip is not None:
+        for r in rows:
+            net = _net(r["subnet"]) if r.get("subnet") else None
+            if net is not None and ip.version == net.version and ip in net:
+                return r["label"]
+    return next((r["label"] for r in rows if r["label"]), "")
 
 
 class Fw1Client:
@@ -300,17 +315,23 @@ class Fw1Client:
         skip = lambda *names: any(_s(n).lower() in ign for n in names)
         leases = self.leases_raw()
         reservations = None
+        labels_unavailable = False
         if self.dhcp_backend == "kea":
             # reservations only add lease-less devices; an API key without that privilege must not stop the poll
             try:
                 reservations = self.reservations_raw()
             except Fw1Error as e:
                 log.warning("reservations unavailable, listing leases only: %s", e)
+                labels_unavailable = True
         arp = self.arp_raw()
         try:
-            return self._sightings(leases, arp, skip, reservations)
+            out, stats = self._sightings(leases, arp, skip, reservations)
         except (TypeError, AttributeError, KeyError) as e:
             raise Fw1Error("fw1: unexpected field type in leases/arp") from e
+        if labels_unavailable:
+            # the labels come from the reservations: an empty one this poll is no evidence, so the merge keeps the stored labels
+            stats["labels_unavailable"] = 1
+        return out, stats
 
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
@@ -323,9 +344,11 @@ class Fw1Client:
             # only lease-less reservations are added as rows
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
             res_rows = kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
-            res_label = {norm_mac(_s(r.get("mac"))): r["label"] for r in res_rows
-                         if r.get("label") and norm_mac(_s(r.get("mac"))) in leased}
-            lease_rows = [{**l, "label": res_label[m]} if not l.get("label") and (m := norm_mac(_s(l.get("mac")))) in res_label
+            by_mac: dict[str, list[dict]] = {}
+            for r in res_rows:
+                if (m := norm_mac(_s(r.get("mac")))) in leased:
+                    by_mac.setdefault(m, []).append(r)
+            lease_rows = [{**l, "label": lab} if not l.get("label") and (lab := _res_label(by_mac.get(norm_mac(_s(l.get("mac")))), l))
                           else l for l in lease_rows]
             lease_rows = lease_rows + [r for r in res_rows if norm_mac(_s(r.get("mac"))) not in leased]
         for l in lease_rows:

@@ -25,12 +25,13 @@ def sight(label: str = "", host: str = "") -> Sighting:
 class Client:
     def __init__(self, sightings: list) -> None:
         self.data = sightings
+        self.extra: dict = {}
 
     def arp_raw(self) -> list:
         return []
 
     def sightings(self, ignore: tuple = ()) -> tuple:
-        return list(self.data), {"leases": len(self.data), "arp": 0}
+        return list(self.data), {"leases": len(self.data), "arp": 0, **self.extra}
 
 
 class LabelStoreTests(unittest.TestCase):
@@ -68,6 +69,18 @@ class LabelStoreTests(unittest.TestCase):
         self.assertEqual(db.device(MAC)["label"], "Kitchen shelf plug")
         # the label follows the source: a poll whose DHCP sighting has none clears it
         client.data = [sight("")]
+        col.run_once()
+        self.assertEqual(db.device(MAC)["label"], "")
+
+    def test_poll_with_reservations_unavailable_keeps_the_stored_label(self) -> None:
+        db = self.open_db()
+        client = Client([sight("Kitchen shelf plug")])
+        col = Collector(self.cfg, db, client)
+        col.run_once()
+        client.data, client.extra = [sight("")], {"labels_unavailable": 1}
+        col.run_once()
+        self.assertEqual(db.device(MAC)["label"], "Kitchen shelf plug")
+        client.extra = {}  # the search answers again and the description is gone
         col.run_once()
         self.assertEqual(db.device(MAC)["label"], "")
 

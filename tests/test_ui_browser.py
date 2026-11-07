@@ -932,7 +932,16 @@ class BrowserCollectorStaleTest(_BrowserCase):
     def setUpClass(cls) -> None:
         logging.disable(logging.CRITICAL)
         cls.addClassCleanup(logging.disable, logging.NOTSET)
-        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new])
+        import leasewatch.web as web
+        real = web.make_handler
+
+        def old_process(*a: object) -> type:  # an attempt from before the start counts as none: judged by process age
+            h = real(*a)
+            h.started -= 7200
+            return h
+
+        with mock.patch.object(web, "make_handler", old_process):
+            base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new])
         db.set_meta("last_attempt_ts", str(int(time.time()) - 7200))
         cls.run_scenarios(base, ("collector",))
 

@@ -498,6 +498,9 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
     # the producers known: otherwise a failed switch would count and hide new devices for nothing
     hold = lease_blind and state.producers is not None
+    # label-blind: the failed instance, or a producer whose reservation search failed (stats labels_unavailable), may
+    # hold a device's label, so an empty label this poll is no evidence that it was removed
+    label_blind = lease_blind or any(type(v := b.stats.get("labels_unavailable")) is int and v > 0 for b in ok.values())
     raw, keys, new_aliases, folds, folded, prev = _decide_keys(ok, prev, state, hold, now)
     held = _held_back(raw, keys, prev, state, hold, now)
     ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
@@ -509,7 +512,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     res.events += _merge_events(new_aliases, folds, folded, now)
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}
-    changes = _update_rows(rows, merged, cfg, state, now, lease_blind, grace_s, res)
+    changes = _update_rows(rows, merged, cfg, state, now, lease_blind, grace_s, res, label_blind)
     _apply_attachments(rows, merged, batches, ok, state, res, att_macs)
     res.seen += _seen_rows(ok, rows, now)
     for row in rows.values():
@@ -599,7 +602,7 @@ def _merge_events(new_aliases: list[tuple[str, str, str, str]], folds: list[tupl
 
 
 def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, state: MergeState, now: int,
-                 lease_blind: bool, grace_s: int, res: MergeResult) -> int:
+                 lease_blind: bool, grace_s: int, res: MergeResult, label_blind: bool = False) -> int:
     """Each merged device's row added or updated in place, with its events and history; returns the changed count."""
     changes = 0
     for mac, m in merged.items():
@@ -615,7 +618,7 @@ def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, 
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
                 res.new.append(mac)
             continue
-        changes += _update_row(mac, cur, m, sources, cfg, state, now, lease_blind, grace_s, res)
+        changes += _update_row(mac, cur, m, sources, cfg, state, now, lease_blind, grace_s, res, label_blind)
     return changes
 
 
@@ -665,7 +668,7 @@ def _back_event(cur: dict, m: Merged, now: int, prev_ok: bool) -> tuple[str, str
 
 
 def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state: MergeState, now: int,
-                lease_blind: bool, grace_s: int, res: MergeResult) -> int:
+                lease_blind: bool, grace_s: int, res: MergeResult, label_blind: bool = False) -> int:
     """A known device's row updated in place from this poll's record; returns 1 when it writes a history row."""
     ev = _change_events(cur, m)
     lease_type = _settle_lease_type(mac, cur, m, cfg, state, now, lease_blind, grace_s, ev)
@@ -695,7 +698,9 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
     cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
                iface=iface, lease_type=lease_type, sources=sources, online=int(online),
-               client_id=m.client_id or cur["client_id"], label=m.label)
+               client_id=m.client_id or cur["client_id"],
+               # label-blind: a label read this poll still wins, an empty one keeps the stored label
+               label=m.label or cur["label"] if label_blind else m.label)
     return changed
 
 

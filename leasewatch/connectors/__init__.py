@@ -132,7 +132,9 @@ class Attachment:
 class Batch:
     """The result of one collect(). stats: raw counts for status, all optional (the host reads a missing key as 0):
     "leases", "arp", "reservations" (sighting producers), "macs" (switch), "clients" (controller); the host adds
-    "dropped" (malformed records dropped: an invalid MAC or the wrong type). Values are ints, except these documented string keys: "strategy"
+    "dropped" (malformed records dropped: an invalid MAC or the wrong type); "labels_unavailable" (> 0 when the labels
+    the producer normally attaches could not be read this poll: the host keeps the stored label of every device
+    instead of clearing it). Values are ints, except these documented string keys: "strategy"
     (switch: the FDB strategy that produced the rows; the host copies it to meta conn.<name>.strategy)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)

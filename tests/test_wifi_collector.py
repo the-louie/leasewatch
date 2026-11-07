@@ -60,8 +60,26 @@ class WifiCollectorTests(unittest.TestCase):
 
     def test_gap_over_the_cap_counts_one_poll(self):
         self.build(); p = self.cfg.poll_seconds
-        self.poll(T0); self.poll(T0 + 3 * 120)  # 360 s > 2 * 120 + 60
+        self.poll(T0); self.poll(T0 + 2 * p + 60 + 60 + 1)  # one over the cap: 2 * poll + TIMEOUT (60) + 60
         self.assertEqual(self.rows()[0][4:6], (2 * p, 2))
+
+    def test_missed_poll_after_a_timeout_is_bridged(self):
+        # a poll that timed out ran TIMEOUT s, then the loop slept POLL_SECONDS: the next sighting is
+        # 2 * poll + timeout + 2 s after the last
+        self.build(); p = self.cfg.poll_seconds
+        gap = 2 * p + 60 + 2
+        self.poll(T0); self.poll(T0 + gap)
+        self.assertEqual(self.rows()[0][4:6], (p + gap, 2))
+
+    def test_cap_follows_the_longest_enabled_timeout(self):
+        os.environ["LW_CONNECTOR__UNIFI__TIMEOUT"] = "10"
+        os.environ["LW_CONNECTOR__FW1__TIMEOUT"] = "10"
+        self.build(); p = self.cfg.poll_seconds
+        cap = 2 * p + 10 + 60
+        self.poll(T0); self.poll(T0 + cap)
+        self.assertEqual(self.rows()[0][4:6], (p + cap, 2))
+        self.poll(T0 + cap + cap + 1)
+        self.assertEqual(self.rows()[0][4:6], (p + cap + p, 3))
 
     def test_clock_step_back_counts_one_poll(self):
         self.build(); p = self.cfg.poll_seconds

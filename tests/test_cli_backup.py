@@ -81,7 +81,8 @@ class BackupTests(unittest.TestCase):
         bdir = os.path.join(self.dir, "backups")
         os.makedirs(bdir)
         for d in range(1, 5):
-            open(os.path.join(bdir, f"leasewatch-2026010{d}-120000.sqlite3"), "w").close()
+            with open(os.path.join(bdir, f"leasewatch-2026010{d}-120000.sqlite3"), "w") as f:
+                f.write("x")
         rc, out, _ = self.cli("backup", "--keep", "0")
         self.assertEqual(rc, 0)
         self.assertIn("5 kept, 0 removed", out)
@@ -111,7 +112,8 @@ class BackupTests(unittest.TestCase):
         bdir = os.path.join(self.dir, "backups")
         os.makedirs(bdir)
         for d in range(1, 9):
-            open(os.path.join(bdir, f"leasewatch-209901{d:02d}-120000.sqlite3"), "w").close()
+            with open(os.path.join(bdir, f"leasewatch-209901{d:02d}-120000.sqlite3"), "w") as f:
+                f.write("x")
         with mock.patch.object(maintenance, "_stamp", lambda: "20261107-031500"):
             rc, out, err = self.cli("backup", "--keep", "7")
         self.assertEqual((rc, err), (0, ""))
@@ -125,7 +127,8 @@ class BackupTests(unittest.TestCase):
         self.make_db()
         bdir = os.path.join(self.dir, "backups")
         os.makedirs(bdir)
-        open(os.path.join(bdir, "leasewatch-20990101-120000.sqlite3"), "w").close()
+        with open(os.path.join(bdir, "leasewatch-20990101-120000.sqlite3"), "w") as f:
+            f.write("x")
         rc, out, _ = self.cli("backup", "--keep", "1")
         self.assertEqual(rc, 0)
         self.assertIn("1 kept, 1 removed", out)
@@ -239,6 +242,62 @@ class BackupTests(unittest.TestCase):
         self.make_db()
         os.environ["LW_CONNECTORS"] = "nope"  # no such instance settings: validate() would refuse
         self.assertEqual(self.cli("backup")[0], 0)
+
+    def test_killed_run_leftovers_are_not_backups(self):
+        # the state a SIGKILL left in the old design: an empty file with a backup name and a .part file
+        self.make_db()
+        bdir = os.path.join(self.dir, "backups")
+        os.makedirs(bdir)
+        real = ["leasewatch-20260101-120000.sqlite3", "leasewatch-20260102-120000.sqlite3"]
+        for n in real:
+            with open(os.path.join(bdir, n), "w") as f:
+                f.write("x")
+        empty = "leasewatch-20260103-120000.sqlite3"
+        open(os.path.join(bdir, empty), "w").close()
+        stale = os.path.join(bdir, ".leasewatch-20260103-120000.sqlite3.1.part")
+        fresh = os.path.join(bdir, ".leasewatch-20260104-120000.sqlite3.2.part")
+        for p in (stale, fresh):
+            with open(p, "w") as f:
+                f.write("x")
+        os.utime(stale, (1, 1))
+        rc, out, err = self.cli("backup", "--keep", "2")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("2 kept, 1 removed", out)  # the older real backup goes, the empty file is not counted
+        left = self.backups()
+        self.assertIn(real[1], left)
+        self.assertNotIn(real[0], left)
+        self.assertIn(empty, left)
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(fresh))  # younger than a day: may be a running backup
+
+    def test_normal_run_leaves_no_part_and_suffixes_taken_names(self):
+        self.make_db()
+        with mock.patch.object(maintenance, "_stamp", lambda: "20261107-031500"):
+            self.assertEqual(self.cli("backup")[0], 0)
+            self.assertEqual(self.cli("backup")[0], 0)
+        self.assertEqual(self.backups(), ["leasewatch-20261107-031500-1.sqlite3", "leasewatch-20261107-031500.sqlite3"])
+
+    def test_vacuum_before_counts_the_wal(self):
+        self.make_db(0)
+        con = sqlite3.connect(self.db_path)
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.executemany("INSERT INTO events(ts, mac, kind, detail) VALUES (?,?,?,?)",
+                        [(i, "02:00:00:00:00:03", "new", "d" * 100) for i in range(20000)])
+        con.commit()
+        wal = os.path.getsize(self.db_path + "-wal")
+        self.assertGreater(wal, 1_000_000)
+        # an unclean stop: the writer is gone, the data is only in the -wal file (a copy keeps it unmerged)
+        copy = os.path.join(self._tmp.name, "crash")
+        os.makedirs(copy)
+        for suffix in ("", "-wal"):
+            with open(self.db_path + suffix, "rb") as f, open(os.path.join(copy, "leasewatch.sqlite3" + suffix), "wb") as g:
+                g.write(f.read())
+        con.close()
+        os.environ["DATA_DIR"] = copy
+        rc, out, err = self.cli("vacuum")
+        self.assertEqual((rc, err), (0, ""))
+        before = float(re.match(r"vacuum: (\d+\.\d) MB", out).group(1))
+        self.assertGreaterEqual(before, round(wal / 1e6, 1) - 0.1)
 
     def test_vacuum_shrinks(self):
         self.make_db(0)

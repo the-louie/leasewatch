@@ -51,6 +51,10 @@ class DescribeTests(unittest.TestCase):
                 if s.choices and s.default:
                     self.assertIn(s.default, s.choices)
 
+    def test_snmp_switch_version_counts_the_1_3_settings(self):
+        # PORT, PRIV and the new AUTH names (1.3) are a connector change, as PLATFORM took unifi to 1.1
+        self.assertEqual(SnmpSwitchConnector.describe().version, "1.1")
+
     def test_settings_cover_the_config_fields(self):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy"})

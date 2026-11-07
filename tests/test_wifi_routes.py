@@ -170,6 +170,16 @@ class CsvTests(_Base):
         self.assertEqual([r[1] for r in rows[1:]], ["Alice", "al-b", "h-c", ""])
         self.assertNotIn("hostname", rows[0])
 
+    def test_name_falls_back_to_label_as_the_page_does(self) -> None:
+        # the page: name, Wi-Fi alias, hostname, label; vendor and mac have their own columns
+        self._dev(A, label="Printer hall", vendor="Acme")
+        self._dev(B, hostname="h-b", label="not this")
+        self._dev(C, vendor="Acme")
+        for i, m in enumerate((A, B, C)):
+            self._wp(m, "n", first=5 + i)
+        _, _, rows = self.rows("n")
+        self.assertEqual([(r[1], r[2]) for r in rows[1:]], [("Printer hall", "Acme"), ("h-b", ""), ("", "Acme")])
+
     def test_hours_rounding(self) -> None:
         self._dev(A)
         self._dev(B)

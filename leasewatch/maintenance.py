@@ -60,25 +60,48 @@ def _free_name(directory: str) -> str:
     return name
 
 
-def _reserve(directory: str) -> str:
-    """Create the final file empty (mode 0600) under a name no other run holds. Returns its path."""
+def _publish(part: str, directory: str) -> str:
+    """Give the finished `part` file its backup name in `directory`, never replacing a file another run holds: a hard
+    link fails with EEXIST when the name is taken, and the next name is tried. The final name never exists as an
+    empty file, so a killed run leaves at most a .part file. Returns the final path."""
     while True:
         final = os.path.join(directory, _free_name(directory))
         try:
-            os.close(os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-            return final
+            os.link(part, final)
         except FileExistsError:
-            continue  # taken between the check and the create: the next name is free
+            continue  # taken between the check and the link: the next name is free
+        except OSError:  # the file system has no hard links: rename, after a check (a rare race remains)
+            if os.path.lexists(final):
+                continue
+            os.rename(part, final)
+        return final
+
+
+def _stale_parts(directory: str, now: float | None = None) -> None:
+    """Remove .part files a killed run left (older than a day, so a running backup's file stays)."""
+    cutoff = (time.time() if now is None else now) - 86400
+    for name in os.listdir(directory):
+        if name.startswith(".leasewatch-") and name.endswith(".part"):
+            path = os.path.join(directory, name)
+            try:
+                if os.stat(path).st_mtime < cutoff:
+                    os.unlink(path)
+            except OSError:
+                pass
 
 
 def _rotate(directory: str, keep: int, current: str) -> tuple[int, int]:
     """Delete all but the newest `keep` backups (0 = all are kept); the file `current`, just written, always stays.
-    Returns (kept, removed)."""
+    Empty files with a backup name are no backups: they are not counted and not deleted. Returns (kept, removed)."""
+    _stale_parts(directory)
     found = []
     for name in os.listdir(directory):
         m = BACKUP_NAME_RE.match(name)
-        if m:
-            found.append((m.group(1), int(m.group(2) or 0), name))
+        try:
+            if m and os.stat(os.path.join(directory, name)).st_size > 0:
+                found.append((m.group(1), int(m.group(2) or 0), name))
+        except OSError:
+            pass
     found.sort()  # by stamp, then by the -N suffix as a number ("-10" after "-2", "-1" after the plain name)
     others = [f for f in found if f[2] != current]
     room = keep - 1  # the new file takes one of the places
@@ -93,11 +116,15 @@ def _rotate(directory: str, keep: int, current: str) -> tuple[int, int]:
     return len(found) - removed, removed
 
 
-def _copy(src: sqlite3.Connection, final: str, reserved: bool = False) -> str:
-    """Write a consistent copy to final (an empty file this run reserved, if `reserved`). Returns its size text,
-    or "!" plus the failure text."""
-    directory, name = os.path.split(final)
-    part = os.path.join(directory, f".{name}.{os.getpid()}.part")
+def _copy(src: sqlite3.Connection, final: str | None, directory: str | None = None) -> tuple[str, str]:
+    """Write a consistent copy to `final`, or to a free backup name in `directory` if `final` is None. Returns
+    (path, size text), or ("", "!" plus the failure text)."""
+    if final is None:
+        assert directory is not None
+        part = os.path.join(directory, f".leasewatch-{_stamp()}.{os.getpid()}.{os.urandom(4).hex()}.part")
+    else:
+        directory, name = os.path.split(final)
+        part = os.path.join(directory, f".{name}.{os.getpid()}.part")
     old_umask = os.umask(0o077)
     try:
         dst = sqlite3.connect(part, isolation_level=None)
@@ -112,26 +139,28 @@ def _copy(src: sqlite3.Connection, final: str, reserved: bool = False) -> str:
         finally:
             dst.close()
         if res is None or res[0] != "ok":
-            return f"!integrity check: {res[0] if res else 'no result'}"
+            return "", f"!integrity check: {res[0] if res else 'no result'}"
         fd = os.open(part, os.O_RDONLY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.replace(part, final)
+        if final is None:
+            final = _publish(part, directory)
+            try:
+                os.unlink(part)  # gone already after the rename fallback
+            except OSError:
+                pass
+        else:
+            os.replace(part, final)
         done = True
         _fsync_dir(directory)
-        return _mb(final)
+        return final, _mb(final)
     finally:
         if not done:
             for suffix in ("", "-journal", "-wal", "-shm"):
                 try:
                     os.unlink(part + suffix)
-                except OSError:
-                    pass
-            if reserved:
-                try:
-                    os.unlink(final)
                 except OSError:
                     pass
 
@@ -177,12 +206,12 @@ def backup_cmd(argv: list[str], out: Callable[[str], None]) -> int:
             return _fail("backup", f"cannot open {cfg.db_path}: {e}")
         try:
             if args.to is not None:
-                final, directory = args.to, None
+                directory = None
+                final, res = _copy(src, args.to)
             else:
                 directory = os.path.join(cfg.data_dir, "backups")
                 os.makedirs(directory, mode=0o700, exist_ok=True)
-                final = _reserve(directory)
-            res = _copy(src, final, reserved=directory is not None)
+                final, res = _copy(src, None, directory)
         finally:
             src.close()
         if res.startswith("!"):
@@ -206,7 +235,13 @@ def vacuum_cmd(argv: list[str], out: Callable[[str], None]) -> int:
         except sqlite3.Error as e:
             return _fail("vacuum", f"cannot open {cfg.db_path}: {e}")
         try:
-            before = _mb(cfg.db_path)
+            # after an unclean stop the data sits in the -wal file; the checkpoint below moves it into the main file
+            before_bytes = os.path.getsize(cfg.db_path)
+            try:
+                before_bytes += os.path.getsize(cfg.db_path + "-wal")
+            except OSError:
+                pass
+            before = f"{before_bytes / 1e6:.1f} MB"
             conn.execute("VACUUM")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
             conn.execute("PRAGMA optimize")

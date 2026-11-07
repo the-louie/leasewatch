@@ -167,11 +167,19 @@ class _DeadlineRaw(io.RawIOBase):
     def readinto(self, b: bytearray | memoryview) -> int | None:  # type: ignore[override]
         left = self._deadline - time.monotonic()
         if left <= 0:
-            # data that is already in the kernel buffer is read: the time may have gone on the server's own work
+            # data that is already in the kernel buffer is read: the time may have gone on the server's own work.
+            # Timeout 0, not MSG_DONTWAIT: with a timeout set, the socket layer polls for that long before the recv
+            got: int | None = None
             try:
-                got = self._sock.recv_into(b, 0, socket.MSG_DONTWAIT)
+                self._sock.settimeout(0.0)
+                got = self._sock.recv_into(b)
             except (BlockingIOError, InterruptedError):
-                got = None
+                pass
+            finally:
+                try:
+                    self._sock.settimeout(self._write_timeout)
+                except OSError:  # the socket was closed under us
+                    pass
             if got is None:
                 raise TimeoutError("request not read in time")
             return got
@@ -572,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
         w.writerow(_WIFI_CSV_HEADER)
         cell, ts = _csv_cell, _csv_ts
         for r in self.db.wifi_devices(ssid)["devices"]:
-            w.writerow([r["mac"], cell(r["name"] or r["wifi_alias"] or r["hostname"]), cell(r["vendor"]), r["ip"], int(is_private_mac(r["mac"])), ts(r["archived_ts"]),
+            w.writerow([r["mac"], cell(r["name"] or r["wifi_alias"] or r["hostname"] or r["label"]), cell(r["vendor"]), r["ip"], int(is_private_mac(r["mac"])), ts(r["archived_ts"]),
                         ts(r["first_seen"]), ts(r["last_seen"]), round(r["seconds_seen"] / 3600, 1), r["polls_seen"], cell(r["last_ap"])])
         self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
                    {"Content-Disposition": 'attachment; filename="leasewatch-wifi.csv"'})
@@ -603,9 +611,11 @@ class Handler(BaseHTTPRequestHandler):
         # a poll lasts at most the producers' timeout plus the enrichers' timeout plus the mail; the loop then waits
         # POLL_SECONDS, and one missed round is allowed on top
         limit = (2 * cfg.poll_seconds + 2 * max([i.timeout for i in cfg.instances if m.get(f"conn.{i.name}.enabled", "1") == "1"] or [0]) + 120)
-        # abs(): an attempt in the future (the clock stepped back) proves nothing; no attempt yet: by process age
-        collector_stale = abs(now - attempt) > limit if attempt else now - self.started > limit
-        notify = {k[len("notify."):-len(".ok")]: v == "1" for k, v in m.items() if k.startswith("notify.") and k.endswith(".ok")}
+        # abs(): an attempt in the future (the clock stepped back) proves nothing; no attempt by this process yet (an
+        # attempt from before its start counts as none): by process age
+        collector_stale = abs(now - attempt) > limit if attempt and attempt >= self.started else now - self.started > limit
+        # only the configured channels: a channel removed from the config keeps its meta row
+        notify = {ch: m[f"notify.{ch}.ok"] == "1" for ch in cfg.mail_channels if f"notify.{ch}.ok" in m}
         return {
             "notify": notify,
             "last_attempt_ts": attempt or None, "last_attempt_age": abs(now - attempt) if attempt else None,

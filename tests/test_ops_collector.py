@@ -72,6 +72,18 @@ class LoopTests(Base):
         self.assertEqual([r.getMessage() for r in cm.records if r.levelname == "INFO"],
                          ["polls work again after 3 failed poll(s)"])
 
+    def test_returned_failure_does_not_end_the_spell(self):
+        col, db = self.collector(FW1)
+        boom = RuntimeError("x")
+        cm = self.run_loop(col, [boom, boom, {"ok": False}, {"ok": False}, {"ok": True}])
+        info = [r.getMessage() for r in cm.records if r.levelname == "INFO"]
+        self.assertEqual(info, ["polls work again after 2 failed poll(s)"])  # once, after the ok poll; count unchanged
+
+    def test_returned_failure_alone_logs_no_recovery(self):
+        col, db = self.collector(FW1)
+        cm = self.run_loop(col, [RuntimeError("x"), {"ok": False}])
+        self.assertEqual([r for r in cm.records if r.levelname == "INFO"], [])
+
     def test_locked(self):
         col, db = self.collector(FW1)
         self.run_loop(col, [sqlite_error(sqlite3.OperationalError, "database is locked", 5, "SQLITE_BUSY")])

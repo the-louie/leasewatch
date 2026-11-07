@@ -57,7 +57,7 @@ def to_attachments(snap: SwitchSnapshot, source: str, device: str, observed_at: 
 
 class SnmpSwitchConnector(SettingsMixin):
     INFO = ConnectorInfo(
-        type="snmp_switch", version="1.0", api_version=API_VERSION, produces=frozenset({"attachment"}),
+        type="snmp_switch", version="1.1", api_version=API_VERSION, produces=frozenset({"attachment"}),
         settings=(
             Setting("host", required=True, help="switch address"),
             Setting("name", default="switch", help="switch name shown in the UI"),

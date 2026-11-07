@@ -41,7 +41,12 @@ class HealthzTests(QW.Base):
         code, body = self.health()
         self.assertEqual((code, body["ok"], body["reason"], body["collector_stale"]), (503, False, "source", False))
 
+    def old_process(self, age: int = 7200) -> None:
+        with mock.patch("leasewatch.web.time.time", return_value=time.time() - age):
+            self.H = web.make_handler(self.cfg, self.db, "9.9.9")
+
     def test_no_attempt_within_limit_is_collector(self) -> None:
+        self.old_process()
         self.meta(3600, True, 3600)
         code, body = self.health()
         self.assertEqual((code, body["ok"], body["reason"], body["collector_stale"]), (503, False, "collector", True))
@@ -55,6 +60,18 @@ class HealthzTests(QW.Base):
         code, body = self.health()
         self.assertEqual((code, body["reason"], body["collector_stale"]), (503, "collector", True))
 
+    def test_attempt_from_before_the_start_counts_as_none(self) -> None:
+        # a restart after downtime longer than the limit: the old attempt says nothing about this process
+        self.meta(900, True, 900)
+        code, body = self.health()
+        self.assertEqual((code, body["reason"], body["collector_stale"]), (503, "source", False))
+        self.meta(5, True, 900)
+        self.assertEqual(self.health()[1]["reason"], "ok")
+        self.old_process(3600)  # the process is older than the limit and the attempt is from before its start
+        self.meta(7200, True, 7200)
+        code, body = self.health()
+        self.assertEqual((code, body["reason"], body["collector_stale"]), (503, "collector", True))
+
     def test_attempt_in_the_future_counts_by_abs(self) -> None:
         self.meta(5, True, -3600)
         self.assertTrue(self.health()[1]["collector_stale"])
@@ -65,10 +82,13 @@ class HealthzTests(QW.Base):
         self.assertEqual((code, body["reason"], body["collector_stale"]), (503, "collector", True))
         self.assertLess(body["now"], body["last_attempt_ts"])  # the page words this as a clock step, not a dead collector
 
-    def test_meta_notify_lists_channel_state(self) -> None:
+    def test_meta_notify_hides_unconfigured_channels(self) -> None:
+        # no channel configured here: the rows of removed channels stay in the database but are not shown
         self.db.set_meta("notify.smtp.ok", "1")
         self.db.set_meta("notify.webhook.ok", "0")
-        self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {"smtp": True, "webhook": False})
+        self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {})
+        self.assertEqual(self.health()[1]["notify"], {})
+        self.assertEqual(self.db.get_meta("notify.smtp.ok"), "1")
 
     def test_meta_in_api_exposes_collector_stale(self) -> None:
         self.meta(5, True, 5)
@@ -82,6 +102,21 @@ class HealthzTests(QW.Base):
             row = next(ln for ln in f if ln.startswith("| GET | `/healthz`"))
         self.assertTrue(all(w in row for w in ("reason", "ok", "source", "collector", "attempt_limit")))
         self.assertIn("reason", self.health()[1])
+
+
+class NotifyChannelTests(QW.Base):
+    env = {"SMTP_HOST": "smtp.example.lan", "SMTP_FROM": "lw@example.lan", "MAIL_TO": "ops@example.lan",
+           "WEBHOOK_URL": "https://hook.example.lan/x"}
+
+    def test_meta_notify_lists_configured_channel_state(self) -> None:
+        self.db.set_meta("notify.smtp.ok", "1")
+        self.db.set_meta("notify.webhook.ok", "0")
+        self.db.set_meta("notify.mailgun.ok", "1")  # mailgun was removed from the config
+        self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {"smtp": True, "webhook": False})
+
+    def test_configured_channel_without_a_send_yet_is_absent(self) -> None:
+        self.db.set_meta("notify.smtp.ok", "0")
+        self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {"smtp": False})
 
 
 class FakeClient:

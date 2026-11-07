@@ -67,11 +67,13 @@ def error_text(exc: BaseException, redact: Callable[[str], str]) -> str:
     return redact(str(exc) or type(exc).__name__)[:200] if isinstance(exc, ConnectorError) else type(exc).__name__
 
 
-def close_connector(conn: object, name: str, timeout: float, log: logging.Logger | None = None) -> bool:
+def close_connector(conn: object, name: str, timeout: float, log: logging.Logger | None = None,
+                    busy: bool = False) -> bool:
     """conn.close(), in a daemon thread joined for `timeout` seconds: a check() or collect() abandoned at its
     deadline may still run and hold what close() waits for, and the caller must still end. `name` is the
     instance's, given by the caller: conn.name is the connector's own attribute and may raise. Errors are logged by
-    exception type, never with their text. True when close() returned in time."""
+    exception type, never with their text. `busy`: the caller does not wait because the instance's worker still runs
+    (named in the log, instead of the used-up shutdown budget). True when close() returned in time."""
     log = log or logging.getLogger("leasewatch")
 
     def work() -> None:
@@ -91,7 +93,9 @@ def close_connector(conn: object, name: str, timeout: float, log: logging.Logger
     wait = max(0.0, min(timeout, 3600))
     t.join(wait)
     if t.is_alive():
-        if wait <= 0:
+        if busy:
+            log.info("connector %s: close() started without waiting (worker still running)", name)
+        elif wait <= 0:
             log.info("connector %s: close() started without waiting (shutdown budget used)", name)
         else:
             log.warning("connector %s: close() did not return within %.1f s", name, wait)
@@ -124,6 +128,7 @@ class _Run:
     waited: int = 0             # seconds of failed check()s retried every poll while the baseline waited
     fail_polls: int = 0         # polls in a row with conn.<name>.ok written 0, counted once the baseline is taken
     fail_since: int = 0         # wall clock of the first of those polls
+    fail_error: str = ""        # that poll's error: the cause (a timeout), not the SKIPPED symptom of the polls after it
     down_since: int | None = None  # start of the spell a source_down event was written for (conn.<name>.down_since)
 
 
@@ -211,7 +216,7 @@ class Collector:
             thread = self._runs[name].thread
             if thread is not None and thread.is_alive():
                 busy.append(name)
-                close_connector(conn, name, 0.0)
+                close_connector(conn, name, 0.0, busy=True)
                 continue
             wait = min(self._runs[name].timeout, max(0.0, deadline - time.monotonic()))
             if not close_connector(conn, name, wait):
@@ -419,9 +424,11 @@ class Collector:
         run.fail_polls += 1
         if run.fail_polls == 1:
             run.fail_since = now
+        if run.fail_polls == 1 or run.fail_error == SKIPPED:
+            run.fail_error = error
         if run.fail_polls >= SOURCE_DOWN_POLLS and run.down_since is None:
             run.down_since = run.fail_since
-            self._pending_src.append((run.fail_since, "source_down", f"{run.name}: {error[:200]}"))
+            self._pending_src.append((run.fail_since, "source_down", f"{run.name}: {run.fail_error[:200]}"))
             self._pending_down[run.name] = str(run.fail_since)
 
     def _write_source_events(self, c: sqlite3.Connection) -> None:
@@ -496,6 +503,9 @@ class Collector:
         if days > 0:
             # the seconds are the real gap between two sightings; a gap of more than one missed poll, or a clock step, counts one poll
             poll = self.cfg.poll_seconds
+            # one missed poll is bridged: it ran up to the longest producer TIMEOUT (a controller that times out)
+            # before the loop slept POLL_SECONDS, so the gap is up to 2 * poll + timeout, plus 60 s of slack
+            cap = 2 * poll + max([r.timeout for r in self._runs.values() if not r.disabled] or [0]) + 60
             # one observation per device and SSID: two MACs of one device in a poll are one sighting
             c.executemany(
                 "INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) "
@@ -505,7 +515,7 @@ class Collector:
                 "THEN excluded.last_seen - last_seen ELSE :poll END, "
                 "polls_seen = polls_seen + 1, first_seen = MIN(first_seen, excluded.first_seen), "
                 "last_seen = MAX(last_seen, excluded.last_seen), last_ap = excluded.last_ap",
-                [{"mac": mac, "ssid": ssid, "ap": ap, "now": now, "poll": poll, "cap": 2 * poll + 60} for (mac, ssid), ap in {(m, s_): a for m, s_, a in res.wifi}.items()])
+                [{"mac": mac, "ssid": ssid, "ap": ap, "now": now, "poll": poll, "cap": cap} for (mac, ssid), ap in {(m, s_): a for m, s_, a in res.wifi}.items()])
             # the start of the record, so a short history is not read as a short stay
             c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('wifi_presence_since', ?)", (str(now),))
         else:
@@ -725,14 +735,17 @@ class Collector:
     def loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             try:
-                self.run_once()
+                res = self.run_once()
             except Exception as e:
                 if stop_event.is_set() and isinstance(e, sqlite3.ProgrammingError):
                     log.debug("poll cut off by shutdown")  # the database was closed under a poll that outlived the join
                     break
                 self._poll_crashed(e)
             else:
-                if self._poll_spell is not None:
+                # a returned {"ok": False} (every producer failed) is no recovery: the spell stays open and its
+                # count unchanged (only a crash counts as a failed poll here)
+                failed = isinstance(res, dict) and res.get("ok") is False
+                if self._poll_spell is not None and not failed:
                     log.info("polls work again after %d failed poll(s)", self._poll_fails)
                     self._poll_spell, self._poll_fails, self._fail_unrecorded = None, 0, False
             stop_event.wait(self.cfg.poll_seconds)

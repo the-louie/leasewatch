@@ -113,6 +113,7 @@ class EtagTests(QW.Base):
         self.assertEqual(h2["etag"][:-6], h["etag"][:-6])
 
     def test_collector_stale_flip_changes_tag(self) -> None:
+        self.H.started = time.time() - 3600  # an attempt from before the start counts as none: judged by process age
         self.db.set_meta("last_attempt_ts", str(int(time.time())))
         _, h, _ = self.get()
         self.assertTrue(h["etag"].endswith('.100.0"'), h["etag"])

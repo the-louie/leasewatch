@@ -181,6 +181,45 @@ class ReadDeadlineTests(ServerTests):
         self.assertGreater(elapsed, 0.7)
         self.assertLess(elapsed, 1.8)
 
+    def test_a_read_past_the_deadline_never_waits(self) -> None:
+        # bytes keep arriving across the deadline, so a read starts after it; then one byte a second, inside the
+        # handler's write timeout. A read that waited for data would be served each byte and never end.
+        s = self.stalled(1)[0]
+        s.settimeout(6)
+        t0 = time.monotonic()
+        s.sendall(b"GET /api/status HTTP/1.0\r\nX-Slow: ")
+        stop = threading.Event()
+
+        def trickle() -> None:
+            while not stop.is_set():
+                late = time.monotonic() - t0 > self.read_seconds + 0.2
+                try:
+                    s.send(b"a")
+                except OSError:
+                    return
+                stop.wait(1.0 if late else 0.005)
+
+        t = threading.Thread(target=trickle, daemon=True)
+        t.start()
+        try:
+            data = s.recv(65536)
+        except ConnectionResetError:
+            data = b""
+        elapsed = time.monotonic() - t0
+        stop.set()
+        t.join(2)
+        self.assertEqual(data, b"")
+        self.assertLess(elapsed, self.read_seconds + 1.0)
+
+    def test_a_request_that_ends_inside_the_deadline_is_served(self) -> None:
+        req = b"GET /api/status HTTP/1.0\r\nHost: 127.0.0.1\r\n" + b"X-Pad: " + b"a" * 60 + b"\r\n\r\n"
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
+            for i in range(0, len(req), 4):  # about 0.25 s of trickle
+                s.sendall(req[i:i + 4])
+                time.sleep(0.01)
+            out = recv_all(s)
+        self.assertTrue(out.startswith(b"HTTP/1.0 200 "), out[:80])
+
     def test_get_head_and_post_still_work(self) -> None:
         self.assertEqual(self.req("GET", "/api/status")[0], 200)
         status, _, body = self.req("HEAD", "/api/status")

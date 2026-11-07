@@ -338,7 +338,7 @@ class Database:
         """Every device (archived included) seen on exactly this SSID, by first sighting there, with its presence row."""
         with self._lock:
             rows = self._c().execute(
-                "SELECT d.mac, d.name, d.wifi_alias, d.hostname, d.vendor, d.ip, d.archived_ts, d.online, d.wifi_ssid, "
+                "SELECT d.mac, d.name, d.wifi_alias, d.hostname, d.label, d.vendor, d.ip, d.archived_ts, d.online, d.wifi_ssid, "
                 "p.first_seen, p.last_seen, p.seconds_seen, p.polls_seen, p.last_ap "
                 "FROM wifi_presence p JOIN devices d ON d.mac = p.mac WHERE p.ssid = ? "
                 "ORDER BY p.first_seen, d.mac", (ssid,)).fetchall()

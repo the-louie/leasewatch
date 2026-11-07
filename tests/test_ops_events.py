@@ -107,6 +107,19 @@ class SourceEventTests(Base):
         self.poll(col, 3)
         self.assertEqual(self.src(db)[0][3], "x: " + "e" * 200)
 
+    def test_hung_collect_names_the_timeout_not_the_skip(self):
+        import threading
+        col, db = self.start({**ENV, "LW_CONNECTOR__X__TIMEOUT": "1"})
+        release = threading.Event()
+        self.addCleanup(release.set)
+        col._connectors["x"].on_collect = lambda: release.wait(30)
+        self.poll(col, 3)  # poll 1 times out, polls 2 and 3 are skipped
+        self.assertEqual(db.get_meta("conn.x.error"), "previous collection has not completed; skipped")
+        events = self.src(db)
+        self.assertEqual(len(events), 1)
+        self.assertIn("timed out", events[0][3])
+        self.assertNotIn("skipped", events[0][3])
+
     def test_none_before_the_baseline(self):
         col, db = self.collector(ENV, rows=[])
         self.client.fail = True

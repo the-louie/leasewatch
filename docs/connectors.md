@@ -126,6 +126,7 @@ the documented string key `"strategy"`.
 | `macs` | switch | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
 | `clients` | controller | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
 | `strategy` (`str`) | switch | Copied to the instance's status (`conn.<name>.strategy`). |
+| `labels_unavailable` | sighting producers | Set it (> 0) when the source of your `label` values could not be read this poll (the built-in OPNsense connector sets it when the Kea reservation search fails). The host then keeps every device's stored label instead of replacing it with an empty one. |
 | `dropped` | you and the host | Records you skipped as unusable. The host adds the records it dropped itself. **A batch with `dropped > 0` is not a complete list**: for a controller, and for the switch that holds a device, it counts as failed in the merge (see below). |
 
 The status count of an instance is always `len(sightings) + len(attachments)`, whatever `stats` says.

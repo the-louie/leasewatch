@@ -106,6 +106,8 @@ class CloseTests(Base):
         self.assertIn("still busy: fw1", text)
         self.assertNotIn("still closing", text)
         self.assertNotIn("did not return", text)
+        self.assertIn("connector fw1: close() started without waiting (worker still running)", text)
+        self.assertNotIn("shutdown budget used", text)
 
 
 class UnifiCollectorClose(Base):
