@@ -335,7 +335,7 @@ class ApiReadTests(WebTestCase):
         self.assertTrue(body.startswith(b"\xef\xbb\xbf"), "missing UTF-8 BOM")
         text = body.decode("utf-8-sig")
         lines = text.splitlines()
-        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,loc_source,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,private,archived,note")
+        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,loc_source,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,private,archived,note,aliases")
         self.assertEqual([l.split(",")[0] for l in lines[1:]], [MAC2, MAC3, MAC1])
         self.assertIn("Kök-TV", text)
         self.assertIn("Köksbolaget", text)
@@ -350,7 +350,7 @@ class ApiReadTests(WebTestCase):
         self.assertEqual(len(rows), 4)
         r2 = next(r for r in rows if r[0] == MAC2)
         self.assertEqual(r2[2], 'TV, "vardagsrum"')
-        self.assertEqual(r2[-1], "line1\nline2")
+        self.assertEqual(r2[-2], "line1\nline2")  # note, then aliases
 
     def test_healthz_ok_after_fresh_successful_poll(self):
         data, _ = self.get_json("/healthz", expect=200)

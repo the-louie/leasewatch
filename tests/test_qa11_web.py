@@ -362,7 +362,7 @@ class Round3Tests(Base):
     def test_W16_crlf_before_a_formula_keeps_the_pair_together(self) -> None:
         self.add_device()
         self.db.q("UPDATE devices SET note=? WHERE mac=?", ("x\r\n=1", MAC))
-        note = list(csv.reader(io.StringIO(self.csv_body(), newline="")))[1][-1]
+        note = list(csv.reader(io.StringIO(self.csv_body(), newline="")))[1][-2]  # note, then aliases
         self.assertEqual(note, "x\r\n'=1")
 
     def csv_body(self) -> str:

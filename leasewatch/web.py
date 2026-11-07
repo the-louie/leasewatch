@@ -56,7 +56,7 @@ _ETAG_ITEM = re.compile(r'\*|(?:W/)?"[^"]*"')
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
-               "archived", "note"]
+               "archived", "note", "aliases"]
 
 
 def _dev(d: dict) -> dict:
@@ -91,7 +91,8 @@ def _csv_row(d: dict) -> list:
             d["link"], cell(d["sw_port"]), cell(d["sw_via"]), cell(d["loc_source"]), cell(d["wifi_ssid"]), cell(d["wifi_ap"]),
             d["wifi_signal"] if d["wifi_signal"] is not None else "",
             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))),
-            ts(d["archived_ts"]), cell(d["note"])]
+            ts(d["archived_ts"]), cell(d["note"]),
+            cell(" ".join(d["aliases"]))]  # last, so no earlier column moves; a space, as Excel with a ; separator splits on ;
 
 
 class _DeadlineRaw(io.RawIOBase):
