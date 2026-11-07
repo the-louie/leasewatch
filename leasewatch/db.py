@@ -74,6 +74,8 @@ MIGRATIONS = [
     # mail was queued (NULL = in the list / nothing to mail), so an archive and a pending mail survive a restart
     ("devices", "client_id", "TEXT NOT NULL DEFAULT ''"), ("devices", "archived_ts", "INTEGER"),
     ("devices", "mail_queued", "INTEGER"),
+    # the device key this MAC was split from (NULL = never split); a later merge pass reads it to not fold the MAC back
+    ("devices", "split_from", "TEXT"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
