@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import socket
 import threading
 import time
@@ -50,6 +51,8 @@ _BUSY_BODY = b'{"error": "busy"}'
 _BUSY_RESPONSE = ("HTTP/1.0 503 Service Unavailable\r\n" + "".join(
     f"{k}: {v}\r\n" for k, v in {"Content-Type": _JSON, "Content-Length": str(len(_BUSY_BODY)), **_SECURITY_HEADERS,
                                   "Retry-After": "5", "Connection": "close"}.items()) + "\r\n").encode("latin-1") + _BUSY_BODY
+# one entry of If-None-Match: "*" or an entity tag, weak or strong; a tag may hold a comma, so no plain split
+_ETAG_ITEM = re.compile(r'\*|(?:W/)?"[^"]*"')
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
@@ -136,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
     app_version: str
     verifier: auth.Verifier | None = None  # None when auth is off
     started: float = 0.0  # process start, for the collector check before the first poll attempt
+    boot: str = ""  # per make_handler(): the version counter starts again at 0 after a restart, an old ETag must not match
 
     def setup(self) -> None:
         deadline = time.monotonic() + self.REQUEST_READ_SECONDS
@@ -281,12 +285,39 @@ class Handler(BaseHTTPRequestHandler):
             return gzip.compress(body, 6, mtime=0), {"Content-Encoding": "gzip"}
         return body, {}
 
-    def _json_vary(self, obj: object) -> None:
+    def _json_vary(self, obj: object, etag: str | None = None) -> None:
         """A JSON API answer that may be compressed; the cache must key on Accept-Encoding either way."""
         body = json.dumps(obj, ensure_ascii=False).encode()
-        # a conditional-request check on the uncompressed body goes here, before the encoding
+        # the 304 decision was made before the body was built; the weak ETag is the same for gzip and identity
+        tag = {"ETag": etag} if etag else {}
         body, extra = self._encode(body)
-        self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra})
+        self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
+
+    def _etag(self, version: int, stale: bool) -> str:
+        # the write bit: the body's write permission depends on the client; no write protection exists yet, so every
+        # client may write until READ_ONLY / WRITE_ALLOW set it per client
+        w = 1
+        return f'W/"{self.boot}.{version}.{w}{int(stale)}"'
+
+    def _matches(self, etag: str) -> bool:
+        """If-None-Match lists this ETag (weak compare: the W/ prefix is ignored on both sides) or is "*"."""
+        own = etag.removeprefix("W/")
+        for header in self.headers.get_all("If-None-Match") or ():
+            for item in _ETAG_ITEM.findall(header):
+                if item == "*" or item.removeprefix("W/") == own:
+                    return True
+        return False
+
+    def _not_modified(self, etag: str) -> None:
+        """304 (RFC 9110 15.4.5): the validator and the headers a 200 would carry, no Content-Type, Length or body."""
+        self.send_response(304)
+        for k, v in {"ETag": etag, "Vary": "Accept-Encoding", **_SECURITY_HEADERS}.items():
+            self.send_header(k, v)
+        try:
+            self.end_headers()
+        except OSError as e:
+            self.close_connection = True
+            log.debug("%s client gone during the response (%s)", self.address_string(), type(e).__name__)
 
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status)
@@ -326,7 +357,14 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": ok, "reason": reason, **m}, 200 if ok else 503)
 
     def _api_devices(self) -> None:
-        self._json_vary({"meta": self._meta(), "devices": [_dev(d) for d in self.db.devices()]})
+        # the version before the body: a write in between makes the body newer than its tag (one extra 200 later),
+        # never an old body under a new tag
+        version = self.db.version()
+        meta = self._meta()
+        etag = self._etag(version, meta["stale"])
+        if self._matches(etag):
+            return self._not_modified(etag)
+        self._json_vary({"meta": meta, "devices": [_dev(d) for d in self.db.devices()]}, etag)
 
     def _api_status(self) -> None:
         self._json_vary({"meta": self._meta()})
@@ -335,7 +373,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"meta": self._meta(), "stats": self.db.stats(self.cfg.new_days)})
 
     def _api_events(self) -> None:
-        self._json_vary({"events": self.db.events(limit=300)})
+        version = self.db.version()  # before the body, as in _api_devices
+        etag = self._etag(version, self._meta()["stale"])
+        if self._matches(etag):
+            return self._not_modified(etag)
+        self._json_vary({"events": self.db.events(limit=300)}, etag)
 
     def _api_device_get(self, mac: str) -> None:
         if not MAC_RE.match(mac):
@@ -472,7 +514,8 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             raise ValueError("AUTH_PASSWORD_HASH is not a valid hash")
         verifier = auth.Verifier(cfg.auth_user, parsed)
     # a subclass per call: two servers in one process (the tests) do not share settings
-    return type("Handler", (Handler,), {"cfg": cfg, "db": db, "app_version": version, "verifier": verifier, "started": time.time()})
+    return type("Handler", (Handler,), {"cfg": cfg, "db": db, "app_version": version, "verifier": verifier, "started": time.time(),
+                                        "boot": secrets.token_hex(4)})
 
 
 class Server(ThreadingHTTPServer):

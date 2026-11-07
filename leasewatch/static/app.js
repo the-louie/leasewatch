@@ -13,6 +13,9 @@
     skew: 0, // server clock minus browser clock at the last load: "on the wire" is judged in server time
     form: null, // {mac, name, note} the drawer form was rendered with (or last saved): what "edited" is measured against
     saving: null, // {form, name, note} posted from that Name input while its save runs: its reference until the POST settles
+    // URL -> {etag, data} of the last 200 of the two big GETs, in memory (the server sends Cache-Control: no-store, so
+    // the browser cache keeps nothing): the request says which copy it has, and a 304 means that copy is still current
+    revalidated: new Map(),
   };
   const VLAN_COLORS = ["--vlan1", "--vlan2", "--vlan3", "--vlan4", "--vlan5", "--vlan6", "--vlan7", "--vlan8"];
   // stable colour per network: alphabetical position, so colours do not shift when counts change
@@ -75,11 +78,21 @@
       if (own.aborted) relay(); else own.addEventListener("abort", relay);
     }
     const timer = setTimeout(() => ctl.abort(new DOMException("signal timed out", "TimeoutError")), 30000), signal = ctl.signal;
+    const keep = !opts?.method && ["/api/devices", "/api/events"].includes(path.split("?")[0]), prev = keep ? state.revalidated.get(path) : null;
+    const headers = prev ? { ...opts?.headers, "If-None-Match": prev.etag } : opts?.headers;
     try {
-      const r = await fetch(path, { cache: "no-store", ...opts, signal });
+      const r = await fetch(path, { cache: "no-store", ...opts, ...(headers ? { headers } : {}), signal });
+      if (r.status === 304 && prev) {
+        // the server's "now" is per request: from the browser clock and the offset of the last 200
+        if (prev.data.meta) prev.data.meta.now = Date.now() / 1000 + state.skew;
+        return prev.data;
+      }
       if (!r.ok) { let m = `${r.status}`; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
       // a 2xx that is not JSON is some proxy's page (login, maintenance): say so instead of quoting its body
-      try { return await r.json(); } catch (e) { if (e.name === "SyntaxError") throw new Error(`${r.status}: reply is not JSON`); throw e; }
+      let data;
+      try { data = await r.json(); } catch (e) { if (e.name === "SyntaxError") throw new Error(`${r.status}: reply is not JSON`); throw e; }
+      if (keep) { const etag = r.headers.get("ETag"); if (etag) state.revalidated.set(path, { etag, data }); else state.revalidated.delete(path); }
+      return data;
     } finally {
       // the body is read too before this settles; a timer or listener left behind would abort or pin a finished request
       clearTimeout(timer); own?.removeEventListener("abort", relay);

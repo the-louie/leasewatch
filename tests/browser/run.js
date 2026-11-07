@@ -394,6 +394,20 @@ const scenarios = {
     return { count: rows.length, texts: rows.map(r => r.text), who: rows.some(r => r.who), kinds: rows.map(r => r.kind),
              drawer_open_after_click: await drawerOpen(page) };
   },
+  // the page's 60 s reload, run now: the second /api/devices is a 304 and the table keeps its rows
+  async etag(page) {
+    const rows0 = (await rowNames(page)).length;
+    const seen = [];
+    const onResponse = r => { const u = new URL(r.url()).pathname; if (u === '/api/devices' || u === '/api/events') seen.push({ path: u, status: r.status(),
+      etag: r.headers().etag || null, sent: r.request().headers()['if-none-match'] || null }); };
+    page.on('response', onResponse);
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(() => window.__lwReloads === 1);
+    page.off('response', onResponse);
+    return { rows_before: rows0, rows_after: (await rowNames(page)).length, responses: seen,
+             status_after: await page.$eval('#statusText', e => e.textContent),
+             banner_hidden: await page.$eval('#banner', b => b.classList.contains('hidden')) };
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};
@@ -452,6 +466,15 @@ async function runScenario(browser, base, name) {
     await page.exposeFunction('__lwCspViolation', v => res.csp_violations.push(v));
     await page.evaluateOnNewDocument(() => document.addEventListener('securitypolicyviolation', e =>
       window.__lwCspViolation(`${e.effectiveDirective} blocked ${e.blockedURI || '(inline)'} at ${e.sourceFile}:${e.lineNumber}`)));
+    // the page's 60 s reload as a function a scenario can call (window.__lwReload), counted when it settles
+    await page.evaluateOnNewDocument(() => {
+      const si = window.setInterval;
+      window.__lwReloads = 0;
+      window.setInterval = (f, ms, ...a) => {
+        if (ms === 60000) window.__lwReload = async () => { await f(); window.__lwReloads++; };
+        return si(f, ms, ...a);
+      };
+    });
     page.on('pageerror', e => res.console_errors.push(`pageerror: ${e.message}`));
     page.on('requestfailed', r => res.failed_requests.push(`${r.failure() ? r.failure().errorText : 'failed'} ${r.url()}`));
     page.on('response', r => { if (r.status() >= 400) res.failed_requests.push(`http ${r.status()} ${r.url()}`); });

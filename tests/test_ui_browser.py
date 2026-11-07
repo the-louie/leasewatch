@@ -49,7 +49,7 @@ NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "dirty", "saving", "drawer")  # the ones that change server state last
+SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
 def mac(n: int) -> str:
@@ -166,6 +166,19 @@ class BrowserUITest(_BrowserCase):
         self.assertEqual(set(d["names"]), NAMES)
         self.assertEqual(set(d["names"][:6]), NEW)  # newest first: the newcomers lead, the baseline follows
         self.assertEqual(d["total_card"], "16")
+
+    def test_reload_revalidates_with_304(self) -> None:
+        d = self.result("etag")
+        devices = [r for r in d["responses"] if r["path"] == "/api/devices"]
+        events = [r for r in d["responses"] if r["path"] == "/api/events"]
+        self.assertEqual(len(devices), 1, d["responses"])
+        # the page sent the tag of its first load itself and got a 304 with the same tag
+        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.10"$')
+        self.assertEqual((devices[0]["status"], devices[0]["etag"]), (304, devices[0]["sent"]))
+        self.assertEqual([r["status"] for r in events], [304])
+        self.assertEqual((d["rows_before"], d["rows_after"]), (16, 16))
+        self.assertTrue(d["status_after"].startswith("polled"), d["status_after"])
+        self.assertTrue(d["banner_hidden"])
 
     def test_status_shows_firewall_ok(self) -> None:
         d = self.result("status")

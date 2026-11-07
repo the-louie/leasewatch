@@ -211,6 +211,12 @@ class Database:
         with self._lock:
             return self._c().execute(sql, params).fetchall()
 
+    def version(self) -> int:
+        """A number that moves with every row change made through this connection (every writer uses it): the
+        API's ETag. It starts again at 0 with a new connection, so the ETag adds a per-start id."""
+        with self._lock:
+            return self._c().total_changes
+
     # --- meta ---------------------------------------------------------------
     def get_meta(self, key: str, default: str = "") -> str:
         r = self.q("SELECT value FROM meta WHERE key=?", (key,))
