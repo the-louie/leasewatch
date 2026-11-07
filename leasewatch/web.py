@@ -109,7 +109,14 @@ class _DeadlineRaw(io.RawIOBase):
     def readinto(self, b: bytearray | memoryview) -> int | None:  # type: ignore[override]
         left = self._deadline - time.monotonic()
         if left <= 0:
-            raise TimeoutError("request not read in time")
+            # data that is already in the kernel buffer is read: the time may have gone on the server's own work
+            try:
+                got = self._sock.recv_into(b, 0, socket.MSG_DONTWAIT)
+            except (BlockingIOError, InterruptedError):
+                got = None
+            if got is None:
+                raise TimeoutError("request not read in time")
+            return got
         self._sock.settimeout(max(0.05, left))
         try:
             return self._raw.readinto(b)
@@ -118,6 +125,9 @@ class _DeadlineRaw(io.RawIOBase):
                 self._sock.settimeout(self._write_timeout)
             except OSError:  # the socket was closed under us
                 pass
+
+    def allow_until(self, deadline: float) -> None:
+        self._deadline = max(self._deadline, deadline)
 
     def close(self) -> None:
         if not self.closed:
@@ -207,6 +217,10 @@ class Handler(BaseHTTPRequestHandler):
         p = self._checked_target()
         if p is None:
             return
+        # the password check may have used the request's read time; the body still gets 5 s
+        raw = getattr(self.rfile, "raw", None)
+        if isinstance(raw, _DeadlineRaw):
+            raw.allow_until(time.monotonic() + 5)
         # after auth, so a client without credentials learns nothing about the write rules; before routing, so a
         # refused client learns nothing about which paths exist
         if not self._write_ok():
@@ -348,10 +362,11 @@ class Handler(BaseHTTPRequestHandler):
         body, extra = self._encode(body)
         self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
 
-    def _etag(self, version: int, stale: bool) -> str:
-        # the write bit: meta.can_write differs per client, so two clients must not share a tag (and a 304)
+    def _etag(self, version: int, meta: dict) -> str:
+        # the write bit: meta.can_write differs per client, so two clients must not share a tag (and a 304); the
+        # stale and collector bits: the page shows a banner for each, so a flip must not be answered with a 304
         w = int(self.cfg.write_allowed(self.client_address[0]))
-        return f'W/"{self.boot}.{version}.{w}{int(stale)}"'
+        return f'W/"{self.boot}.{version}.{w}{int(meta["stale"])}{int(meta["collector_stale"])}"'
 
     def _matches(self, etag: str) -> bool:
         """If-None-Match lists this ETag (weak compare: the W/ prefix is ignored on both sides) or is "*"."""
@@ -420,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
         # never an old body under a new tag
         version = self.db.version()
         meta = self._meta()
-        etag = self._etag(version, meta["stale"])
+        etag = self._etag(version, meta)
         if self._matches(etag):
             return self._not_modified(etag)
         self._json_vary({"meta": meta, "devices": [_dev(d) for d in self.db.devices()]}, etag)
@@ -433,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_events(self) -> None:
         version = self.db.version()  # before the body, as in _api_devices
-        etag = self._etag(version, self._meta()["stale"])
+        etag = self._etag(version, self._meta())
         if self._matches(etag):
             return self._not_modified(etag)
         self._json_vary({"events": self.db.events(limit=300)}, etag)

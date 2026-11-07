@@ -95,7 +95,7 @@ New devices are reported through every channel whose settings are complete; any 
 | GET | `/healthz` | 200 when the last poll succeeded and is fresh, else 503; body `{"ok", "reason", ...meta}` with `reason` `ok`, `source` (polls run but fail, or the data is stale: see `last_error` and `connectors`) or `collector` (no poll attempt within `attempt_limit` s: the poll loop is hung or dead, restart) |
 | GET | `/metrics` | Prometheus text format 0.0.4 (`text/plain; version=0.0.4; charset=utf-8`): device counts per network, poll and connector state, database size, mail queue. Behind the login when it is on (Prometheus `basic_auth` in the scrape config); gzip when accepted; no `ETag` |
 
-`/api/devices` and `/api/events` send a weak `ETag` that changes with every database write, the stale flag and each server start; a request with a matching `If-None-Match` (or `*`) gets `304 Not Modified` with no body.
+`/api/devices` and `/api/events` send a weak `ETag` that changes with every database write, the stale flag, the collector-stale flag, the client's write permission and each server start; a request with a matching `If-None-Match` (or `*`) gets `304 Not Modified` with no body. `/api/devices`, `/api/events` and `/api/status` are gzip-compressed when the client accepts it. Only `/api/devices` and `/api/events` carry the `ETag`. The tag differs per client write permission, so a cache must not share it between clients (`Cache-Control: no-store` already says so).
 
 ## Semantics
 

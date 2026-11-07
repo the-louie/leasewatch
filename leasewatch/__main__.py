@@ -512,14 +512,14 @@ def collect_cmd(argv: list[str]) -> int:
 
 
 def startup_line(cfg: Config, version: str) -> str:
-    """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail."""
+    """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail, who may write."""
     conns = ", ".join(f"{s.name} ({s.type})" for s in cfg.instances)
     mail = f"on ({', '.join(cfg.mail_channels)})" if cfg.mail_enabled else "off"  # channel names only, no settings
     line = f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {mail}"
     if cfg.read_only_on:  # READ_ONLY wins over WRITE_ALLOW
         return line + "; writes off"
-    n = len(parse_networks(cfg.write_allow)[0])
-    return line + (f"; writes from {n} network{'s' if n != 1 else ''}" if n else "")
+    nets = [str(n.network_address) if n.prefixlen == n.max_prefixlen else str(n) for n in parse_networks(cfg.write_allow)[0]]
+    return line + (f"; writes from {', '.join(nets)}" if nets else "; writes all")
 
 
 def hash_password_cmd(argv: list[str]) -> int:

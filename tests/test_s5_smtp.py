@@ -277,11 +277,11 @@ class SmtpConfigTests(SmtpBase):
         os.environ["LW_CONNECTORS"] = "fw1"
         cfg = self.cfg(SMTP_HOST="mail.example.com")
         self.assertTrue(cfg.mail_enabled)
-        self.assertTrue(startup_line(cfg, "x").endswith("mail on (smtp)"), startup_line(cfg, "x"))
+        self.assertTrue(startup_line(cfg, "x").endswith("mail on (smtp); writes all"), startup_line(cfg, "x"))
         cfg = self.cfg(SMTP_HOST="mail.example.com", MAILGUN_KEY="k" * 16, MAILGUN_DOMAIN="mg.example.com",
                        WEBHOOK_URL="https://hooks.example.com/t/abc")
         self.assertEqual([c.name for c in notify.channels(cfg)], ["mailgun", "smtp", "webhook"])
-        self.assertTrue(startup_line(cfg, "x").endswith("mail on (mailgun, smtp, webhook)"))
+        self.assertTrue(startup_line(cfg, "x").endswith("mail on (mailgun, smtp, webhook); writes all"))
 
 
 def ok_channel(name: str, sent: list):

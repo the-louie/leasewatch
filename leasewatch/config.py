@@ -433,7 +433,10 @@ class Config:
         problems = []
         if parse_bool(self.read_only) is None:
             problems.append("READ_ONLY must be 1 or 0")
-        problems += [f"WRITE_ALLOW: not an address or network: {b}" for b in parse_networks(self.write_allow)[1]]
+        nets, bad = parse_networks(self.write_allow)
+        problems += [f"WRITE_ALLOW: not an address or network: {b}" for b in bad]
+        # web.Server listens on IPv4 only, so an IPv6 entry could never match
+        problems += [f"WRITE_ALLOW: IPv6 is not supported: {n}" for n in nets if n.version == 6]
         if self.public_url and not _is_http(self.public_url):
             problems.append("PUBLIC_URL must be a URL (https://<host>)")
         # a URL without a host, with an unclosed "[" or a bad port passes the scheme check but fails on every request

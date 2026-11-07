@@ -22,7 +22,7 @@ class ConfigTests(unittest.TestCase):
     def test_startup_line_names_instances_not_urls(self):
         os.environ.update(sources("switch", "unifi"))
         line = startup_line(Config(), "1.1.0.dev0")
-        self.assertEqual(line, "leasewatch 1.1.0.dev0, connectors fw1 (opnsense), switch (snmp_switch), unifi (unifi); poll 120 s; mail off")
+        self.assertEqual(line, "leasewatch 1.1.0.dev0, connectors fw1 (opnsense), switch (snmp_switch), unifi (unifi); poll 120 s; mail off; writes all")
         self.assertNotIn("fw1.example.lan", line)
 
     def test_snmp_detect_finds_an_lw_connectors_instance(self):

@@ -24,7 +24,7 @@ class WriteSettingsTests(unittest.TestCase):
         self.assertEqual(c.validate(), [])
         for a in ("10.0.1.7", "fd00::1", "not an address"):
             self.assertTrue(c.write_allowed(a))
-        self.assertEqual(startup_line(c, "1.1.0.dev0"), BASE)
+        self.assertEqual(startup_line(c, "1.1.0.dev0"), BASE + "; writes all")
 
     def test_empty_settings_mean_the_defaults(self):
         c = self.cfg(READ_ONLY="", WRITE_ALLOW="")
@@ -54,12 +54,11 @@ class WriteSettingsTests(unittest.TestCase):
     def test_host_bits_are_tolerated(self):
         self.assertTrue(self.cfg(WRITE_ALLOW="10.0.1.9/24").write_allowed("10.0.1.200"))
 
-    def test_ipv6(self):
-        c = self.cfg(WRITE_ALLOW="fd00::/64")
-        self.assertEqual(c.validate(), [])
-        self.assertTrue(c.write_allowed("fd00::1"))
-        self.assertFalse(c.write_allowed("fd00:0:0:1::1"))
-        self.assertFalse(c.write_allowed("10.0.1.7"))
+    def test_ipv6_entries_are_refused(self):
+        for entry, shown in (("fd00::/64", "fd00::/64"), ("::1", "::1/128"), ("fe80::/10", "fe80::/10")):
+            self.assertEqual(self.cfg(WRITE_ALLOW=entry).validate(), [f"WRITE_ALLOW: IPv6 is not supported: {shown}"])
+        p = self.cfg(WRITE_ALLOW="10.0.1.0/24, fd00::/8").validate()
+        self.assertEqual(p, ["WRITE_ALLOW: IPv6 is not supported: fd00::/8"])
 
     def test_mapped_ipv6_is_compared_as_ipv4(self):
         c = self.cfg(WRITE_ALLOW="10.0.1.0/24")
@@ -90,9 +89,9 @@ class WriteSettingsTests(unittest.TestCase):
     def test_startup_line_variants(self):
         self.assertEqual(startup_line(self.cfg(READ_ONLY="1"), "1.1.0.dev0"), BASE + "; writes off")
         os.environ.pop("READ_ONLY")
-        self.assertEqual(startup_line(self.cfg(WRITE_ALLOW="10.0.1.0/24"), "1.1.0.dev0"), BASE + "; writes from 1 network")
-        self.assertEqual(startup_line(self.cfg(WRITE_ALLOW="10.0.1.0/24, 10.0.2.5,fd00::/8"), "1.1.0.dev0"),
-                         BASE + "; writes from 3 networks")
+        self.assertEqual(startup_line(self.cfg(WRITE_ALLOW="10.0.1.0/24"), "1.1.0.dev0"), BASE + "; writes from 10.0.1.0/24")
+        self.assertEqual(startup_line(self.cfg(WRITE_ALLOW="10.0.1.0/24, 10.0.2.5,10.0.3.0/25"), "1.1.0.dev0"),
+                         BASE + "; writes from 10.0.1.0/24, 10.0.2.5, 10.0.3.0/25")
         line = startup_line(self.cfg(READ_ONLY="1", WRITE_ALLOW="10.0.1.0/24"), "1.1.0.dev0")
         self.assertEqual(line, BASE + "; writes off")
         self.assertNotIn("10.0.1", line)

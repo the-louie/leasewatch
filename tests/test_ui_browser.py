@@ -173,7 +173,7 @@ class BrowserUITest(_BrowserCase):
         events = [r for r in d["responses"] if r["path"] == "/api/events"]
         self.assertEqual(len(devices), 1, d["responses"])
         # the page sent the tag of its first load itself and got a 304 with the same tag
-        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.10"$')
+        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100"$')
         self.assertEqual((devices[0]["status"], devices[0]["etag"]), (304, devices[0]["sent"]))
         self.assertEqual([r["status"] for r in events], [304])
         self.assertEqual((d["rows_before"], d["rows_after"]), (16, 16))

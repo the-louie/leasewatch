@@ -16,7 +16,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from leasewatch import web  # noqa: E402
+from leasewatch import auth, web  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 
@@ -41,10 +41,11 @@ def wait_until(cond, seconds: float = 5.0) -> bool:
 class ServerTests(unittest.TestCase):
     max_connections = 64
     read_seconds = 15.0
+    extra_env: dict = {}
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = clean_env(dict(ENV, DATA_DIR=self.tmp.name))
+        self._saved = clean_env(dict(ENV, DATA_DIR=self.tmp.name, **self.extra_env))
         self.cfg = Config()
         self.db = Database(self.cfg.db_path)
         self.db.q("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,1,1)", (MAC,))
@@ -201,6 +202,31 @@ class ReadDeadlineTests(ServerTests):
         with mock.patch.object(web.Handler, "_api_status", slow):
             self.assertEqual(self.req("GET", "/api/status")[0], 200)
         self.assertEqual(seen, [web.Handler.timeout])
+
+class SlowAuthTests(ServerTests):
+    """The server's own password check must not use up the time the body has to arrive."""
+    read_seconds = 1.0
+    extra_env = {"AUTH_USER": "alex", "AUTH_PASSWORD_HASH": auth.make_hash("pw-for-the-test", 100_000)}
+
+    def test_post_with_its_body_is_answered_after_a_slow_check(self) -> None:
+        import base64
+        real = auth.Verifier.check
+
+        def slow(v, header, client=""):
+            time.sleep(1.5)  # past REQUEST_READ_SECONDS
+            return real(v, header, client)
+
+        body = json.dumps({"acked": True}).encode()
+        cred = base64.b64encode(b"alex:pw-for-the-test").decode()
+        raw = (f"POST /api/devices/{MAC} HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Basic {cred}\r\n"
+               f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+        with mock.patch.object(auth.Verifier, "check", slow):
+            with socket.create_connection(("127.0.0.1", self.port), timeout=8) as s:
+                s.sendall(raw)
+                out = recv_all(s)
+        self.assertTrue(out.startswith(b"HTTP/1.0 200 "), out[:80])
+        self.assertTrue(json.loads(out.partition(b"\r\n\r\n")[2])["device"]["acked"])
+
 
 if __name__ == "__main__":
     unittest.main()
