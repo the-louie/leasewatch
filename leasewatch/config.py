@@ -220,6 +220,21 @@ def removed_problems(environ: Mapping[str, str]) -> list[str]:
     return out
 
 
+
+def parse_networks(text: str) -> tuple[list, list[str]]:
+    """The networks in a comma list of addresses and CIDRs, and the entries that are neither (shortened and quoted,
+    so a long or odd entry cannot fill a log line). Empty entries are skipped."""
+    nets, bad = [], []
+    for raw in text.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            bad.append(ascii(entry[:40]))
+    return nets, bad
+
 @dataclass
 class Config:
     # what a device whose lease is gone shows as lease type: "keep" the last one, clear it after the "grace" period, or "immediate"ly
@@ -249,6 +264,11 @@ class Config:
     # optional basic auth for every path; on only when both are set (python -m leasewatch hash-password)
     auth_user: str = field(default_factory=lambda: _env("AUTH_USER"))
     auth_password_hash: str = field(default_factory=lambda: _env("AUTH_PASSWORD_HASH"), repr=False)
+    # no changes through the API (every POST refused); an empty value means the default (off)
+    read_only: str = field(default_factory=lambda: _env("READ_ONLY", "0") or "0")
+    # addresses and networks (comma list) that may change data; empty = everyone. An empty list is the default, so
+    # "WRITE_ALLOW=" in an env file is not an error
+    write_allow: str = field(default_factory=lambda: _env("WRITE_ALLOW"))
     # mail through an SMTP server (on when SMTP_HOST, SMTP_FROM and MAIL_TO are set). TLS: starttls (required, never
     # downgraded), tls (implicit, SMTPS) or none; SMTP_PORT -1 = the default for the TLS mode (set in __post_init__)
     smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST"))
@@ -389,8 +409,31 @@ class Config:
                 problems.append("WEBHOOK_SECRET is not valid UTF-8")
         return problems
 
+    @property
+    def read_only_on(self) -> bool:
+        return parse_bool(self.read_only) is True
+
+    def write_allowed(self, addr: str) -> bool:
+        """May a client at this address change data? False when READ_ONLY is on or the address is not an IP address;
+        with an empty WRITE_ALLOW every address may. An IPv4-mapped IPv6 address counts as its IPv4 form."""
+        if self.read_only_on:
+            return False
+        if not self.write_allow.replace(",", "").strip():
+            return True
+        try:
+            ip = ipaddress.ip_address(addr.strip())
+        except ValueError:
+            return False
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        # a bad entry is left out; validate() stops the start, so only a test or a later edit gets here with one
+        return any(ip.version == n.version and ip in n for n in parse_networks(self.write_allow)[0])
+
     def validate(self) -> list[str]:
         problems = []
+        if parse_bool(self.read_only) is None:
+            problems.append("READ_ONLY must be 1 or 0")
+        problems += [f"WRITE_ALLOW: not an address or network: {b}" for b in parse_networks(self.write_allow)[1]]
         if self.public_url and not _is_http(self.public_url):
             problems.append("PUBLIC_URL must be a URL (https://<host>)")
         # a URL without a host, with an unclosed "[" or a bad port passes the scheme check but fails on every request
