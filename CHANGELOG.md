@@ -26,6 +26,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Changed
 
+- **docker-compose.yml:** the default publishes `8080:8080` and uses no external network, so it works on a clean host; the nginx-proxy setup (`VIRTUAL_HOST`, external network) is a commented variant.
 - **Docker healthcheck:** a 401 (login on) counts as alive, as a 200 does; the command is in exec form.
 - **Content-Security-Policy** on every response (page, static files, API, CSV and errors): `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. The page no longer uses inline style attributes (the network colours are set from `data-vc`).
 - **Events:** a `merged` event shows as "merged address" in the event lists (it showed the raw kind).

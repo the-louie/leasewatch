@@ -1,6 +1,6 @@
-# leasewatch -- who is on the network (DHCP leases + ARP from an OPNsense firewall), behind nginx-proxy.
+# leasewatch -- who is on the network (DHCP leases + ARP from an OPNsense firewall).
 # Secrets live in .env (LW_CONNECTOR__FW1__KEY/__SECRET = a read-only OPNsense API user; MAILGUN_KEY and the switch/UniFi keys optional).
-# Without nginx-proxy: drop the VIRTUAL_* variables and the network, and publish the port instead (ports: ["8080:8080"]).
+# Default: the port is published on the host (http://<host>:8080), no external network needed.
 services:
   leasewatch:
     build: .
@@ -9,16 +9,14 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     env_file: .env
+    ports:
+      - "8080:8080"
     environment:
-      VIRTUAL_HOST: leases.example.lan
-      VIRTUAL_PORT: "8080"
       TZ: UTC  # your zone (e.g. Europe/Stockholm): used for log and CSV timestamps; the UI uses the browser's zone
       # LW_CONNECTORS_DIR: /connectors  # connectors that are not built in (e.g. a copy of contrib/leasewatch-dnsmasq in ./connectors)
     volumes:
       - ./data:/data
       # - ./connectors:/connectors:ro
-    networks:
-      - nginx-proxy
     read_only: true
     tmpfs:
       - /tmp
@@ -27,6 +25,15 @@ services:
     logging:
       driver: json-file
       options: { max-size: "5m", max-file: "3" }
-networks:
-  nginx-proxy:
-    external: true
+
+# --- Variant: behind nginx-proxy -------------------------------------------
+# Remove the "ports:" block above and add this to the service:
+#     environment:
+#       VIRTUAL_HOST: leases.example.lan
+#       VIRTUAL_PORT: "8080"
+#     networks:
+#       - nginx-proxy
+# and uncomment this at the top level:
+# networks:
+#   nginx-proxy:
+#     external: true

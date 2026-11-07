@@ -17,9 +17,11 @@ What changed between releases: [CHANGELOG.md](CHANGELOG.md).
 ```sh
 cp .env.example .env && chmod 600 .env      # set LW_CONNECTOR__FW1__URL, __KEY, __SECRET (and the optional sources)
 install -d -o 100 -g 101 data               # the container runs as uid 100 (alpine "app")
-docker compose up -d --build                # without nginx-proxy: publish port 8080 instead, see docker-compose.yml
+docker compose up -d --build                # publishes port 8080 on the host; for nginx-proxy see the commented variant in docker-compose.yml
 docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/api/stats   # the meta block shows the last poll; /healthz is for monitors (503 + reason on failure, which busybox wget does not print)
 ```
+The default compose file publishes `8080:8080` and needs no external network. leasewatch covers IPv4 only (no NDP or IPv6 sightings). Timestamps in logs and CSV are UTC unless `TZ` is set (the image has tzdata).
+
 Local development: `DATA_DIR=./data LISTEN_PORT=8089 LW_CONNECTORS=fw1 LW_CONNECTOR__FW1__TYPE=opnsense LW_CONNECTOR__FW1__URL=… LW_CONNECTOR__FW1__KEY=… LW_CONNECTOR__FW1__SECRET=… python3 -m leasewatch`.
 
 Sources are configured only as connector instances (`LW_CONNECTORS`, see Connectors). Upgrading from 1.0: the 1.0 source variables (firewall, switch, UniFi, and the DHCP backend, interface and proxy settings) are gone; a start with any of them set stops with a message that names the new variables, and [CHANGELOG.md](CHANGELOG.md) has the migration table.
