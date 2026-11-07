@@ -74,6 +74,11 @@ main { max-width: 1280px; margin: 0 auto; padding: 8px 24px 40px; }
 .chip.active { background: var(--accent-bg); border-color: var(--accent); }
 .chip .sw { width: 9px; height: 9px; border-radius: 50%; background: var(--vc); }
 .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+/* an SSID is free text from the air: a long one is cut, its chip title and the search still have it whole */
+.ssids .chip { padding-left: 11px; max-width: 100%; }
+.ssids .ssid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
+.ssids .chip.toggle { border-style: dashed; color: var(--muted); }
+.ssids .chip.toggle.active { border-style: solid; color: inherit; }
 
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 .search { position: relative; flex: 1 1 320px; }
@@ -193,9 +198,9 @@ h3 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color:
 .tl li.none { color: var(--muted); } .tl li.none::before { display: none; }
 .tl .t { color: var(--muted); font-size: 12px; display: block; }
 .note { font-size: 13px; margin: 0 0 8px; }
-table.aliases { font-size: 13px; margin-bottom: 4px; }
-table.aliases th { padding: 4px 8px 4px 0; font-size: 11px; background: none; }
-table.aliases td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }
+table.aliases, table.wifi { font-size: 13px; margin-bottom: 4px; }
+table.aliases th, table.wifi th { padding: 4px 8px 4px 0; font-size: 11px; background: none; }
+table.aliases td, table.wifi td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }
 
 footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--muted); font-size: 12px; }
 

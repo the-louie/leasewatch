@@ -11,6 +11,7 @@
     evKind: "", evFrom: "", evTo: "", // events filters: one kind, local days as YYYY-MM-DD
     evGen: 0, // bumped by a filter change: a page requested under an older filter is dropped when it arrives
     q: "", status: "all", vlan: null, sort: "first_desc", open: null, returnTo: null, apiDown: false,
+    ssid: null, ssidNow: false, // the Wi-Fi network filter: devices ever seen on it, or (ssidNow) online on it now
     deepLink: null, // the ?device= MAC from the address, until the first load has opened its drawer
     renderError: null, // kept so the 15 s status refresh does not hide a page error while the table is still broken
     loadSeq: 0, // number of the newest load(): an older one that answers later must not write its snapshot over it
@@ -51,6 +52,13 @@
     const n = Math.round(s / 86400); if (n < 30) return `${n} d ago`;
     const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   };
+  // a length of time in seconds: "40 min", "3.5 h", "4 d 2 h"
+  const durText = s => {
+    s = Math.max(0, Math.round(s || 0));
+    if (s < 3600) return `${Math.round(s / 60)} min`;
+    if (s < 48 * 3600) return `${(s / 3600).toFixed(1)} h`;
+    const h = Math.round(s / 3600); return `${Math.floor(h / 24)} d ${h % 24} h`;
+  };
   const pad3 = x => String(x).padStart(3, "0");
   const ipKey = ip => (ip || "").split(".").map(pad3).join(".");
   // a device without an address sorts after every real one, as an empty vendor does
@@ -62,6 +70,9 @@
   // a controller client can come without an SSID (hidden network, mid-association): its AP and signal still place it.
   // merge clears the port when a device goes on Wi-Fi, so an SSID-less row with a port is one a switch placed since
   const onWifi = d => !!(d.wifi_ssid || ((d.wifi_ap || d.link === "wifi") && !d.sw_port));
+  // the device's presence row of the filtered SSID (null without the filter, or when it has none yet)
+  const ssidRow = d => state.ssid === null ? null : (d.wifi_presence || []).find(p => p.ssid === state.ssid) || null;
+  const onSsidNow = d => !!d.online && onWifi(d) && d.wifi_ssid === state.ssid;
   // display label of a connector instance ("Wi-Fi", the switch's NAME), the instance id when the meta has none
   const connLabel = n => state.meta?.connectors?.find(c => c.name === n)?.label || n;
   // "Connected via": Wi-Fi SSID @ AP, or switch port (+ what hangs on it), as HTML
@@ -117,7 +128,7 @@
       state.skew = d.meta?.now ? d.meta.now - Date.now() / 1000 : 0;
       state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) { if (bad) clearEvents(); else mergeFirstPage(e); }
       state.renderError = null;
-      try { renderStatus(); renderCards(); renderVlans(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
+      try { renderStatus(); renderCards(); renderVlans(); renderSsids(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
       catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
       // a ?device= link not opened yet (the first load failed): this render has the list and meta it needs
       if (state.deepLink) await openDeepLink();
@@ -198,10 +209,34 @@
     }
   }
 
+  // the Wi-Fi networks: SSID names come from the air, so they go into the page only as escaped text
+  function renderSsids() {
+    const box = $("#ssids"), now = $("#ssidNow");
+    const had = box.contains(document.activeElement) && document.activeElement !== now ? document.activeElement.dataset.ssid : null;
+    $$(".chip[data-ssid]", box).forEach(c => c.remove());
+    const list = (state.stats?.ssids || []).slice();
+    // a filter from the address on an SSID the stats no longer list keeps a chip, so it can be clicked off
+    if (state.ssid !== null && !list.some(s => s.ssid === state.ssid)) list.push({ ssid: state.ssid, devices_now: 0, devices_ever: 0 });
+    box.classList.toggle("hidden", !list.length);
+    const since = state.meta?.wifi_presence_since ? ` since ${abs(state.meta.wifi_presence_since).slice(0, 10)}` : "";
+    for (const s of list) {
+      const on = state.ssid === s.ssid, c = document.createElement("button");
+      c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.ssid = s.ssid;
+      c.innerHTML = `<span class="ssid">${esc(s.ssid)}</span> <span class="n">${esc(s.devices_now)}/${esc(s.devices_ever)}</span>`;
+      c.title = `${s.devices_now} online now on ${s.ssid}, ${s.devices_ever} devices seen on it${since}`;
+      c.onclick = () => { state.ssid = on ? null : s.ssid; if (on) state.ssidNow = false; renderSsids(); renderTable(); syncUrl(); };
+      box.insertBefore(c, now);
+      if (had != null && had === s.ssid) c.focus();
+    }
+    now.classList.toggle("hidden", state.ssid === null);
+    now.classList.toggle("active", state.ssidNow); now.setAttribute("aria-pressed", state.ssidNow);
+  }
+
   function filtered() {
     const q = state.q.trim().toLowerCase();
     const list = state.devices.filter(d => {
       if (state.vlan !== null && d.vlan !== state.vlan) return false; // null = no filter; "" is the unnamed network
+      if (state.ssid !== null && !(state.ssidNow ? onSsidNow(d) : ssidRow(d))) return false;
       if ((d.archived_ts != null) !== (state.status === "archived")) return false; // archived devices only under their own filter
       switch (state.status) {
         case "new": if (!isNew(d)) return false; break;
@@ -223,9 +258,11 @@
     });
     // the unnamed network after the named ones, as a missing IP or vendor sorts last
     const byVlanIp = (a, b) => (!a.vlan - !b.vlan) || (a.vlan || "").localeCompare(b.vlan || "") || ipCmp(a, b);
+    const ssidFirst = d => ssidRow(d)?.first_seen || 0;
     const cmp = {
-      // real newcomers first (newest on top), then the baseline devices grouped by network and address
-      first_desc: (a, b) => (a.baseline - b.baseline) || (a.baseline ? byVlanIp(a, b) : (b.first_seen - a.first_seen) || byVlanIp(a, b)),
+      // real newcomers first (newest on top), then the baseline devices grouped by network and address; under an SSID
+      // filter the newest arrivals on that network lead
+      first_desc: state.ssid !== null ? (a, b) => (ssidFirst(b) - ssidFirst(a)) || byVlanIp(a, b) : (a, b) => (a.baseline - b.baseline) || (a.baseline ? byVlanIp(a, b) : (b.first_seen - a.first_seen) || byVlanIp(a, b)),
       last_desc: (a, b) => (b.online - a.online) || ((b.last_online || 0) - (a.last_online || 0)) || byVlanIp(a, b),
       name: (a, b) => label(a).localeCompare(label(b), undefined, { sensitivity: "base" }) || byVlanIp(a, b),
       ip: ipCmp,
@@ -303,6 +340,13 @@
       const fs = $(".c-first", tr); fs.textContent = d.baseline ? "since the start" : rel(d.first_seen); fs.title = d.baseline ? `Already present when leasewatch started (${abs(state.meta.baseline_ts)})` : abs(d.first_seen);
       if (isNew(d)) fs.classList.add("recent");
       const ls = $(".c-last", tr); ls.textContent = d.online ? "now" : (d.last_online ? rel(d.last_online) : "not since the start"); ls.title = d.last_online ? `last online ${abs(d.last_online)} · last listed by the firewall ${abs(d.last_seen)}` : `listed by the firewall but not seen on the wire since leasewatch started; last listed ${abs(d.last_seen)}`;
+      if (state.ssid !== null) {
+        // the SSID filter turns the two time columns into that network's: when the device first and last was on it
+        const p = ssidRow(d), dur = p ? `${durText(p.seconds_seen)} on ${state.ssid}` : "";
+        fs.textContent = p ? rel(p.first_seen) : "–"; fs.title = p ? `first on ${state.ssid} ${abs(p.first_seen)}` : "";
+        ls.textContent = onSsidNow(d) ? "now" : p ? rel(p.last_seen) : "–"; ls.title = p ? `last on ${state.ssid} ${abs(p.last_seen)} · ${dur}` : "";
+        if (dur) $(".dev-meta .last", tr).textContent += ` · ${dur}`;
+      }
       const ack = $(".ack", tr);
       // can_write false: the server refuses this client's changes (READ_ONLY, or outside WRITE_ALLOW)
       if (d.acked || d.baseline || state.meta?.can_write === false) ack.remove();
@@ -318,8 +362,10 @@
     const total = state.devices.filter(d => (d.archived_ts != null) === (state.status === "archived")).length;
     $("#count").textContent = `${list.length} of ${total}`;
     $("#empty").classList.toggle("hidden", list.length > 0);
-    $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
-    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.status !== "all"));
+    $("#thFirst").textContent = state.ssid !== null ? "First on SSID" : "First seen";
+    $("#thLast").textContent = state.ssid !== null ? "Last on SSID" : "Last online";
+    $("#emptyText").textContent = state.q || state.vlan !== null || state.ssid !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
+    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.ssid !== null || state.status !== "all"));
   }
 
   // the whole MAC or IP text copies on click, Enter or Space; the feedback is a class and a title, so the table keeps
@@ -500,6 +546,23 @@
       <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td></tr>`).join("")}</tbody></table>`;
   }
 
+  // the SSIDs the device was seen on, newest first (an older server sends no list: no section). "now" marks the row of
+  // the SSID the device is on while it is online. A first sighting within one poll of the day counting began says
+  // nothing about the device's first visit, so it reads "since <date>"
+  function wifiHtml(list, meta, d) {
+    if (!list || !list.length) return "";
+    const poll = meta?.poll_seconds ?? 120, since = meta?.wifi_presence_since ? Number(meta.wifi_presence_since) : 0;
+    const row = w => {
+      const first = since && Math.abs(w.first_seen - since) <= poll ? `since ${abs(since)}` : abs(w.first_seen);
+      const last = d?.online && d.wifi_ssid && d.wifi_ssid === w.ssid ? "now" : abs(w.last_seen);
+      const title = `${(w.seconds_seen / 3600).toFixed(2)} h in ${w.polls_seen} polls`;
+      return `<tr><td>${esc(w.ssid)}</td><td>${esc(first)}</td><td>${esc(last)}</td><td title="${esc(title)}">${esc(durText(w.seconds_seen))}</td><td>${esc(w.last_ap || "–")}</td></tr>`;
+    };
+    return `<h3>Wi-Fi history</h3>
+      <table class="wifi"><thead><tr><th scope="col">SSID</th><th scope="col">First</th><th scope="col">Last</th><th scope="col">Time</th><th scope="col">Last AP</th></tr></thead>
+      <tbody>${list.map(row).join("")}</tbody></table>`;
+  }
+
   async function refreshDrawer(mac, focus) {
     // edited = differs from what the form was rendered with or last saved, not from the server's values: a rename by
     // another viewer must still refresh a clean form, and text typed while a save ran must survive its refresh. A form
@@ -559,6 +622,7 @@
         </div>
       </div>
       ${aliasesHtml(r.aliases)}
+      ${wifiHtml(r.wifi_presence, state.meta, d)}
       <h3>History</h3>
       <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
       <h3>Events</h3>
@@ -634,6 +698,7 @@
     clearTimeout(urlRetry);
     const p = new URLSearchParams();
     if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan !== null) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
+    if (state.ssid !== null) { p.set("ssid", state.ssid); if (state.ssidNow) p.set("ssidnow", "1"); }
     if (state.evKind) p.set("ek", state.evKind); if (state.evFrom) p.set("es", state.evFrom); if (state.evTo) p.set("eu", state.evTo);
     // the open drawer is part of the address, so a copied URL shows the same device; a link not yet opened stays
     const dev = state.open || state.deepLink;
@@ -646,6 +711,7 @@
   function readUrl() {
     const p = new URLSearchParams(location.search);
     state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan"); state.sort = p.get("sort") || "first_desc";
+    state.ssid = p.get("ssid") || null; state.ssidNow = state.ssid !== null && p.get("ssidnow") === "1"; // no SSID is empty
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
     const ek = p.get("ek") || "", es = p.get("es") || "", eu = p.get("eu") || "";
     state.evKind = /^[a-z_]{1,20}$/.test(ek) ? ek : ""; state.evFrom = isDay(es) ? es : ""; state.evTo = isDay(eu) ? eu : "";
@@ -669,7 +735,7 @@
     if (!key) { try { key = (await api(`/api/devices/${m}`)).device.mac; } catch (_) { syncUrl(); return; } }
     await openDrawer(key);
   }
-  function clearFilters() { state.q = ""; state.vlan = null; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderTable(); syncUrl(); }
+  function clearFilters() { state.q = ""; state.vlan = null; state.ssid = null; state.ssidNow = false; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderSsids(); renderTable(); syncUrl(); }
 
   // ---------- wiring ----------
   // a table rebuild per key costs ~100 ms at 2000 devices: render (and write the URL) once typing pauses
@@ -689,6 +755,7 @@
   $("#evTo").addEventListener("change", e => { state.evTo = isDay(e.target.value) ? e.target.value : ""; eventsFilterChanged(); });
   $("#evMore").onclick = loadMoreEvents;
   $("#emptyClear").onclick = clearFilters;
+  $("#ssidNow").onclick = () => { state.ssidNow = !state.ssidNow; renderSsids(); renderTable(); syncUrl(); };
   // leaving the mode clears the selection, so no hidden ticks wait for the next time
   $("#selBtn").onclick = () => { state.selecting = !state.selecting; state.sel.clear(); renderTable(); };
   $("#selAll").onchange = e => { state.sel = new Set(e.target.checked ? filtered().map(d => d.mac) : []); renderTable(); };

@@ -51,7 +51,7 @@ NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "baseline", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
+SCENARIOS = ("load", "nossid", "rows", "status", "chips", "search", "csv", "trap", "columns", "baseline", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
 def mac(n: int) -> str:
@@ -161,6 +161,10 @@ class BrowserUITest(_BrowserCase):
             self.assertNotIn(bg, ("", "rgba(0, 0, 0, 0)", "transparent"), d["swatches"])
         self.assertTrue(d["event_badges"]); self.assertNotIn("", d["event_badges"])
         self.assertEqual(d["favicon"], {"status": 200, "type": "image/svg+xml"})
+
+    def test_no_ssid_chip_row_without_wifi_presence(self) -> None:
+        d = self.result("nossid")
+        self.assertEqual((d["hidden"], d["chips"], d["heads"]), (True, 0, ["First seen", "Last online"]))
 
     def test_rows_render_all_devices(self) -> None:
         d = self.result("rows")
@@ -382,7 +386,13 @@ class BrowserPrivateTest(_BrowserCase):
         first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
         base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
         assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
-        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "archive", "vlancolor"))  # archive changes server state: last
+        # the tablet is online on "Home" and was seen before on a hostile SSID; the older row's first sighting is the day counting began
+        now = int(time.time())
+        db.q("UPDATE devices SET online=1, wifi_ssid='Home' WHERE mac=?", (cls.DEV,))
+        for ssid, first, last, secs, polls, ap in (("Home", now - 7200, now, 5400, 45, "ap-<b>1"), ("Guest <i>x</i>", now - 86400, now - 80000, 600, 5, "ap-2")):
+            db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
+                 (cls.DEV, ssid, first, last, secs, polls, ap))
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "wifihistory", "archive", "vlancolor"))  # archive changes server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -453,6 +463,23 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(seen, "just now")
         self.assertFalse(d["plain"]["table"])
         self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_drawer_shows_wifi_history(self) -> None:
+        d = self.result("wifihistory")
+        s = d["shown"]
+        self.assertIn("Wi-Fi history", s["headings"])
+        self.assertEqual(s["head"], ["SSID", "First", "Last", "Time", "Last AP"])
+        self.assertEqual(len(s["rows"]), 2)
+        (ssid1, first1, last1, time1, ap1), (ssid2, first2, last2, time2, ap2) = s["rows"]
+        self.assertEqual((ssid1, last1, time1, ap1), ("Home", "now", "1.5 h", "ap-<b>1"))
+        self.assertRegex(first1, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertEqual((ssid2, time2, ap2), ("Guest <i>x</i>", "10 min", "ap-2"))  # the text, not an element
+        self.assertRegex(last2, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertRegex(first2, r"^since \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertEqual(s["titles"], ["1.50 h in 45 polls", "0.17 h in 5 polls"])
+        self.assertEqual(s["italics"], 0)
+        self.assertNotIn("Wi-Fi history", d["none"]["headings"])  # no rows: no block
+        self.assertIsNone(d["none"]["rows"])
 
     def test_search_by_merged_mac_lists_only_its_device(self) -> None:
         rows = self.result("aliassearch")["rows"]
@@ -580,6 +607,97 @@ class BrowserLongTextTest(_BrowserCase):
                     self.assertIn(part, c["where"]["title"])
         self.assertEqual(cells[self.WIFI]["type"]["title"], "fixed address")
         self.assertEqual(cells[self.PLAIN]["where"]["title"], "")
+
+
+class BrowserSsidTest(_BrowserCase):
+    """The Wi-Fi network chips and the SSID filter, on presence rows seeded straight into the DB. One SSID name carries
+    markup and quotes, as anyone in radio range can name a network that way."""
+    GUEST, HOME = 'Guest <b>&"x</b>', "HomeNet"
+    A, B, C, D = "02:00:00:00:30:01", "02:00:00:00:30:02", "02:00:00:00:30:03", "02:00:00:00:30:04"
+    SINCE = 1767268800  # 2026-01-01 12:00 UTC: the same calendar day in every time zone a CI runner has
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        base, db = start(cls, [s(cls.A, 30, "laptop"), s(cls.B, 31, "phone"), s(cls.C, 32, "tablet"), s(cls.D, 33, "desktop")])
+        now = cls.now = int(time.time())
+        # A: on the guest network now (3.5 h there), earlier on HomeNet; B: was on the guest network, offline now;
+        # C: on HomeNet now; D: wired, never on Wi-Fi
+        for m, ssid, first, last, secs in ((cls.A, cls.HOME, now - 864000, now - 3600, 7200),
+                                           (cls.A, cls.GUEST, now - 172800, now, 12600),
+                                           (cls.B, cls.GUEST, now - 86400, now - 10800, 1800),
+                                           (cls.C, cls.HOME, now - 3 * 86400, now, 600)):
+            db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
+                 (m, ssid, first, last, secs, 1, "ap-1"))
+        for m, ssid, online in ((cls.A, cls.GUEST, 1), (cls.B, "", 0), (cls.C, cls.HOME, 1), (cls.D, "", 1)):
+            db.q("UPDATE devices SET wifi_ssid=?, online=? WHERE mac=?", (ssid, online, m))
+        db.q("INSERT OR REPLACE INTO meta(key, value) VALUES('wifi_presence_since', ?)", (str(cls.SINCE),))
+        cls.run_scenarios(base, ("ssids",))
+
+    def test_chip_row_counts_and_titles(self) -> None:
+        d = self.result("ssids")
+        self.assertFalse(d["hidden"])
+        day = datetime.datetime.fromtimestamp(self.SINCE).strftime("%Y-%m-%d")
+        self.assertEqual([(c["ssid"], c["text"], c["n"], c["tag"], c["b"]) for c in d["chips"]],
+                         [(self.GUEST, self.GUEST, "1/2", "button", 0), (self.HOME, self.HOME, "1/2", "button", 0)])
+        self.assertEqual(d["chips"][0]["title"], f"1 online now on {self.GUEST}, 2 devices seen on it since {day}")
+        self.assertEqual(d["before"]["heads"], ["First seen", "Last online"])
+        self.assertFalse(d["before"]["now_shown"])
+        self.assertEqual(d["before"]["markup"], 0)
+
+    def test_chip_filters_to_devices_ever_on_it(self) -> None:
+        d = self.result("ssids")["ever"]
+        self.assertEqual([r["mac"] for r in d["rows"]], [self.B, self.A])  # newest on the SSID first
+        self.assertEqual(d["pressed"], [self.GUEST])
+        self.assertEqual((d["ssid"], d["ssidnow"]), (self.GUEST, None))
+        self.assertTrue(d["now_shown"])
+        self.assertEqual(d["now_pressed"], "false")
+        self.assertEqual(d["markup"], 0)
+
+    def test_ssid_times_in_the_rows(self) -> None:
+        d = self.result("ssids")["ever"]
+        self.assertEqual(d["heads"], ["First on SSID", "Last on SSID"])
+        rows = {r["mac"]: r for r in d["rows"]}
+        self.assertEqual((rows[self.A]["first"], rows[self.A]["last"]), ("2 d ago", "now"))
+        self.assertEqual((rows[self.B]["first"], rows[self.B]["last"]), ("24 h ago", "3 h ago"))
+        self.assertTrue(rows[self.A]["meta"].endswith(f" · 3.5 h on {self.GUEST}"), rows[self.A]["meta"])
+        self.assertTrue(rows[self.B]["meta"].endswith(f" · 30 min on {self.GUEST}"), rows[self.B]["meta"])
+
+    def test_now_only_narrows_to_online_on_it(self) -> None:
+        d = self.result("ssids")["now"]
+        self.assertEqual([r["mac"] for r in d["rows"]], [self.A])
+        self.assertEqual((d["ssid"], d["ssidnow"], d["now_pressed"]), (self.GUEST, "1", "true"))
+
+    def test_reload_restores_the_filter(self) -> None:
+        d = self.result("ssids")["reloaded"]
+        self.assertEqual([r["mac"] for r in d["rows"]], [self.A])
+        self.assertEqual((d["pressed"], d["now_pressed"]), ([self.GUEST], "true"))
+        self.assertEqual(d["heads"], ["First on SSID", "Last on SSID"])
+
+    def test_chip_works_from_the_keyboard(self) -> None:
+        d = self.result("ssids")
+        off, on = d["key_off"], d["key_on"]
+        self.assertEqual((off["ssid"], off["ssidnow"], off["focus"], len(off["rows"])), (None, None, self.GUEST, 4))
+        self.assertFalse(off["now_shown"])
+        self.assertEqual(off["heads"], ["First seen", "Last online"])
+        self.assertEqual([r["mac"] for r in on["rows"]], [self.B, self.A])  # "now only" went with the filter
+
+    def test_clear_filters_resets_the_ssid(self) -> None:
+        d = self.result("ssids")["cleared"]
+        self.assertEqual((d["ssid"], d["ssidnow"], d["pressed"], len(d["rows"])), (None, None, [], 4))
+        self.assertFalse(d["now_shown"])
+        self.assertEqual(d["heads"], ["First seen", "Last online"])
+
+    def test_no_horizontal_scroll_with_the_filter_on(self) -> None:
+        d = self.result("ssids")
+        for width in ("1280", "800"):
+            with self.subTest(width=width):
+                self.assertLessEqual(d[width]["table_scroll"], 0, d[width])
+                self.assertLessEqual(d[width]["page_scroll"], 0, d[width])
 
 
 class BrowserPerfTest(_BrowserCase):

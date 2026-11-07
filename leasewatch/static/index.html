@@ -40,6 +40,7 @@
   </section>
 
   <section class="vlans" id="vlans" aria-label="Networks"></section>
+  <section class="vlans ssids hidden" id="ssids" aria-label="Wi-Fi networks"><button class="chip toggle hidden" id="ssidNow" type="button" aria-pressed="false" title="Only the devices online on this Wi-Fi network now">now only</button></section>
 
   <section class="toolbar">
     <div class="search">
@@ -85,8 +86,8 @@
         <th class="c-vlan" scope="col">Network</th>
         <th class="c-type" scope="col">Type</th>
         <th class="c-where" scope="col">Connected via</th>
-        <th class="c-first" scope="col">First seen</th>
-        <th class="c-last" scope="col">Last online</th>
+        <th class="c-first" id="thFirst" scope="col">First seen</th>
+        <th class="c-last" id="thLast" scope="col">Last online</th>
         <th class="c-act" scope="col"><span class="sr">actions</span></th>
       </tr></thead>
       <tbody id="rows"></tbody>

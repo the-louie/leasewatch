@@ -338,6 +338,39 @@ const scenarios = {
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
     return { rows, narrow, drawer, plain, merged_event };
   },
+  // the drawer's Wi-Fi history: rows from the detail route, "now" on the current SSID, "since" near the start of counting
+  async wifihistory(page, base) {
+    const DEV = '02:00:00:00:10:01', UA = '00:00:5e:00:53:01';
+    const detail = await page.evaluate(async m => (await (await fetch(`/api/devices/${m}`)).json()), DEV);
+    const old = detail.wifi_presence.reduce((a, w) => (w.last_seen < a.last_seen ? w : a));
+    // the server does not send the start of counting in /api/devices: the page is handed one 30 s before the old row
+    await page.setRequestInterception(true);
+    page.on('request', async r => {
+      if (new URL(r.url()).pathname !== '/api/devices' || r.method() !== 'GET') return r.continue();
+      const j = await (await fetch(r.url(), { headers: r.headers() })).json();
+      j.meta.wifi_presence_since = old.first_seen - 30;
+      r.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(j) });
+    });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(row(DEV));
+    const read = () => page.evaluate(() => {
+      const t = document.querySelector('#dBody table.wifi'), h = [...document.querySelectorAll('#dBody h3')];
+      return { headings: h.map(x => x.textContent), head: t ? [...t.querySelectorAll('thead th')].map(x => x.textContent) : null,
+               rows: t ? [...t.querySelectorAll('tbody tr')].map(r => [...r.querySelectorAll('td')].map(td => td.textContent)) : null,
+               titles: t ? [...t.querySelectorAll('tbody tr')].map(r => r.children[3].title) : null,
+               italics: t ? t.querySelectorAll('i').length : 0 };
+    });
+    await page.click(`${row(DEV)} .c-dev`);
+    await waitOpen(page, DEV);
+    await page.waitForSelector('#dBody table.wifi');
+    const shown = await read();
+    shown.since_ts = old.first_seen - 30;
+    await page.keyboard.press('Escape');
+    await waitClosed(page);
+    await page.click(`${row(UA)} .c-dev`);
+    await waitOpen(page, UA);
+    return { shown, detail: detail.wifi_presence, none: await read() };
+  },
   // a merged MAC typed into the search finds the device it was merged into, and no other row
   async aliassearch(page) {
     await page.click('#q', { clickCount: 3 });
@@ -684,6 +717,69 @@ const scenarios = {
              column: await page.$eval('#tbl thead th.c-sel', t => getComputedStyle(t).display) };
   },
   // changes server state (a name, two acks): runs after the read-only scenarios
+  // no SSID was ever recorded: the Wi-Fi chip row stays hidden and the headers keep their names
+  async nossid(page) {
+    return { hidden: await page.$eval('#ssids', e => e.classList.contains('hidden') && e.offsetHeight === 0),
+             chips: await page.$$eval('#ssids .chip[data-ssid]', cs => cs.length),
+             heads: await page.$$eval('#thFirst, #thLast', hs => hs.map(h => h.textContent)) };
+  },
+  // the SSID chip row: counts and titles, the "ever" and "now only" filters, the address, a reload, the SSID's times in
+  // the rows, the keyboard, Clear filters and the width. The SSID names carry markup, which must stay text
+  async ssids(page, base) {
+    await page.waitForSelector('#ssids .chip[data-ssid]');
+    const chip = s => page.evaluateHandle(v => [...document.querySelectorAll('#ssids .chip[data-ssid]')].find(c => c.dataset.ssid === v), s);
+    const view = () => page.evaluate(() => {
+      const p = new URLSearchParams(location.search), now = document.querySelector('#ssidNow');
+      return {
+        rows: [...document.querySelectorAll('#rows tr')].map(t => ({ mac: t.dataset.mac, first: t.querySelector('.c-first').textContent,
+          last: t.querySelector('.c-last').textContent, meta: t.querySelector('.dev-meta .last').textContent })),
+        heads: [...document.querySelectorAll('#thFirst, #thLast')].map(h => h.textContent),
+        ssid: p.get('ssid'), ssidnow: p.get('ssidnow'),
+        now_shown: !now.classList.contains('hidden') && now.offsetWidth > 0, now_pressed: now.getAttribute('aria-pressed'),
+        pressed: [...document.querySelectorAll('#ssids .chip[data-ssid]')].filter(c => c.getAttribute('aria-pressed') === 'true').map(c => c.dataset.ssid),
+        markup: document.querySelectorAll('#ssids b, #rows b').length,
+      };
+    });
+    const waitUrl = (k, v) => page.waitForFunction((a, b) => new URLSearchParams(location.search).get(a) === b, {}, k, v);
+    const res = { hidden: await page.$eval('#ssids', e => e.classList.contains('hidden')), before: await view() };
+    res.chips = await page.$$eval('#ssids .chip[data-ssid]', cs => cs.map(c => ({ ssid: c.dataset.ssid, text: c.querySelector('.ssid').textContent,
+      n: c.querySelector('.n').textContent, title: c.title, tag: c.tagName.toLowerCase(), b: c.querySelectorAll('b').length })));
+    const GUEST = res.chips[0].ssid;
+    await (await chip(GUEST)).click();
+    await waitUrl('ssid', GUEST);
+    res.ever = await view();
+    await page.click('#ssidNow');
+    await waitUrl('ssidnow', '1');
+    res.now = await view();
+    // a reload of the address brings the same filter back
+    await page.goto(page.url(), { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    await page.waitForSelector('#ssids .chip.active[data-ssid]');
+    res.reloaded = await view();
+    for (const width of [1280, 800]) {
+      await page.setViewport({ width, height: 900 });
+      res[width] = await page.evaluate(() => {
+        const wrap = document.querySelector('.table-wrap');
+        return { table_scroll: wrap.scrollWidth - wrap.clientWidth, page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+      });
+    }
+    await page.setViewport({ width: 1400, height: 900 });
+    // the keyboard: Space on the focused chip turns the filter off, and the focus stays on the rebuilt chip
+    await (await chip(GUEST)).focus();
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => !new URLSearchParams(location.search).has('ssid'));
+    res.key_off = { ...await view(), focus: await page.evaluate(() => document.activeElement.dataset.ssid || null) };
+    await page.keyboard.press('Enter');
+    await waitUrl('ssid', GUEST);
+    res.key_on = await view();
+    // Clear filters (offered when nothing matches) drops the SSID filter too
+    await page.type('#q', 'zzz-nothing');
+    await page.waitForSelector('#empty:not(.hidden) #emptyClear:not(.hidden)');
+    await page.click('#emptyClear');
+    await page.waitForFunction(() => !location.search);
+    res.cleared = await view();
+    return res;
+  },
   async drawer(page) {
     const res = {};
     const CLICK = '02:00:00:00:00:06', KEY = '02:00:00:00:00:0d', ROWACK = '02:00:00:00:00:0c';

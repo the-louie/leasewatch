@@ -122,7 +122,7 @@ def _extract(src: str, name: str) -> str:
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
         "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "formEdited", "copyable",
-        "aliasesHtml", "paintVc"]
+        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow"]
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
 DOM = r"""
