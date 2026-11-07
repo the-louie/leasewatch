@@ -14,7 +14,7 @@ from leasewatch.db import Database
 
 RESTORED_SQL = "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac"
 ALIASES_SQL = "SELECT mac, reason, detail, merged_ts, last_seen FROM aliases WHERE device=? ORDER BY merged_ts DESC, mac"
-NAMES = {"events_restored", "aliases_device"}
+NAMES = {"events_kind_ts", "aliases_device"}
 
 
 class IndexTests(unittest.TestCase):
@@ -34,9 +34,9 @@ class IndexTests(unittest.TestCase):
     def plan(self, db: Database, sql: str, params: tuple = ()) -> str:
         return " | ".join(r[3] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, params))
 
-    def test_restored_query_uses_partial_index(self):
+    def test_restored_query_uses_kind_index(self):
         p = self.plan(self.open(), RESTORED_SQL)
-        self.assertIn("events_restored", p)
+        self.assertIn("events_kind_ts", p)
 
     def test_aliases_query_uses_index(self):
         p = self.plan(self.open(), ALIASES_SQL, ("02:00:00:00:00:01",))
@@ -51,7 +51,7 @@ class IndexTests(unittest.TestCase):
     def test_newer_schema_gets_indexes_and_keeps_version(self):
         db = self.open()
         db.set_meta("schema_version", "99")
-        db._conn.execute("DROP INDEX events_restored")
+        db._conn.execute("DROP INDEX events_kind_ts")
         db._conn.execute("DROP INDEX aliases_device")
         db._conn.close()
         db = self.open()

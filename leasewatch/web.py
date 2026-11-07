@@ -16,18 +16,20 @@ import threading
 import time
 from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodySeparatorDefect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec
 from .connectors.merge import is_private_mac
-from .db import Database
+from .db import Database, UnknownDevices
 from .fw1 import MAC_RE
 
 log = logging.getLogger("leasewatch.web")
 STATIC_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "static"))
 MAX_BODY = 16 * 1024
+# devices per bulk POST: 200 MACs are about 4.2 KiB of JSON, well inside MAX_BODY
+BULK_MAX = 200
 INDEX = os.path.join(STATIC_DIR, "index.html")
 # sent on every response: the page loads only its own script, style and images, and no inline script or style
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
@@ -79,6 +81,45 @@ def _csv_cell(v: object) -> str:
     s = str(v)
     s = _CSV_SEMI_FORMULA.sub(lambda m: m.group() + "'", s)
     return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
+_KIND = re.compile(r"[a-z_]{1,20}")
+_EVENT_PARAMS = {"kind", "since", "until", "before", "limit"}
+
+
+def _event_filters(query: str, default_limit: int, max_limit: int, paged: bool) -> dict:
+    """The events API parameters, validated; raises ValueError with the short text of the 400. Unknown parameters
+    are ignored. `paged` is False for the CSV, which has no `before`."""
+    q = parse_qs(query, keep_blank_values=True)
+    for k, v in q.items():
+        if k in _EVENT_PARAMS and len(v) > 1:
+            raise ValueError(f"repeated parameter: {k}")
+
+    def num(name: str, lo: int) -> int | None:
+        if name not in q:
+            return None
+        raw = q[name][0]
+        if not (raw.isascii() and raw.isdigit()) or len(raw) > 15 or int(raw) < lo:
+            raise ValueError(f"bad {name}")
+        return int(raw)
+
+    out: dict = {"kinds": None, "since": num("since", 0), "until": num("until", 0),
+                 "before": num("before", 1) if paged else None}
+    if "kind" in q:
+        kinds = q["kind"][0].split(",")
+        if not 1 <= len(kinds) <= 20 or not all(_KIND.fullmatch(k) for k in kinds):
+            raise ValueError("bad kind")
+        out["kinds"] = kinds
+    if out["since"] is not None and out["until"] is not None and out["since"] > out["until"]:
+        raise ValueError("since after until")
+    limit = num("limit", 1)
+    if limit is not None and limit > max_limit:
+        raise ValueError("bad limit")
+    out["limit"] = default_limit if limit is None else limit
+    return out
+
+
+_EVENTS_CSV_HEADER = ["id", "time", "mac", "kind", "detail", "name", "hostname", "vlan"]
 
 
 def _csv_ts(t: int | None) -> str:
@@ -226,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
         # refused client learns nothing about which paths exist
         if not self._write_ok():
             return
+        if p == "/api/devices":
+            return self._api_devices_post()
         m = _DEVICE_PATH.match(p)
         if not m:
             return self._error(404, "not found")
@@ -253,6 +296,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch_get(self, p: str) -> None:
         exact = {"/": self._route_index, "/healthz": self._healthz, "/api/devices": self._api_devices, "/api/devices.csv": self._csv,
                  "/api/status": self._api_status, "/api/stats": self._api_stats, "/api/events": self._api_events,
+                 "/api/events.csv": self._events_csv,
                  "/metrics": self._metrics}.get(p)
         if exact is not None:
             return exact()
@@ -448,11 +492,38 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"meta": self._meta(), "stats": self.db.stats(self.cfg.new_days)})
 
     def _api_events(self) -> None:
-        version = self.db.version()  # before the body, as in _api_devices
-        etag = self._etag(version, self._meta())
-        if self._matches(etag):
-            return self._not_modified(etag)
-        self._json_vary({"events": self.db.events(limit=300)}, etag)
+        query = urlparse(self.path).query
+        try:
+            f = _event_filters(query, 300, 500, True)
+        except ValueError as e:
+            return self._error(400, str(e))
+        # the tag is data-wide, not per query, and the page caches by full URL: a 304 for one filter must never
+        # answer another, so a request with any parameter gets no ETag and always a 200
+        etag = None
+        if not query:
+            version = self.db.version()  # before the body, as in _api_devices
+            etag = self._etag(version, self._meta())
+            if self._matches(etag):
+                return self._not_modified(etag)
+        rows = self.db.events(None, f["limit"] + 1, f["kinds"], f["since"], f["until"], f["before"])
+        more = len(rows) > f["limit"]
+        rows = rows[:f["limit"]]
+        self._json_vary({"events": rows, "next": rows[-1]["id"] if more else None}, etag)
+
+    def _events_csv(self) -> None:
+        try:
+            f = _event_filters(urlparse(self.path).query, 10000, 50000, False)
+        except ValueError as e:
+            return self._error(400, str(e))
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(_EVENTS_CSV_HEADER)
+        cell = _csv_cell
+        for r in self.db.events(None, f["limit"], f["kinds"], f["since"], f["until"]):
+            w.writerow([r["id"], _csv_ts(r["ts"]), r["mac"], r["kind"], cell(r["detail"]), cell(r["name"] or ""),
+                        cell(r["hostname"] or ""), "" if r["vlan"] is None else r["vlan"]])
+        self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
+                   {"Content-Disposition": 'attachment; filename="leasewatch-events.csv"'})
 
     def _api_device_get(self, mac: str) -> None:
         if not MAC_RE.match(mac):
@@ -526,6 +597,36 @@ class Handler(BaseHTTPRequestHandler):
         if not d:
             return self._error(404, "unknown device")
         self._json({"device": _dev(d)})
+
+    def _api_devices_post(self) -> None:
+        """Mark known or archive/restore up to BULK_MAX devices at once: all or nothing, the same events as the same
+        single POSTs. The UI reloads the list afterwards, so the answer holds only counts."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        macs = body.get("macs")
+        if not isinstance(macs, list) or not 1 <= len(macs) <= BULK_MAX:
+            return self._error(400, f"macs must be a list of 1 to {BULK_MAX} MACs")
+        for i, mac in enumerate(macs):
+            if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):  # fullmatch: "$" alone lets a trailing "\n" in
+                return self._json({"error": "bad mac", "index": i}, 400)  # the value is not echoed back
+        # exactly one of the two fields: a name or note for many devices at once is never meant
+        if "name" in body or "note" in body or ("acked" in body) == ("archived" in body):
+            return self._error(400, "bulk takes acked or archived")
+        fields = self._user_fields(body)  # the same type checks and texts as the single POST
+        if fields is None:
+            return
+        acked, _name, _note, archived = fields
+        if acked is None and archived is None:  # {"acked": null}
+            return self._error(400, "bulk takes acked or archived")
+        try:
+            changed, unchanged = self.db.update_many(macs, acked=acked, archived=archived)
+        except UnknownDevices as e:
+            return self._json({"error": "unknown device", "unknown": e.macs}, 404)
+        except Exception:
+            log.exception("POST /api/devices failed")
+            return self._error(500, "internal error")
+        self._json({"changed": len(changed), "unchanged": len(unchanged)})
 
     def _read_json_body(self) -> dict | None:
         """The request body as a JSON object, or None after the error response was sent (or the client left)."""

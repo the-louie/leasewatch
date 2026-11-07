@@ -510,6 +510,71 @@ const scenarios = {
     res.after_click_filter = await page.$eval('#fStatus', e => e.value);
     return res;
   },
+  // the Select mode at 1280 px: the checkbox column replaces Type, three rows ticked (one by Space), Mark known for all
+  // three in one request, select all visible, and leaving the mode. Changes server state (three acks)
+  async bulk(page) {
+    const PICK = ['02:00:00:00:00:06', '02:00:00:00:00:08', '02:00:00:00:00:0c'];
+    const cols = () => page.evaluate(() => {
+      const wrap = document.querySelector('.table-wrap'), th = [...document.querySelectorAll('#tbl thead th')];
+      return { shown: th.filter(t => getComputedStyle(t).display !== 'none').map(t => t.className),
+               table_scroll: wrap.scrollWidth - wrap.clientWidth,
+               page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+               sel_width: document.querySelector('#tbl thead th.c-sel').offsetWidth };
+    });
+    const bar = () => page.evaluate(() => {
+      const b = document.querySelector('#selbar'), vis = id => !document.getElementById(id).classList.contains('hidden');
+      return { shown: !b.classList.contains('hidden'), count: document.querySelector('#selCount').textContent,
+               ack: vis('selAck'), archive: vis('selArchive'), restore: vis('selRestore'),
+               all: document.querySelector('#selAll').checked, some: document.querySelector('#selAll').indeterminate,
+               pressed: document.querySelector('#selBtn').getAttribute('aria-pressed') };
+    });
+    const res = {};
+    await page.setViewport({ width: 1280, height: 900 });
+    res.before = await cols();
+    await page.click('#selBtn');
+    res.selecting = await cols();
+    res.bar_empty = await bar();
+    await page.click(`${row(PICK[0])} .c-sel input`);
+    await page.click(`${row(PICK[1])} td.c-sel`); // the cell around the box toggles it too
+    await page.focus(`${row(PICK[2])} .c-sel input`);
+    await page.keyboard.press('Space');
+    res.space_drawer = await drawerOpen(page);
+    res.ticked = await page.$$eval('#rows .c-sel input', cs => cs.filter(c => c.checked).map(c => c.closest('tr').dataset.mac));
+    res.bar3 = await bar();
+    res.labels = await page.$$eval(PICK.map(m => `${row(m)} .c-sel input`).join(','), cs => cs.map(c => c.getAttribute('aria-label')));
+    await page.click('#selAck');
+    await page.waitForFunction(() => document.querySelector('#selbar').classList.contains('hidden'));
+    await page.waitForFunction(ms => ms.every(m => !document.querySelector(`#rows tr[data-mac="${m}"]`).classList.contains('is-new')), {}, PICK);
+    res.after = {
+      bar: await bar(),
+      new_badges: await page.$$eval(PICK.map(m => `${row(m)} .badge.new`).join(','), bs => bs.length),
+      server: await Promise.all(PICK.map(async m => (await serverDevice(page, m)).acked)),
+      acked_events: await page.evaluate(async ms => (await (await fetch('/api/events')).json()).events
+        .filter(e => e.kind === 'acked' && ms.includes(e.mac)).length, PICK),
+      ticked: await page.$$eval('#rows .c-sel input', cs => cs.filter(c => c.checked).length),
+      still_selecting: await page.$eval('#tbl', t => t.classList.contains('selecting')),
+    };
+    // the header box: all visible rows, then none; one row gives the mixed state
+    await page.type('#q', 'HomeNet');
+    await page.waitForFunction(() => document.querySelectorAll('#rows tr').length === 8);
+    await page.click('#selAll');
+    res.all = { bar: await bar(), rows: await page.$$eval('#rows tr', ts => ts.length) };
+    await page.click('#selAll');
+    res.none = await bar();
+    await page.click(`${row(PICK[0])} .c-sel input`);
+    res.one = await bar();
+    // leaving the mode: Type comes back and the selection is gone
+    await page.click('#selBtn');
+    res.left = { cols: await cols(), bar: await bar(), sel: await page.evaluate(() => document.querySelectorAll('#rows .c-sel input:checked').length) };
+    await page.click('#selBtn');
+    res.reentered = await bar();
+    return res;
+  },
+  // a client that may not write: no Select button, no checkbox column
+  async bulkro(page) {
+    return { button: await page.$eval('#selBtn', b => getComputedStyle(b).display),
+             column: await page.$eval('#tbl thead th.c-sel', t => getComputedStyle(t).display) };
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};

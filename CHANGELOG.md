@@ -17,7 +17,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **Web server:** `/api/devices`, `/api/events` and `/api/status` are gzip-compressed when the client accepts it (2000 devices: 1150 KiB → 77 KiB); `/api/devices` and `/api/events` carry a weak `ETag` (it differs per client write permission), a request with a matching `If-None-Match` gets 304, and the page revalidates both that way every refresh. At most 64 connections are handled at once (the next gets 503 with `Retry-After: 5`), and a request has 15 s to send its headers and body.
 - **Shutdown:** the connectors are closed (a UniFi session logs out) and the database is closed with a WAL checkpoint, so a copy of `leasewatch.sqlite3` taken after `docker compose stop` holds the last poll (before, the last changes stayed in the `-wal` file).
 - **Database errors in the poll** (full disk, locked or read-only file, damaged file) are shown as such in `last_error` instead of "internal error in collector", with one traceback per failed spell.
-- Two indexes (the `restored` events a `PRUNE_DAYS` poll reads, the merged-MAC list) are created on every start; no schema change.
+- Two indexes (events by kind and time: the events filter and the `restored` lookup a `PRUNE_DAYS` poll runs; the merged-MAC list) are created on every start; no schema change.
 - **`PRUNE_DAYS`** follows the same prune clock as the event log (at most a day per start, at most twice real time), so a clock that jumps ahead no longer archives offline devices at once; the `archived` event's day count uses that clock too.
 
 ## 1.2.0 (2026-11-07)

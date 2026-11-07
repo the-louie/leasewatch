@@ -570,7 +570,8 @@ class ApiWriteTests(WebTestCase):
         self.assertEqual(sum(d["acked"] for d in self.db.devices()), 0)
 
     def test_post_to_other_paths_is_404(self):
-        for path in ("/", "/api/devices", "/api/stats", "/api/events", "/healthz", "/static/app.js", "/api/devices.csv"):
+        # /api/devices takes the bulk POST (tests/test_ui_bulk.py)
+        for path in ("/", "/api/stats", "/api/events", "/healthz", "/static/app.js", "/api/devices.csv"):
             status, headers, body = self.req("POST", path, body=b'{"acked": true}', headers={"Content-Type": "application/json"})
             self.assertEqual(status, 404, path)
             self.assertEqual(json.loads(body)["error"], "not found", path)

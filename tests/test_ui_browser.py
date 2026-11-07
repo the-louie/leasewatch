@@ -647,7 +647,10 @@ class BrowserReadOnlyTest(_BrowserCase):
     def setUpClass(cls) -> None:
         base, _ = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
                         [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new], env={"READ_ONLY": "1"})
-        cls.run_scenarios(base, ("readonly",))
+        cls.run_scenarios(base, ("readonly", "bulkro"))
+
+    def test_no_select_mode(self) -> None:
+        self.assertEqual(self.result("bulkro"), {"button": "none", "column": "none"})
 
     def test_drawer_and_rows_are_read_only(self) -> None:
         d = self.result("readonly")
@@ -657,6 +660,64 @@ class BrowserReadOnlyTest(_BrowserCase):
         self.assertEqual(d["buttons"], [])
         self.assertTrue(d["name_readonly"])
         self.assertTrue(d["note_readonly"])
+
+
+class BrowserBulkTest(_BrowserCase):
+    """The Select mode and the selection bar: a server of its own, as Mark known changes its data."""
+
+    PICK = [mac(6), mac(8), mac(12)]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                         [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new])
+        db.q("UPDATE devices SET first_seen=first_seen-864000 WHERE baseline=1")
+        cls.run_scenarios(base, ("bulk",))
+
+    def test_select_mode_swaps_type_for_checkboxes(self) -> None:
+        d = self.result("bulk")
+        self.assertIn("c-type", d["before"]["shown"])
+        self.assertNotIn("c-sel", d["before"]["shown"])
+        self.assertEqual(d["selecting"]["shown"][0], "c-sel")
+        self.assertNotIn("c-type", d["selecting"]["shown"])
+        self.assertLessEqual(d["selecting"]["sel_width"], 25)
+        self.assertLessEqual(d["selecting"]["table_scroll"], 0, d["selecting"])
+        self.assertLessEqual(d["selecting"]["page_scroll"], 0, d["selecting"])
+        self.assertFalse(d["bar_empty"]["shown"])  # nothing ticked: no bar
+        self.assertEqual(d["bar_empty"]["pressed"], "true")
+        # leaving the mode restores Type and drops the selection; coming back starts empty
+        self.assertEqual(d["left"]["cols"]["shown"], d["before"]["shown"])
+        self.assertEqual(d["left"]["sel"], 0)
+        self.assertFalse(d["left"]["bar"]["shown"])
+        self.assertEqual(d["left"]["bar"]["pressed"], "false")
+        self.assertFalse(d["reentered"]["shown"])
+
+    def test_three_rows_marked_known(self) -> None:
+        d = self.result("bulk")
+        self.assertFalse(d["space_drawer"])  # Space on the box toggles it, no drawer
+        self.assertEqual(sorted(d["ticked"]), self.PICK)
+        self.assertEqual(d["labels"], ["Select sam-phone", "Select Sam's iPad", "Select plug-2"])
+        b = d["bar3"]
+        self.assertEqual((b["shown"], b["count"], b["ack"], b["archive"], b["restore"]), (True, "3 selected", True, True, False))
+        self.assertTrue(b["some"])
+        a = d["after"]
+        self.assertFalse(a["bar"]["shown"])
+        self.assertEqual(a["new_badges"], 0)
+        self.assertEqual(a["server"], [1, 1, 1])
+        self.assertEqual(a["acked_events"], 3)
+        self.assertEqual(a["ticked"], 0)
+        self.assertTrue(a["still_selecting"])
+
+    def test_select_all_visible(self) -> None:
+        d = self.result("bulk")
+        self.assertEqual(d["all"]["rows"], 8)
+        self.assertEqual((d["all"]["bar"]["count"], d["all"]["bar"]["all"], d["all"]["bar"]["some"]), ("8 selected", True, False))
+        self.assertFalse(d["none"]["shown"])
+        self.assertFalse(d["none"]["all"])
+        self.assertEqual((d["one"]["count"], d["one"]["all"], d["one"]["some"]), ("1 selected", False, True))
+        self.assertFalse(d["one"]["ack"])  # the one ticked row is known now: no Mark known
 
 
 class BrowserAuthTest(_BrowserCase):

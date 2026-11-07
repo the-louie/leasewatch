@@ -87,14 +87,22 @@ VERSION_STEPS = {
 }
 # run on every open (after the version steps, also for a newer schema); CREATE INDEX IF NOT EXISTS is cheap when present
 INDEXES = (
-    # serves the per-poll MAX(ts) per MAC of 'restored' events; the query must spell the literal 'restored'
-    "CREATE INDEX IF NOT EXISTS events_restored ON events(mac, ts) WHERE kind='restored'",
     "CREATE INDEX IF NOT EXISTS aliases_device ON aliases(device)",
+    # the events view filtered by kind (and a date range): kind first, then the time order of the page
+    "CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts)",  # the events filter by kind, and the per-poll 'restored' lookup
 )
 
 # strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
 # U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
+
+
+class UnknownDevices(LookupError):
+    """A bulk update named MACs that are neither a device nor an alias; nothing was written."""
+
+    def __init__(self, macs: list[str]):
+        super().__init__(f"{len(macs)} unknown device(s)")
+        self.macs = macs
 
 
 class Database:
@@ -272,45 +280,100 @@ class Database:
     def history(self, mac: str, limit: int = 200) -> list[dict]:
         return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]
 
-    def events(self, mac: str | None = None, limit: int = 200) -> list[dict]:
+    def events(self, mac: str | None = None, limit: int = 200, kinds: list[str] | None = None, since: int | None = None,
+               until: int | None = None, before: int | None = None) -> list[dict]:
+        """One device's events (`mac`), or else all of them with the filters. Newest first (ts DESC, id DESC).
+        since is inclusive, until exclusive. `before` is an event id: only rows older than it in that order; an id
+        that no longer exists gives no rows."""
         if mac:
             rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail FROM events e WHERE mac=? ORDER BY e.ts DESC, e.id DESC LIMIT ?", (mac, limit))
-        else:
-            rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac) ORDER BY e.ts DESC, e.id DESC LIMIT ?", (limit,))
-        return [dict(r) for r in rows]
+            return [dict(r) for r in rows]
+        where: list[str] = []
+        params: list = []
+        if kinds:
+            where.append(f"e.kind IN ({','.join('?' * len(kinds))})"); params += kinds
+        if since is not None:
+            where.append("e.ts >= ?"); params.append(since)
+        if until is not None:
+            where.append("e.ts < ?"); params.append(until)
+        if before is not None:
+            row = self.q("SELECT ts FROM events WHERE id=?", (before,))
+            if not row:
+                return []
+            where.append("(e.ts, e.id) < (?, ?)"); params += [row[0]["ts"], before]
+        sql = ("SELECT e.id, e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac)"
+               + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY e.ts DESC, e.id DESC LIMIT ?")
+        return [dict(r) for r in self.q(sql, (*params, limit))]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
                            archived: bool | None = None) -> dict | None:
         with self.tx() as c:
-            cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
-            if not cur:  # design-s4 §1: an alias MAC (copied from the drawer) updates the device it was merged into
-                mac = self._alias_owner(c, mac)
-                cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
-            if not cur:
+            key = self._resolve(c, mac)
+            if not key:
                 return None
-            sets, params = [], []
-            if acked is not None:
-                sets.append("acked=?"); params.append(1 if acked else 0)
-                if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
-                    sets.append("acked_at=?"); params.append(int(time.time()) if acked else None)
-            if name is not None:
-                sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
-            if note is not None:
-                sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
-            # archive: the device leaves the list and the mail queue; the same state again changes nothing
-            arch_change = archived is not None and (cur["archived_ts"] is not None) != archived
+            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived)[0]
+
+    def update_many(self, macs: list[str], acked: bool | None = None,
+                    archived: bool | None = None) -> tuple[list[str], list[str]]:
+        """Set acked or archived on several devices in one transaction: (changed keys, unchanged keys). An alias MAC
+        counts as its device, and a device named twice counts once. Raises UnknownDevices (nothing written) when any
+        MAC is neither a device nor an alias."""
+        with self.tx() as c:
+            keys: list[str] = []
+            unknown: list[str] = []
+            for mac in macs:
+                key = self._resolve(c, mac)
+                if not key:
+                    if mac not in unknown:
+                        unknown.append(mac)
+                elif key not in keys:
+                    keys.append(key)
+            if unknown:  # before any write, so the rollback has nothing to undo
+                raise UnknownDevices(unknown)
+            now = int(time.time())  # one time for the whole batch
+            changed: list[str] = []
+            unchanged: list[str] = []
+            for key in keys:
+                (changed if self._apply_user_fields(c, key, now, acked, None, None, archived)[1] else unchanged).append(key)
+            return changed, unchanged
+
+    def _resolve(self, c: sqlite3.Connection, mac: str) -> str:
+        """The device key for mac: itself when it is a device, the owner when it is an alias (an alias MAC copied
+        from the drawer updates the device it was merged into), else ""."""
+        if c.execute("SELECT 1 FROM devices WHERE mac=?", (mac,)).fetchone():
+            return mac
+        return self._alias_owner(c, mac)
+
+    @staticmethod
+    def _apply_user_fields(c: sqlite3.Connection, mac: str, now: int, acked: bool | None, name: str | None,
+                           note: str | None, archived: bool | None) -> tuple[dict, bool]:
+        """Write the user fields of the existing device mac inside the caller's transaction: (the row, whether an
+        acked/unacked or archived/restored event was written)."""
+        cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
+        sets, params = [], []
+        if acked is not None:
+            sets.append("acked=?"); params.append(1 if acked else 0)
+            if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
+                sets.append("acked_at=?"); params.append(now if acked else None)
+        if name is not None:
+            sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
+        if note is not None:
+            sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
+        # archive: the device leaves the list and the mail queue; the same state again changes nothing
+        arch_change = archived is not None and (cur["archived_ts"] is not None) != archived
+        if arch_change:
+            sets.append("archived_ts=?"); params.append(now if archived else None)
+            if archived:
+                sets.append("mail_queued=NULL")
+        ack_change = acked is not None and bool(cur["acked"]) != bool(acked)
+        if sets:
+            params.append(mac)
+            c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
+            if ack_change:
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "acked" if acked else "unacked", ""))
             if arch_change:
-                sets.append("archived_ts=?"); params.append(int(time.time()) if archived else None)
-                if archived:
-                    sets.append("mail_queued=NULL")
-            if sets:
-                params.append(mac)
-                c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
-                if acked is not None and bool(cur["acked"]) != bool(acked):
-                    c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), mac, "acked" if acked else "unacked", ""))
-                if arch_change:
-                    c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), mac, "archived" if archived else "restored", ""))
-            return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone())
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "archived" if archived else "restored", ""))
+        return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()), ack_change or arch_change
 
     def stats(self, new_days: int) -> dict:
         now = int(time.time())

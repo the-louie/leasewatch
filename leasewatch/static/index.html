@@ -70,12 +70,14 @@
       <option value="vendor">Vendor</option>
     </select>
     <span class="count" id="count"></span>
+    <button class="btn hidden" id="selBtn" type="button" aria-pressed="false" title="Select rows to mark known, archive or restore several at once">Select</button>
     <a class="btn ghost" href="/api/devices.csv" download>Export CSV</a>
   </section>
 
   <section class="table-wrap">
     <table id="tbl">
       <thead><tr>
+        <th class="c-sel" scope="col"><input type="checkbox" id="selAll" aria-label="Select all visible"></th>
         <th class="c-dot" scope="col"><span class="sr">online</span></th>
         <th class="c-dev" scope="col">Device</th>
         <th class="c-ip" scope="col">IP</th>
@@ -96,6 +98,15 @@
     <h2>Recent events</h2>
     <ul id="events" class="event-list"></ul>
   </section>
+
+  <!-- inside main: the open drawer makes main inert, and the bar with it -->
+  <div id="selbar" class="selbar hidden" role="region" aria-label="Selection">
+    <span class="selcount" id="selCount" aria-live="polite"></span>
+    <button class="btn small ack" id="selAck" type="button">Mark known</button>
+    <button class="btn small" id="selArchive" type="button">Archive</button>
+    <button class="btn small" id="selRestore" type="button">Restore to list</button>
+    <button class="btn small ghost" id="selClear" type="button">Clear</button>
+  </div>
 </main>
 
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle" aria-hidden="true" inert>
@@ -113,6 +124,7 @@
 
 <template id="rowTpl">
   <tr class="row" tabindex="0">
+    <td class="c-sel"><input type="checkbox" class="sel"></td>
     <td class="c-dot"><span class="online-dot"></span></td>
     <td class="c-dev"><div class="dev-name"><span class="nm"></span></div><div class="dev-sub"></div><div class="dev-meta"><span class="mono ip"></span><span class="badge vlan"></span><span class="muted where"></span><span class="muted last"></span></div></td>
     <td class="c-ip mono"><span class="cp" role="button" tabindex="0" title="Click to copy"></span></td>

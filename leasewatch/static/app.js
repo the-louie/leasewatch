@@ -17,6 +17,9 @@
     // URL -> {etag, data} of the last 200 of the two big GETs, in memory (the server sends Cache-Control: no-store, so
     // the browser cache keeps nothing): the request says which copy it has, and a 304 means that copy is still current
     revalidated: new Map(),
+    selecting: false, // the "Select" mode: the checkbox column shows (and Type hides, so the table keeps its width)
+    sel: new Set(), // device keys of the ticked rows; cut down to the visible rows on every renderTable()
+    bulkBusy: false, // a bulk POST runs: a second click on the bar waits for it
   };
   const VLAN_COLORS = ["--vlan1", "--vlan2", "--vlan3", "--vlan4", "--vlan5", "--vlan6", "--vlan7", "--vlan8"];
   // stable colour per network: alphabetical position among every network of any device (archived too), so colours
@@ -229,10 +232,29 @@
   function renderTable() {
     const list = filtered();
     const tb = $("#rows");
+    // a selection covers only the rows on screen: an action must never touch a row a search, filter or refresh hid
+    const shown = new Set(list.map(d => d.mac));
+    state.sel = new Set([...state.sel].filter(m => shown.has(m)));
+    // can_write false: the server refuses this client's changes, so there is nothing to select for
+    const canWrite = !!state.meta && state.meta.can_write !== false;
+    if (!canWrite && state.selecting) { state.selecting = false; state.sel.clear(); }
+    const sb = $("#selBtn"); sb.classList.toggle("hidden", !canWrite);
+    sb.setAttribute("aria-pressed", String(state.selecting)); sb.textContent = state.selecting ? "Done" : "Select";
+    $("#tbl").classList.toggle("selecting", state.selecting);
+    // the count, the header box and the bar's buttons, after any change of the ticked rows
+    const paintSel = () => {
+      const n = state.sel.size, all = $("#selAll"), arch = state.status === "archived";
+      all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length;
+      $("#selCount").textContent = `${n} selected`;
+      $("#selAck").classList.toggle("hidden", !list.some(d => state.sel.has(d.mac) && !d.acked));
+      $("#selArchive").classList.toggle("hidden", arch); $("#selRestore").classList.toggle("hidden", !arch);
+      const bar = state.selecting && n > 0;
+      $("#selbar").classList.toggle("hidden", !bar); $("main").classList.toggle("has-selbar", bar); // the bar never covers the last row
+    };
     // rebuilding the rows drops keyboard focus: note the focused row (or its button or copy target) to focus its replacement
     const fa = tb.contains(document.activeElement) ? document.activeElement : null;
     const fmac = fa?.closest("tr")?.dataset.mac, fack = !!fa?.classList.contains("ack");
-    const fcp = fmac ? [".c-ip .cp", ".c-mac .cp"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
+    const fcp = fmac ? [".c-ip .cp", ".c-mac .cp", ".c-sel input"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
     tb.innerHTML = "";
     const tpl = $("#rowTpl").content;
     const frag = document.createDocumentFragment();
@@ -245,6 +267,12 @@
       dot.title = d.online ? "online" : (d.last_online ? `offline, last online ${rel(d.last_online)}` : "offline, not seen online since leasewatch started");
       const nm = $(".dev-name", tr), lbl = label(d);
       $(".nm", nm).textContent = lbl;
+      // a real checkbox: Tab reaches it and Space toggles it natively (the row's own keys ignore it); a click anywhere
+      // in the cell toggles it, for a larger target, and never opens the drawer
+      const cb = $(".c-sel input", tr);
+      cb.checked = state.sel.has(d.mac); cb.setAttribute("aria-label", `Select ${lbl}`);
+      cb.onchange = () => { if (cb.checked) state.sel.add(d.mac); else state.sel.delete(d.mac); paintSel(); };
+      $(".c-sel", tr).onclick = ev => { ev.stopPropagation(); if (ev.target !== cb) cb.click(); };
       nm.classList.toggle("unnamed", !d.name && !d.wifi_alias && !d.hostname); // label() ranks the UniFi alias before the hostname
       if (fresh) nm.insertAdjacentHTML("beforeend", '<span class="badge new">NEW</span>');
       else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", '<span class="badge base">not yet known</span>');
@@ -278,6 +306,7 @@
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
+    paintSel();
     if (fmac) { const tr = $$("#rows tr").find(t => t.dataset.mac === fmac); ((fack && tr && $(".ack", tr)) || (fcp && tr && $(fcp, tr)) || tr)?.focus({ preventScroll: true }); } // the reader may have scrolled away from it
     // the total is the devices this filter could show: archived ones only under "Archived", as the cards leave them out
     const total = state.devices.filter(d => (d.archived_ts != null) === (state.status === "archived")).length;
@@ -501,6 +530,28 @@
     } catch (e) { showBanner(`Save failed: ${e.message}`); }
   }
 
+  // the ticked rows in requests of up to BULK_MAX (the server's limit), one after another; the server applies each one
+  // all or nothing. At the first failure the rest stay as they are and the banner says how far it got
+  const BULK_MAX = 200;
+  async function bulkSet(fields, verb) {
+    if (state.bulkBusy || !state.sel.size) return;
+    state.bulkBusy = true;
+    const macs = [...state.sel];
+    let done = 0, err = null;
+    try {
+      for (let i = 0; i < macs.length; i += BULK_MAX) {
+        const part = macs.slice(i, i + BULK_MAX);
+        await api("/api/devices", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ macs: part, ...fields }) });
+        done += part.length;
+      }
+      state.sel.clear();
+    } catch (e) { err = e; }
+    finally { state.bulkBusy = false; }
+    await load();
+    // after the load: its status line would clear a banner shown before it
+    if (err) showBanner(done ? `${verb} ${done} of ${macs.length}; the rest were not changed: ${err.message}` : `Save failed: ${err.message}`);
+  }
+
   // ---------- url state ----------
   let urlRetry = 0; // timer of the write retried after a throttled one
   function syncUrl() {
@@ -548,6 +599,13 @@
   $("#sort").addEventListener("change", e => { state.sort = e.target.value; renderTable(); syncUrl(); });
   $$(".card[data-filter]").forEach(c => c.onclick = () => { state.status = state.status === c.dataset.filter ? "all" : c.dataset.filter; $("#fStatus").value = state.status; renderCards(); renderTable(); syncUrl(); });
   $("#emptyClear").onclick = clearFilters;
+  // leaving the mode clears the selection, so no hidden ticks wait for the next time
+  $("#selBtn").onclick = () => { state.selecting = !state.selecting; state.sel.clear(); renderTable(); };
+  $("#selAll").onchange = e => { state.sel = new Set(e.target.checked ? filtered().map(d => d.mac) : []); renderTable(); };
+  $("#selClear").onclick = () => { state.sel.clear(); renderTable(); };
+  $("#selAck").onclick = () => bulkSet({ acked: true }, "Marked");
+  $("#selArchive").onclick = () => bulkSet({ archived: true }, "Archived");
+  $("#selRestore").onclick = () => bulkSet({ archived: false }, "Restored");
   $("#dClose").onclick = closeDrawer; $("#scrim").onclick = closeDrawer;
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && document.activeElement === $("#q") && state.q) { state.q = ""; $("#q").value = ""; searchNow(); return; }
