@@ -53,7 +53,7 @@ class SchemaVersionTest(DbBase):
                 with self.assertLogs("leasewatch.db", "WARNING") as cm:
                     db = self.reopen_with_version(raw, drop_seen=True)
                 self.assertIn("not a number", "\n".join(cm.output))
-                self.assertEqual(db.get_meta("schema_version"), "2")
+                self.assertEqual(db.get_meta("schema_version"), "3")
                 self.assertTrue(db.q("SELECT 1 FROM sqlite_master WHERE name='seen'"))
 
     def test_r132_below_one_is_not_called_not_a_number(self) -> None:
@@ -64,11 +64,11 @@ class SchemaVersionTest(DbBase):
                 text = "\n".join(cm.output)
                 self.assertNotIn("not a number", text)
                 self.assertIn("below 1", text)
-                self.assertEqual(db.get_meta("schema_version"), "2")
+                self.assertEqual(db.get_meta("schema_version"), "3")
 
     def test_v08_blob_version_does_not_crash_startup(self) -> None:
-        # b"2" is version 2 (nothing to do, the value stays as stored); b"x" is damage and repaired to "2"
-        for blob, want in ((b"2", b"2"), (b"x", "2")):
+        # b"3" is version 3 (nothing to do, the value stays as stored); b"x" is damage and repaired to "3"
+        for blob, want in ((b"3", b"3"), (b"x", "3")):
             with self.subTest(blob=blob):
                 self.db._conn.close()
                 c = sqlite3.connect(self.path)
@@ -82,7 +82,7 @@ class SchemaVersionTest(DbBase):
         with self.assertLogs("leasewatch.db", "WARNING") as cm:
             db = self.reopen_with_version("9" * 5000, drop_seen=True)
         self.assertIn("not a number", "\n".join(cm.output))
-        self.assertEqual(db.get_meta("schema_version"), "2")
+        self.assertEqual(db.get_meta("schema_version"), "3")
         self.assertTrue(db.q("SELECT 1 FROM sqlite_master WHERE name='seen'"))
 
 

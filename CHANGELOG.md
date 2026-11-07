@@ -14,6 +14,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Changed
 
+- **Database:** schema 3 adds the device columns `client_id`, `archived_ts` and `mail_queued` and an `aliases` table; the first start migrates a 1.0 or 1.1 database automatically and changes no existing row. The migration is one-way: back up `DATA_DIR` before the upgrade if you may go back to 1.1.
 - **Device table:** the Type column now shows from a 1280 px wide window (was 1601 px); the table width is the same at every width from 1280 px.
 - **Search:** the table and the URL follow the search box 150 ms after the last key instead of on every key (a rebuild of 2000 rows takes about 100 ms); Enter and Escape in the box still apply at once (Enter with no search waiting does nothing).
 - **Baseline:** while the baseline waits for a sighting producer, no change events (ip, hostname, network, lease type, port, Wi-Fi, back) and no history rows are written, so a late producer no longer logs its details as changes (e.g. "hostname - -> laptop"). Devices are still recorded and updated; the poll that takes the baseline writes one history row per device with its complete values.

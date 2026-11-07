@@ -496,10 +496,10 @@ class SchemaVersionTests(unittest.TestCase):
 
     def tearDown(self): self.tmp.cleanup()
 
-    def test_fresh_db_is_version_2(self):
+    def test_fresh_db_is_current_version(self):
         db = Database(self.path)
         try:
-            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(db.get_meta("schema_version"), "3")
             self.assertEqual(db.seen("02:00:00:00:00:01"), [])
             self.assertEqual(db.q("SELECT loc_source FROM devices"), [])
         finally:
@@ -520,8 +520,8 @@ class SchemaVersionTests(unittest.TestCase):
         with unittest.mock.patch.object(Database, "set_meta", spy):
             db = Database(self.path)
         try:
-            self.assertEqual(versions, ["1", "2"])  # an unversioned DB is recorded as 1 first, then stepped up
-            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(versions, ["1", "2", "3"])  # an unversioned DB is recorded as 1 first, then stepped up
+            self.assertEqual(db.get_meta("schema_version"), "3")
             d = db.device("02:00:00:00:00:01")
             self.assertEqual((d["ip"], d["loc_source"], d["sw_port"], d["link"]), ("10.0.0.5", "", "", ""))
             self.assertEqual(db.seen("02:00:00:00:00:01"), [])
@@ -529,7 +529,7 @@ class SchemaVersionTests(unittest.TestCase):
             db._conn.close()
         db = Database(self.path)  # opening again changes nothing
         try:
-            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(db.get_meta("schema_version"), "3")
         finally:
             db._conn.close()
 
@@ -540,7 +540,7 @@ class SchemaVersionTests(unittest.TestCase):
             db = Database(self.path)
         try:
             self.assertIn("not a number; treated as 1", logs.output[0])
-            self.assertEqual(db.get_meta("schema_version"), "2")
+            self.assertEqual(db.get_meta("schema_version"), "3")
             self.assertEqual(db.seen("02:00:00:00:00:01"), [])  # step 2 ran again
         finally:
             db._conn.close()
@@ -554,7 +554,7 @@ class SchemaVersionTests(unittest.TestCase):
                     db = Database(self.path)  # crashed with KeyError: VERSION_STEPS has no step 1 or 0
                 try:
                     self.assertIn("below 1; treated as 1", logs.output[0])
-                    self.assertEqual(db.get_meta("schema_version"), "2")
+                    self.assertEqual(db.get_meta("schema_version"), "3")
                     self.assertEqual(db.seen("02:00:00:00:00:01"), [])
                 finally:
                     db._conn.close()
@@ -580,7 +580,7 @@ class SchemaVersionTests(unittest.TestCase):
         with self.assertLogs("leasewatch.db", "WARNING") as logs:
             db = Database(self.path)
         try:
-            self.assertEqual(logs.output, ["WARNING:leasewatch.db:database schema 9 is newer than this version (2); no migration"])
+            self.assertEqual(logs.output, ["WARNING:leasewatch.db:database schema 9 is newer than this version (3); no migration"])
             self.assertEqual(db.get_meta("schema_version"), "9")
         finally:
             db._conn.close()

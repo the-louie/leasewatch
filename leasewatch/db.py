@@ -52,13 +52,20 @@ MIGRATIONS = [
     ("devices", "wifi_signal", "INTEGER"), ("devices", "wifi_radio", "TEXT NOT NULL DEFAULT ''"),
     ("devices", "wifi_alias", "TEXT NOT NULL DEFAULT ''"), ("devices", "link", "TEXT NOT NULL DEFAULT ''"),
     ("devices", "loc_source", "TEXT NOT NULL DEFAULT ''"),
+    # schema v3: the normalised DHCP client-id ('' when none), when the device was archived and when its new-device
+    # mail was queued (NULL = in the list / nothing to mail), so an archive and a pending mail survive a restart
+    ("devices", "client_id", "TEXT NOT NULL DEFAULT ''"), ("devices", "archived_ts", "INTEGER"),
+    ("devices", "mail_queued", "INTEGER"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 VERSION_STEPS = {
     # per-source freshness: when each connector instance last listed a MAC and last saw it on the wire
     2: "CREATE TABLE IF NOT EXISTS seen (mac TEXT, source TEXT, last_seen INTEGER NOT NULL, last_present INTEGER, PRIMARY KEY(mac, source))",
+    # merged private MACs: each alias MAC points to the device key (devices.mac, the first MAC seen) it was merged
+    # into, so the key and every row keyed by it stay valid; one statement, as the loop and the table regex expect
+    3: "CREATE TABLE IF NOT EXISTS aliases (mac TEXT PRIMARY KEY, device TEXT NOT NULL, reason TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', merged_ts INTEGER NOT NULL, last_seen INTEGER NOT NULL)",
 }
 
 # strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
