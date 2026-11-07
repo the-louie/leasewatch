@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 1.2.0 (unreleased)
+## 1.2.0 (2026-11-07)
 
 ### Added
 - UniFi connector keeps its login session between polls and logs in again only when the session expires.
