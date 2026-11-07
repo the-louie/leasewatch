@@ -10,6 +10,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from leasewatch.config import REMOVED_VARS  # noqa: E402
+import _netguard  # noqa: E402
+
+# a module run on its own (not through discover) is guarded too; see _netguard.py
+_netguard.install()
 
 # Every name read through _env/_env_int in leasewatch/config.py, plus LOG_LEVEL (__main__.py) and
 # LW_CONNECTORS_DIR (connectors/__init__.py: a developer's own plugin dir must not reach the tests).

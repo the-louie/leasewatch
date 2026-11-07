@@ -124,6 +124,8 @@ Login is optional and off by default. Without it the page is meant for a trusted
 
 `python3 -m unittest tests.test_ui_browser -v` — UI tests in headless Chrome (node + puppeteer from `npm root -g`, Chrome from `LW_TEST_CHROME` or the usual paths); they skip without node, puppeteer or Chrome.
 
+No test may reach the network: `tests/_netguard.py` (installed for every module, and for the contrib suites) fails any test that connects to or resolves a non-loopback address, even when the code under test swallows the error; fake or stub the client instead.
+
 ## License
 
 MIT — see `LICENSE`.

@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _contrib import CONTRIB, ROOT, contrib_dists, use_contrib  # noqa: E402
+import _netguard  # noqa: E402
 
 README = os.path.join(CONTRIB, "README.md")
 PUBLIC_MODULE = "leasewatch.connectors"
@@ -93,9 +94,9 @@ class ContribLayoutTest(unittest.TestCase):
         for dist in dists:
             with self.subTest(dist=dist):
                 # a separate process per package: its test module names cannot clash with ours or another package's
-                run = subprocess.run([sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover",
-                                      "-s", "tests"], cwd=os.path.join(CONTRIB, dist), env=env,
-                                     capture_output=True, text=True, timeout=300)
+                # with the network guard installed, like our own suite
+                run = subprocess.run(_netguard.child_argv("discover", "-s", "tests"), cwd=os.path.join(CONTRIB, dist),
+                                     env=env, capture_output=True, text=True, timeout=300)
                 self.assertEqual(run.returncode, 0, run.stderr[-4000:])
 
 
