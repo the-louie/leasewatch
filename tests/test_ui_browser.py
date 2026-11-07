@@ -6,6 +6,7 @@ test asserts on its scenario's JSON result line.
 """
 from __future__ import annotations
 
+import csv
 import datetime
 import json
 import logging
@@ -17,16 +18,18 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
+from _env import FW1_ENV, clean_env, restore, sources, swap_client  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Sighting  # noqa: E402
+from leasewatch.unifi import WifiInfo  # noqa: E402
 from leasewatch.web import serve  # noqa: E402
 
 RUN_JS = os.path.join(HERE, "browser", "run.js")
@@ -698,6 +701,94 @@ class BrowserSsidTest(_BrowserCase):
             with self.subTest(width=width):
                 self.assertLessEqual(d[width]["table_scroll"], 0, d[width])
                 self.assertLessEqual(d[width]["page_scroll"], 0, d[width])
+
+
+class BrowserGuestFlowTest(_BrowserCase):
+    """Who was on the Guest network: presence written by the real collector, four polls 120 s apart, a fake controller.
+    X is on HomeNet, then from poll 3 on Guest under a private MAC (merged into X). Y is on Guest in polls 2 and 3 and
+    back on HomeNet in poll 4. Z stays on HomeNet."""
+    X, ALIAS, Y, Z = "02:00:00:00:40:01", "06:00:00:00:40:09", "02:00:00:00:40:02", "02:00:00:00:40:03"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        saved = clean_env(dict(sources("unifi"), **{k: v for k, v in ENV.items() if k not in FW1_ENV}, DATA_DIR=tmp.name))
+        cls.addClassCleanup(restore, saved)
+        cfg = Config()
+        db = Database(cfg.db_path)
+        cls.addClassCleanup(db._conn.close)
+        client = FakeClient([])
+        collector = Collector(cfg, db, client)
+        wifi: dict = {}
+        swap_client(collector, "unifi", type("U", (), {"clients": lambda s: wifi})())
+
+        def s(m: str, n: int, host: str, online: bool = True) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=online)
+        home, guest = WifiInfo(ssid="HomeNet", ap="ap-hall"), WifiInfo(ssid="Guest", ap="ap-attic")
+        t0 = int(time.time()) - 360  # the last poll is now: the page shows no stale banner
+        # (what the firewall lists, what the controller lists) per poll
+        x, y, z = s(cls.X, 41, "phone"), s(cls.Y, 42, "laptop"), s(cls.Z, 43, "tv")
+        xa = s(cls.ALIAS, 41, "phone")
+        polls = [([x, y, z], {cls.X: home, cls.Y: home, cls.Z: home}),
+                 ([x, y, z], {cls.X: home, cls.Y: guest, cls.Z: home}),
+                 ([xa, y, z], {cls.ALIAS: guest, cls.Y: guest, cls.Z: home}),
+                 ([xa, y, z], {cls.ALIAS: guest, cls.Y: home, cls.Z: home})]
+        for i, (sightings, wifi_now) in enumerate(polls):
+            if i == 2:  # the private MAC is merged into X (the merge rules have their own tests)
+                db.q("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
+                     (cls.ALIAS, cls.X, "client-id", "", t0, t0))
+            client.data = sightings
+            wifi.clear(); wifi.update(wifi_now)
+            with mock.patch("leasewatch.collector.time.time", lambda: t0 + 120 * i):
+                collector.run_once()
+        srv = serve(cfg, db, "9.9.9-test")
+        thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+        cls.addClassCleanup(thread.join, 5)
+        cls.addClassCleanup(srv.server_close)
+        cls.addClassCleanup(srv.shutdown)
+        cls.run_scenarios(f"http://127.0.0.1:{srv.server_address[1]}/", ("guestflow",))
+
+    def test_chips_count_now_and_ever(self) -> None:
+        d = self.result("guestflow")
+        self.assertEqual(sorted((c["ssid"], c["n"]) for c in d["chips"]), [("Guest", "1/2"), ("HomeNet", "2/3")])
+
+    def test_guest_lists_the_devices_ever_on_it(self) -> None:
+        d = self.result("guestflow")["list"]
+        self.assertEqual(d["heads"], ["First on SSID", "Last on SSID"])
+        rows = {r["mac"]: r for r in d["rows"]}
+        self.assertEqual(set(rows), {self.X, self.Y})  # the private MAC is no row of its own
+        self.assertEqual(rows[self.X]["last"], "now")  # X is on Guest now; Y left
+        self.assertNotEqual(rows[self.X]["first"], rows[self.Y]["first"])  # Y joined at poll 2, X at poll 3
+        self.assertEqual([r["mac"] for r in d["rows"]], [self.X, self.Y])  # newest on the SSID first
+
+    def test_drawer_of_the_merged_device_has_its_history(self) -> None:
+        d = self.result("guestflow")["drawer"]
+        self.assertEqual({r[0] for r in d}, {"Guest", "HomeNet"})
+        self.assertEqual(len(d), 2)
+
+    def test_guest_csv_has_one_row_per_device(self) -> None:
+        d = self.result("guestflow")["csv"]
+        self.assertEqual((d["status"], d["type"].split(";")[0]), (200, "text/csv"))
+        lines = d["text"].lstrip("﻿").splitlines()
+        head = lines[0].split(",")
+        self.assertEqual(len(lines) - 1, 2)
+        got = {}
+        for line in lines[1:]:
+            rec = dict(zip(head, next(csv.reader([line]))))
+            got[rec["mac"]] = rec
+        self.assertEqual(set(got), {self.X, self.Y})
+        self.assertTrue(all(float(r["hours_seen"]) > 0 for r in got.values()), got)
+        self.assertEqual({r["last_ap"] for r in got.values()}, {"ap-attic"})
+
+    def test_no_horizontal_scroll_at_1280(self) -> None:
+        d = self.result("guestflow")["scroll"]
+        self.assertLessEqual(d["page"], 0, d)
+        self.assertLessEqual(d["table"], 0, d)
 
 
 class BrowserPerfTest(_BrowserCase):

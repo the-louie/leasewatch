@@ -780,6 +780,35 @@ const scenarios = {
     res.cleared = await view();
     return res;
   },
+  // the guest-SSID question end to end: data written by the real collector over four polls. The chips, the Guest list with the
+  // SSID's own times, the drawer of the merged device, the CSV of the SSID, and the width
+  async guestflow(page, base) {
+    await page.waitForSelector('#ssids .chip[data-ssid]');
+    const GUEST = 'Guest', X = '02:00:00:00:40:01';
+    const chips = await page.$$eval('#ssids .chip[data-ssid]', cs => cs.map(c => ({ ssid: c.dataset.ssid, n: c.querySelector('.n').textContent })));
+    await page.evaluate(v => [...document.querySelectorAll('#ssids .chip[data-ssid]')].find(c => c.dataset.ssid === v).click(), GUEST);
+    await page.waitForFunction(v => new URLSearchParams(location.search).get('ssid') === v, {}, GUEST);
+    await page.waitForFunction(() => document.querySelector('#thFirst').textContent === 'First on SSID');
+    const list = await page.evaluate(() => ({
+      heads: [...document.querySelectorAll('#thFirst, #thLast')].map(h => h.textContent),
+      rows: [...document.querySelectorAll('#rows tr')].map(t => ({ mac: t.dataset.mac, name: t.querySelector('.nm').textContent,
+        first: t.querySelector('.c-first').textContent, last: t.querySelector('.c-last').textContent }))
+    }));
+    await page.click(`${row(X)} .c-dev`);
+    await waitOpen(page, X);
+    await page.waitForSelector('#dBody table.wifi');
+    const drawer = await page.evaluate(() => [...document.querySelectorAll('#dBody table.wifi tbody tr')].map(r => [...r.querySelectorAll('td')].map(td => td.textContent)));
+    await page.keyboard.press('Escape');
+    await waitClosed(page);
+    const csv = await page.evaluate(async () => {
+      const r = await fetch('/api/wifi.csv?ssid=Guest');
+      return { status: r.status, type: r.headers.get('content-type'), text: await r.text() };
+    });
+    await page.setViewport({ width: 1280, height: 900 });
+    const scroll = await page.evaluate(() => ({ page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      table: document.querySelector('.table-wrap').scrollWidth - document.querySelector('.table-wrap').clientWidth }));
+    return { chips, list, drawer, csv, scroll };
+  },
   async drawer(page) {
     const res = {};
     const CLICK = '02:00:00:00:00:06', KEY = '02:00:00:00:00:0d', ROWACK = '02:00:00:00:00:0c';
