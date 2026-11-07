@@ -69,6 +69,33 @@ class WifiApiTests(QW.Base):
         self.assertEqual(len(json.loads(self.get("/api/devices")[2])["devices"]), 51)
         self.assertEqual(count(), few)
 
+    def test_stats_ssids_leave_out_archived_devices(self) -> None:
+        self._dev(A, online=1, wifi_ssid="home")
+        self._dev(B, online=1, wifi_ssid="home", archived_ts=50)
+        self._wp(A, "home", 10)
+        self._wp(B, "home", 10)
+        self._wp(B, "only-archived", 10)
+        ssids = json.loads(self.get("/api/stats")[2])["stats"]["ssids"]
+        self.assertEqual(ssids, [{"ssid": "home", "devices_ever": 1, "devices_now": 1},
+                                 {"ssid": "only-archived", "devices_ever": 0, "devices_now": 0}])
+
+    def test_devices_and_presence_are_read_in_one_lock_hold(self) -> None:
+        self._seed()
+        owned: list[bool] = []
+        orig = self.db._wifi_presence_all
+
+        def spy(c):  # the last read: the lock must still be held
+            owned.append(self.db._lock._is_owned())
+            return orig(c)
+        self.db._wifi_presence_all = spy
+        try:
+            st, _, body = self.get("/api/devices")
+        finally:
+            del self.db._wifi_presence_all
+        self.assertEqual(st, 200)
+        self.assertEqual(owned, [True])
+        self.assertEqual(len(json.loads(body)["devices"]), 3)
+
     def test_stats_ssids(self) -> None:
         self._seed()
         self._dev("02:00:00:00:20:04", online=0, wifi_ssid="guest")  # not online: not counted as now

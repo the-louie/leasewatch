@@ -52,11 +52,13 @@
     const n = Math.round(s / 86400); if (n < 30) return `${n} d ago`;
     const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   };
-  // a length of time in seconds: "40 min", "3.5 h", "4 d 2 h"
+  // a length of time in seconds: "< 1 min", "40 min", "3.5 h", "4 d 2 h". The unit is picked on the rounded value, so
+  // 3570 s reads "1.0 h", not "60 min", and 172799 s reads "2 d 0 h", not "48.0 h"
   const durText = s => {
     s = Math.max(0, Math.round(s || 0));
-    if (s < 3600) return `${Math.round(s / 60)} min`;
-    if (s < 48 * 3600) return `${(s / 3600).toFixed(1)} h`;
+    if (s < 60) return "< 1 min";
+    const m = Math.round(s / 60); if (m < 60) return `${m} min`;
+    const t = Math.round(s / 360) / 10; if (t < 48) return `${t.toFixed(1)} h`;
     const h = Math.round(s / 3600); return `${Math.floor(h / 24)} d ${h % 24} h`;
   };
   const pad3 = x => String(x).padStart(3, "0");
@@ -263,7 +265,8 @@
       // real newcomers first (newest on top), then the baseline devices grouped by network and address; under an SSID
       // filter the newest arrivals on that network lead
       first_desc: state.ssid !== null ? (a, b) => (ssidFirst(b) - ssidFirst(a)) || byVlanIp(a, b) : (a, b) => (a.baseline - b.baseline) || (a.baseline ? byVlanIp(a, b) : (b.first_seen - a.first_seen) || byVlanIp(a, b)),
-      last_desc: (a, b) => (b.online - a.online) || ((b.last_online || 0) - (a.last_online || 0)) || byVlanIp(a, b),
+      // under an SSID filter the order follows the "Last on SSID" column: online on that network now, then its last_seen
+      last_desc: state.ssid !== null ? (a, b) => (onSsidNow(b) - onSsidNow(a)) || ((ssidRow(b)?.last_seen || 0) - (ssidRow(a)?.last_seen || 0)) || byVlanIp(a, b) : (a, b) => (b.online - a.online) || ((b.last_online || 0) - (a.last_online || 0)) || byVlanIp(a, b),
       name: (a, b) => label(a).localeCompare(label(b), undefined, { sensitivity: "base" }) || byVlanIp(a, b),
       ip: ipCmp,
       vlan: byVlanIp,
@@ -284,6 +287,7 @@
     const sb = $("#selBtn"); sb.classList.toggle("hidden", !canWrite);
     sb.setAttribute("aria-pressed", String(state.selecting)); sb.textContent = state.selecting ? "Done" : "Select";
     $("#tbl").classList.toggle("selecting", state.selecting);
+    $("#tbl").classList.toggle("ssidfilter", state.ssid !== null);
     // the count, the header box and the bar's buttons, after any change of the ticked rows
     const paintSel = () => {
       const n = state.sel.size, all = $("#selAll"), arch = state.status === "archived";
@@ -346,6 +350,8 @@
         fs.textContent = p ? rel(p.first_seen) : "–"; fs.title = p ? `first on ${state.ssid} ${abs(p.first_seen)}` : "";
         ls.textContent = onSsidNow(d) ? "now" : p ? rel(p.last_seen) : "–"; ls.title = p ? `last on ${state.ssid} ${abs(p.last_seen)} · ${dur}` : "";
         if (dur) $(".dev-meta .last", tr).textContent += ` · ${dur}`;
+        // between 561 and 900 px both time columns and .dev-meta are hidden: the sub line carries that network's last time
+        if (p) $(".dev-sub", tr).insertAdjacentHTML("beforeend", `<span class="ssid-last">${esc(onSsidNow(d) ? "on" : "last on")} ${esc(state.ssid)} ${esc(onSsidNow(d) ? "now" : rel(p.last_seen))} · ${esc(durText(p.seconds_seen))}</span>`);
       }
       const ack = $(".ack", tr);
       // can_write false: the server refuses this client's changes (READ_ONLY, or outside WRITE_ALLOW)

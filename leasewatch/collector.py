@@ -499,10 +499,13 @@ class Collector:
                 "ON CONFLICT(mac, ssid) DO UPDATE SET "
                 "seconds_seen = seconds_seen + CASE WHEN excluded.last_seen - last_seen BETWEEN 1 AND :cap "
                 "THEN excluded.last_seen - last_seen ELSE :poll END, "
-                "polls_seen = polls_seen + 1, last_seen = excluded.last_seen, last_ap = excluded.last_ap",
+                "polls_seen = polls_seen + 1, first_seen = MIN(first_seen, excluded.first_seen), "
+                "last_seen = MAX(last_seen, excluded.last_seen), last_ap = excluded.last_ap",
                 [{"mac": mac, "ssid": ssid, "ap": ap, "now": now, "poll": poll, "cap": 2 * poll + 60} for (mac, ssid), ap in {(m, s_): a for m, s_, a in res.wifi}.items()])
             # the start of the record, so a short history is not read as a short stay
             c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('wifi_presence_since', ?)", (str(now),))
+        else:
+            c.execute("DELETE FROM meta WHERE key='wifi_presence_since'")  # turning it back on starts "since" again
         # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
         for mac in dict.fromkeys(mac for mac, _ in res.history):
             c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))

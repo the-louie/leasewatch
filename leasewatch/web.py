@@ -500,9 +500,8 @@ class Handler(BaseHTTPRequestHandler):
         etag = self._etag(version, meta)
         if self._matches(etag):
             return self._not_modified(etag)
-        devices = self.db.devices()
-        wifi = self.db.wifi_presence_all()  # one query for all rows, in the same body build as the devices
-        self._json_vary({"meta": meta, "devices": [_dev({**d, "wifi_presence": [_wifi_row(w) for w in wifi.get(d["mac"], [])]}) for d in devices]}, etag)
+        devices = self.db.devices_with_presence()  # devices and presence from one lock hold
+        self._json_vary({"meta": meta, "devices": [_dev({**d, "wifi_presence": [_wifi_row(w) for w in d["wifi_presence"]]}) for d in devices]}, etag)
 
     def _api_status(self) -> None:
         self._json_vary({"meta": self._meta()})
@@ -573,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
         w.writerow(_WIFI_CSV_HEADER)
         cell, ts = _csv_cell, _csv_ts
         for r in self.db.wifi_devices(ssid)["devices"]:
-            w.writerow([r["mac"], cell(r["name"]), cell(r["vendor"]), r["ip"], int(is_private_mac(r["mac"])), ts(r["archived_ts"]),
+            w.writerow([r["mac"], cell(r["name"] or r["wifi_alias"] or r["hostname"]), cell(r["vendor"]), r["ip"], int(is_private_mac(r["mac"])), ts(r["archived_ts"]),
                         ts(r["first_seen"]), ts(r["last_seen"]), round(r["seconds_seen"] / 3600, 1), r["polls_seen"], cell(r["last_ap"])])
         self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
                    {"Content-Disposition": 'attachment; filename="leasewatch-wifi.csv"'})

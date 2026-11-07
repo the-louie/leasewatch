@@ -66,7 +66,12 @@ class WifiCollectorTests(unittest.TestCase):
     def test_clock_step_back_counts_one_poll(self):
         self.build(); p = self.cfg.poll_seconds
         self.poll(T0); self.poll(T0 - 500)
-        self.assertEqual(self.rows()[0][3:6], (T0 - 500, 2 * p, 2))
+        self.assertEqual(self.rows()[0][3:6], (T0, 2 * p, 2))
+
+    def test_clock_step_back_keeps_first_before_last(self):
+        self.build(); self.poll(T0); self.poll(T0 - 3600)
+        row = self.rows()[0]
+        self.assertEqual((row[2], row[3]), (T0 - 3600, T0))
 
     def test_roaming_updates_last_ap(self):
         self.build(); self.poll(T0)
@@ -119,6 +124,17 @@ class WifiCollectorTests(unittest.TestCase):
         self.db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES('x','S',?,?,1,1,'')", (T0, T0))
         self.poll(T0 + 120)
         self.assertEqual(self.rows(), [])
+
+    def test_off_forgets_since_so_on_restarts_it(self):
+        self.build(); self.poll(T0)
+        self.assertEqual(self.db.get_meta("wifi_presence_since"), str(T0))
+        self.col.cfg.wifi_presence_days = 0
+        self.poll(T0 + 120)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.db.get_meta("wifi_presence_since"), "")
+        self.col.cfg.wifi_presence_days = 365
+        self.poll(T0 + 240)
+        self.assertEqual(self.db.get_meta("wifi_presence_since"), str(T0 + 240))
 
 
 class WifiConfigTests(unittest.TestCase):

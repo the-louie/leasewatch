@@ -697,10 +697,55 @@ class BrowserSsidTest(_BrowserCase):
 
     def test_no_horizontal_scroll_with_the_filter_on(self) -> None:
         d = self.result("ssids")
-        for width in ("1280", "800"):
+        for width in ("1280", "800", "600"):
             with self.subTest(width=width):
                 self.assertLessEqual(d[width]["table_scroll"], 0, d[width])
                 self.assertLessEqual(d[width]["page_scroll"], 0, d[width])
+
+    def test_last_on_ssid_is_visible_between_561_and_900_px(self) -> None:
+        d = self.result("ssids")
+        for width in ("800", "600"):
+            with self.subTest(width=width):
+                self.assertEqual(d[width]["last_col"], "none")  # the column is gone: the sub line carries its value
+                sub = {r["mac"]: r for r in d[width]["sub"]}
+                self.assertTrue(all(r["shown"] for r in sub.values()), sub)
+                self.assertEqual(sub[self.A]["text"], f"on {self.GUEST} now · 3.5 h")
+                self.assertEqual(sub[self.B]["text"], f"last on {self.GUEST} 3 h ago · 30 min")
+        for width in ("1280", "400"):  # the column, or the meta line, shows it there
+            with self.subTest(width=width):
+                self.assertFalse(any(r["shown"] for r in d[width]["sub"]), d[width]["sub"])
+
+
+class BrowserSsidArchivedTest(_BrowserCase):
+    """A device archived after it was on the guest network: out of the Guest list and the chip's count, in the list under
+    the Archived filter."""
+    A, B, E = "02:00:00:00:31:01", "02:00:00:00:31:02", "02:00:00:00:31:03"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        base, db = start(cls, [s(cls.A, 50, "phone"), s(cls.B, 51, "tablet"), s(cls.E, 52, "camera")])
+        now = int(time.time())
+        for m in (cls.A, cls.B, cls.E):
+            db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
+                 (m, "Guest", now - 86400, now - 600, 1800, 1, "ap-1"))
+        db.q("UPDATE devices SET wifi_ssid='Guest', online=1 WHERE mac=?", (cls.A,))
+        db.q("UPDATE devices SET online=0 WHERE mac IN (?, ?)", (cls.B, cls.E))
+        db.q("UPDATE devices SET archived_ts=? WHERE mac=?", (now - 300, cls.E))
+        cls.run_scenarios(base, ("ssidarchived",))
+
+    def test_archived_guest_device_by_status_filter(self) -> None:
+        d = self.result("ssidarchived")
+        self.assertEqual(d["default_rows"], [self.A, self.B])  # hidden under the default status filter
+        self.assertEqual(d["archived_rows"], [self.E])  # shown under Archived
+
+    def test_archived_guest_device_is_not_counted_in_the_chip(self) -> None:
+        d = self.result("ssidarchived")
+        self.assertEqual((d["chip_before"], d["chip_filtered"], d["chip_archived"]), ("1/2", "1/2", "1/2"))
 
 
 class BrowserGuestFlowTest(_BrowserCase):

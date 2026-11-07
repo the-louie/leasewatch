@@ -256,6 +256,15 @@ class Database:
             d["aliases"] = by_dev.get(d["mac"], [])
         return rows
 
+    def devices_with_presence(self) -> list[dict]:
+        """devices(), each also with `wifi_presence` (as wifi_presence(), [] without any), all read in one lock hold."""
+        with self._lock:  # re-entrant: devices() and the presence read share this hold
+            rows = self.devices()
+            wifi = self._wifi_presence_all(self._c())
+        for d in rows:
+            d["wifi_presence"] = wifi.get(d["mac"], [])
+        return rows
+
     def device(self, mac: str) -> dict | None:
         r = self.q("SELECT * FROM devices WHERE mac=?", (mac,))
         return dict(r[0]) if r else None
@@ -287,22 +296,32 @@ class Database:
 
     def wifi_presence_all(self) -> dict[str, list[dict]]:
         """wifi_presence of every device that has rows, by device key, in one query."""
+        with self._lock:
+            return self._wifi_presence_all(self._c())
+
+    def _wifi_presence_all(self, c: sqlite3.Connection) -> dict[str, list[dict]]:
         out: dict[str, list[dict]] = {}
-        for r in self.q(f"SELECT {self._WIFI_COLS} FROM wifi_presence ORDER BY last_seen DESC, ssid"):
+        for r in c.execute(f"SELECT {self._WIFI_COLS} FROM wifi_presence ORDER BY last_seen DESC, ssid"):
             out.setdefault(r["mac"], []).append({k: r[k] for k in r.keys() if k != "mac"})
         return out
+
+    @staticmethod
+    def _wifi_ssid_counts(c: sqlite3.Connection) -> tuple[list, dict]:
+        """Per SSID: rows (ssid, n, last_seen) with n = devices not archived seen on it, and {ssid: devices not archived
+        online on it now}. The caller holds the lock."""
+        ever = c.execute(
+            "SELECT p.ssid, SUM(d.mac IS NOT NULL AND d.archived_ts IS NULL) n, MAX(p.last_seen) last_seen "
+            "FROM wifi_presence p LEFT JOIN devices d ON d.mac = p.mac GROUP BY p.ssid").fetchall()
+        now_on = c.execute("SELECT wifi_ssid, COUNT(*) n FROM devices WHERE online=1 AND archived_ts IS NULL AND wifi_ssid != '' "
+                           "GROUP BY wifi_ssid").fetchall()
+        return ever, {r["wifi_ssid"]: r["n"] for r in now_on}
 
     def wifi_ssids(self) -> dict:
         """Per SSID ever seen: devices not archived that were seen on it, those online now with it as wifi_ssid, and
         the latest sighting of any device; most devices first. `since` is when the presence table started filling."""
         with self._lock:  # one hold: the two counts and `since` must not straddle a collector write
-            ever = self._c().execute(
-                "SELECT p.ssid, SUM(d.mac IS NOT NULL AND d.archived_ts IS NULL) n, MAX(p.last_seen) last_seen "
-                "FROM wifi_presence p LEFT JOIN devices d ON d.mac = p.mac GROUP BY p.ssid").fetchall()
-            now_on = self._c().execute("SELECT wifi_ssid, COUNT(*) n FROM devices WHERE online=1 AND archived_ts IS NULL AND wifi_ssid != '' "
-                                       "GROUP BY wifi_ssid").fetchall()
+            ever, now_by = self._wifi_ssid_counts(self._c())
             since = self.get_meta("wifi_presence_since", "")
-        now_by = {r["wifi_ssid"]: r["n"] for r in now_on}
         rows = [{"ssid": r["ssid"], "devices": r["n"] or 0, "devices_now": now_by.get(r["ssid"], 0), "last_seen": r["last_seen"]} for r in ever]
         rows.sort(key=lambda x: (-x["devices"], x["ssid"]))
         return {"since": int(since) if since.isdigit() else None, "ssids": rows}
@@ -443,11 +462,9 @@ class Database:
             # archiving a network's last device must not shift the colours of the networks after it
             allv = self._c().execute("SELECT DISTINCT vlan FROM devices WHERE vlan != '' ORDER BY vlan").fetchall()
             recent = self._c().execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
-            ever = self._c().execute("SELECT ssid, COUNT(*) n FROM wifi_presence GROUP BY ssid").fetchall()
-            now_on = self._c().execute("SELECT wifi_ssid, COUNT(*) n FROM devices WHERE online=1 AND wifi_ssid != '' GROUP BY wifi_ssid").fetchall()
+            ever, now_by = self._wifi_ssid_counts(self._c())
             tot = self._c().execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=1 AND acked=0 THEN 1 ELSE 0 END) baseline_unchecked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
-        now_by = {r["wifi_ssid"]: r["n"] for r in now_on}
-        ssids = sorted(({"ssid": r["ssid"], "devices_ever": r["n"], "devices_now": now_by.get(r["ssid"], 0)} for r in ever),
+        ssids = sorted(({"ssid": r["ssid"], "devices_ever": r["n"] or 0, "devices_now": now_by.get(r["ssid"], 0)} for r in ever),
                        key=lambda x: (-x["devices_ever"], x["ssid"]))
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "baseline_unchecked": tot["baseline_unchecked"] or 0, "new": tot["new"] or 0,

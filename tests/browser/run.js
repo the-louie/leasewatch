@@ -756,11 +756,18 @@ const scenarios = {
     await page.waitForSelector('#rows tr');
     await page.waitForSelector('#ssids .chip.active[data-ssid]');
     res.reloaded = await view();
-    for (const width of [1280, 800]) {
+    // both devices that were on the guest network, so the sub line of each is measured
+    await page.click('#ssidNow');
+    await waitUrl('ssidnow', null);
+    await page.waitForFunction(() => document.querySelectorAll('#rows tr').length === 2);
+    for (const width of [1280, 800, 600, 400]) {
       await page.setViewport({ width, height: 900 });
       res[width] = await page.evaluate(() => {
         const wrap = document.querySelector('.table-wrap');
-        return { table_scroll: wrap.scrollWidth - wrap.clientWidth, page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+        return { table_scroll: wrap.scrollWidth - wrap.clientWidth, page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          last_col: getComputedStyle(document.querySelector('#rows .c-last')).display,
+          sub: [...document.querySelectorAll('#rows tr')].map(t => { const e = t.querySelector('.dev-sub .ssid-last');
+            return { mac: t.dataset.mac, shown: !!e && e.offsetWidth > 0 && e.offsetHeight > 0, text: e ? e.textContent : null }; }) };
       });
     }
     await page.setViewport({ width: 1400, height: 900 });
@@ -778,6 +785,23 @@ const scenarios = {
     await page.click('#emptyClear');
     await page.waitForFunction(() => !location.search);
     res.cleared = await view();
+    return res;
+  },
+  // a device archived after it was on the guest network: not in its list under the default status filter, listed under
+  // "Archived", and not in the chip's count
+  async ssidarchived(page, base) {
+    await page.waitForSelector('#ssids .chip[data-ssid]');
+    const chipN = () => page.$eval('#ssids .chip[data-ssid="Guest"] .n', e => e.textContent);
+    const macs = () => page.$$eval('#rows tr', ts => ts.map(t => t.dataset.mac).sort());
+    const res = { chip_before: await chipN() };
+    await page.goto(new URL('?ssid=Guest', base).href, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#ssids .chip.active[data-ssid]');
+    res.default_rows = await macs();
+    res.chip_filtered = await chipN();
+    await page.evaluate(() => { const s = document.querySelector('#fStatus'); s.value = 'archived'; s.dispatchEvent(new Event('change')); });
+    await page.waitForFunction(() => document.querySelectorAll('#rows tr').length === 1);
+    res.archived_rows = await macs();
+    res.chip_archived = await chipN();
     return res;
   },
   // the guest-SSID question end to end: data written by the real collector over four polls. The chips, the Guest list with the

@@ -159,6 +159,17 @@ class CsvTests(_Base):
         self.assertNotEqual(rows[2][5], "")  # archived
         self.assertEqual(rows[1][5], "")
 
+    def test_name_falls_back_to_alias_then_hostname(self) -> None:
+        self._dev(A, name="Alice", wifi_alias="al", hostname="h-a")
+        self._dev(B, wifi_alias="al-b", hostname="h-b")
+        self._dev(C, hostname="h-c")
+        self._dev(D)
+        for i, m in enumerate((A, B, C, D)):
+            self._wp(m, "n", first=5 + i)
+        _, _, rows = self.rows("n")
+        self.assertEqual([r[1] for r in rows[1:]], ["Alice", "al-b", "h-c", ""])
+        self.assertNotIn("hostname", rows[0])
+
     def test_hours_rounding(self) -> None:
         self._dev(A)
         self._dev(B)

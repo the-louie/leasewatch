@@ -377,6 +377,26 @@ out.order = filtered().map(d => d.vlan);
         self.assertEqual(out["order"], ["iot", ""])
 
 
+    def test_dur_text_picks_the_unit_after_rounding(self) -> None:
+        out = _run([], r"""//--
+out.v = [0, 20, 59, 59.4, 60, 89, 90, 3569, 3570, 3599, 3600, 12600, 172619, 172620, 172799, 172800, 4 * 86400 + 7200].map(durText);
+""")
+        self.assertEqual(out["v"], ["< 1 min", "< 1 min", "< 1 min", "< 1 min", "1 min", "1 min", "2 min", "59 min", "1.0 h",
+                                    "1.0 h", "1.0 h", "3.5 h", "47.9 h",
+                                    "2 d 0 h", "2 d 0 h", "2 d 0 h", "4 d 2 h"])
+
+    def test_last_sort_under_an_ssid_filter_follows_the_ssid_column(self) -> None:
+        out = _run(["filtered"], r"""//--
+const mk = (mac, online, ssid, last, lastOnline) => ({ mac, vlan: "v", ip: "10.0.0." + mac, online, wifi_ssid: ssid, last_online: lastOnline, wifi_presence: [{ ssid: "Guest", first_seen: 1, last_seen: last }] });
+// A left Guest 3 days ago and is online on HomeNet now; B was on Guest an hour ago and is offline; C is on Guest now
+state.devices = [mk("1", 1, "HomeNet", 1000, 9000), mk("2", 0, "", 9000, 5000), mk("3", 1, "Guest", 9500, 9500)];
+state.status = "all"; state.sort = "last_desc";
+state.ssid = "Guest"; out.on = filtered().map(d => d.mac);
+state.ssid = null; out.off = filtered().map(d => d.mac);
+""")
+        self.assertEqual(out["on"], ["3", "2", "1"])
+        self.assertEqual(out["off"], ["3", "1", "2"])  # without the filter: online first, then the last time online
+
     # W14: the 60 s refresh that puts focus back in the drawer form must not scroll the drawer body to it
     def test_drawer_poll_refocus_does_not_scroll(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
