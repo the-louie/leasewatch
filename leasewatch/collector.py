@@ -465,6 +465,10 @@ class Collector:
 
     def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int,
                ref: int | None = None) -> None:
+        # a stand-in result without folds (some callers build only the fields they need) folds nothing
+        folds = getattr(res, "folds", ())
+        for cand, dev, _, _ in folds:
+            self._fold(c, cand, dev)
         for mac, row in res.rows.items():
             if mac in prev:
                 c.execute(f"UPDATE devices SET {', '.join(k + '=?' for k in UPDATE_COLUMNS)} WHERE mac=?",
@@ -507,13 +511,45 @@ class Collector:
         else:
             c.execute("DELETE FROM meta WHERE key='wifi_presence_since'")  # turning it back on starts "since" again
         # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
-        for mac in dict.fromkeys(mac for mac, _ in res.history):
+        # a fold target is capped too: the moved rows count even when the device got no row this poll
+        for mac in dict.fromkeys([mac for mac, _ in res.history] + [dev for _, dev, _, _ in folds]):
             c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
         if ref is None:
             ref = self._prune_reference(c, now)
         c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
         # 0 = off: nothing is written above, and what is stored is deleted
         c.execute("DELETE FROM wifi_presence WHERE last_seen<?", (ref - days * 86400,) if days > 0 else (2**62,))
+
+    @staticmethod
+    def _fold(c: sqlite3.Connection, cand: str, dev: str) -> None:
+        """Move the rows of the private MAC cand, which had its own device row, to the device dev, in the caller's
+        transaction, then delete cand's device row. The alias row is written afterwards by the ordinary alias insert.
+
+        Every row keyed by cand came from that MAC alone, so it belongs to dev as if the merge had happened at first
+        sight. Its `new` event is deleted: a "new device" line inside a known device's timeline would be false, and the
+        `merged` event says when the MAC appeared. Its mail_queued goes with the row (a private MAC is never mailed)."""
+        c.execute("UPDATE history SET mac=? WHERE mac=?", (dev, cand))
+        c.execute("DELETE FROM events WHERE mac=? AND kind='new'", (cand,))
+        c.execute("UPDATE events SET mac=? WHERE mac=?", (dev, cand))
+        # per source the later times; a NULL last_present stays only when both sides are NULL
+        c.execute("INSERT INTO seen(mac,source,last_seen,last_present) "
+                  "SELECT ?, source, last_seen, last_present FROM seen WHERE mac=? "
+                  "ON CONFLICT(mac,source) DO UPDATE SET last_seen=MAX(seen.last_seen, excluded.last_seen), "
+                  "last_present=MAX(COALESCE(seen.last_present, excluded.last_present), "
+                  "COALESCE(excluded.last_present, seen.last_present))", (dev, cand))
+        c.execute("DELETE FROM seen WHERE mac=?", (cand,))
+        # per SSID: the stays add up, the span widens, and the AP is the one seen last
+        c.execute("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) "
+                  "SELECT ?, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap FROM wifi_presence WHERE mac=? "
+                  "ON CONFLICT(mac, ssid) DO UPDATE SET "
+                  "first_seen=MIN(wifi_presence.first_seen, excluded.first_seen), "
+                  "last_seen=MAX(wifi_presence.last_seen, excluded.last_seen), "
+                  "seconds_seen=wifi_presence.seconds_seen + excluded.seconds_seen, "
+                  "polls_seen=wifi_presence.polls_seen + excluded.polls_seen, "
+                  "last_ap=CASE WHEN excluded.last_seen > wifi_presence.last_seen "
+                  "THEN excluded.last_ap ELSE wifi_presence.last_ap END", (dev, cand))
+        c.execute("DELETE FROM wifi_presence WHERE mac=?", (cand,))
+        c.execute("DELETE FROM devices WHERE mac=?", (cand,))
 
     def _prune_reference(self, c: sqlite3.Connection, now: int) -> int:
         """The clock that prunes (events older than a year, devices offline for PRUNE_DAYS); stores it in meta."""

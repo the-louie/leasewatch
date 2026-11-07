@@ -76,6 +76,12 @@ _GENERIC_RE = re.compile(r"(android|galaxy|iphone|ipad|esp|wlan|eth)[-_ ]?[0-9a-
 # device of that model, so it is generic whatever follows (S4R02, owner rule)
 GENERIC_PREFIXES = ("iphone", "ipad", "ipod", "imac", "macbook", "apple-watch", "android", "galaxy", "pixel",
                     "chromecast", "espressif", "esp32", "esp8266", "raspberrypi")
+# a private row that nobody touched may be folded into an older device (deferred hostname merge) for this many days
+# after its first sighting
+MERGE_FOLD_DAYS = 1
+# a fold needs the target off the wire within this long after the candidate first appeared: an old MAC lingering in
+# the firewall's ARP table after a rotation (FreeBSD keeps an entry 1200 s); a second interface overlaps for longer
+FOLD_OVERLAP_SECONDS = 1800
 # a new private MAC is held back (no row) at most this long while a lease producer fails: longer than the collector's
 # MAX_BACKOFF (600 s) between retries of a failed instance, so a passing outage gets at least one more answer
 MERGE_HOLD_SECONDS = 1800
@@ -102,12 +108,15 @@ def _merge_host(v: str) -> str:
 
 
 def decide_aliases(raw: dict[str, Merged], present: set[str], prev: dict[str, dict], aliases: dict[str, str],
-                   first_run: bool, now: int) -> tuple[dict[str, str], list[tuple[str, str, str, str]]]:
+                   first_run: bool, now: int, limits: dict | None = None
+                   ) -> tuple[dict[str, str], list[tuple[str, str, str, str]]]:
     """(raw MAC -> device key, new (alias, device, reason, detail)) for this poll's sighting MACs. A known alias maps to
     its device, a MAC with a row to itself; a new private MAC to the one device it matches (design S4 §2.2), else to
     itself. present: raw MACs with a sighting or attachment that asserts presence this poll. A hostname merge needs
     the device off the wire this poll (else the new MAC is a second interface); a client-id merge does not, since two
-    devices cannot share a client-id and the old MAC often lingers in the firewall's ARP table after a rotation."""
+    devices cannot share a client-id and the old MAC often lingers in the firewall's ARP table after a rotation.
+    limits, when given, receives "hosts" (hostname -> new MACs carrying it) and "taken" (device -> new MACs that picked
+    it), so decide_folds keeps the same limits."""
     keys: dict[str, str] = {}
     fresh: list[str] = []
     for mac in raw:
@@ -151,12 +160,57 @@ def decide_aliases(raw: dict[str, Merged], present: set[str], prev: dict[str, di
     taken: dict[str, int] = {}
     for dev, _, _ in picks.values():
         taken[dev] = taken.get(dev, 0) + 1
+    if limits is not None:
+        limits.update(hosts=hosts, taken=taken)
     out = []
     for mac, (dev, reason, value) in picks.items():
         if taken[dev] == 1:
             keys[mac] = dev
             out.append((mac, dev, reason, value))
     return keys, out
+
+
+def decide_folds(raw: dict[str, Merged], present: set[str], prev: dict[str, dict], aliases: dict[str, str],
+                 fresh_hosts: dict[str, int], keys: dict[str, str], now: int) -> list[tuple[str, str, str, str]]:
+    """(candidate, device, "hostname", hostname) for each existing private row that becomes an alias of an older
+    device (deferred hostname merge): rule 4 kept the new MAC apart while the old one was still listed, and the old
+    one stopped soon after. The candidate is a row nobody touched (no name or note, not acked, archived or baseline),
+    at most MERGE_FOLD_DAYS old, without aliases of its own (a fold never re-points a chain). Its hostname is this
+    poll's DHCP lease hostname with the rule (3) tests (an ARP or controller name is no evidence). The target is the
+    one other device with that hostname: recent, older than the candidate, not the row it was split from, off the wire
+    this poll, and last online no later than FOLD_OVERLAP_SECONDS after the candidate first appeared (a longer
+    overlap is a second interface, e.g. a docked laptop on cable and Wi-Fi). A hostname a new MAC also carries, two
+    candidates with one hostname and two candidates for one device decide nothing. The caller applies the gate (first
+    run, lease-blind hold) and the limit shared with fresh merges."""
+    busy = {keys.get(m, aliases.get(m, m)) for m in present}
+    owners = set(aliases.values())
+    picks: dict[str, tuple[str, str]] = {}  # candidate -> (device, hostname)
+    for mac, m in raw.items():
+        r = prev.get(mac)
+        if (r is None or not is_private_mac(mac) or mac in aliases or mac in owners or keys.get(mac, mac) != mac
+                or r.get("name") or r.get("note") or r.get("acked") or r.get("archived_ts") is not None
+                or r.get("baseline") or (r.get("first_seen") or 0) < now - MERGE_FOLD_DAYS * 86400):
+            continue
+        host = _merge_host(m.lease_hostname)
+        if not host or fresh_hosts.get(host):
+            continue
+        by_host = [d for d, o in prev.items() if d != mac and norm_hostname(o.get("hostname") or "") == host]
+        if len(by_host) != 1:
+            continue
+        dev, t = by_host[0], prev[by_host[0]]
+        if ((t.get("last_online") or t.get("last_seen") or 0) < now - MERGE_RECENT_DAYS * 86400
+                or (t.get("first_seen") or 0) >= r["first_seen"] or dev == (r.get("split_from") or "")
+                or dev in busy or (t.get("last_online") or 0) >= r["first_seen"] + FOLD_OVERLAP_SECONDS):
+            continue
+        picks[mac] = (dev, host)
+    hosts: dict[str, int] = {}
+    taken: dict[str, int] = {}
+    for dev, host in picks.values():
+        hosts[host] = hosts.get(host, 0) + 1
+        taken[dev] = taken.get(dev, 0) + 1
+    # a device that is itself folded this poll would leave its new alias pointing at a removed row
+    return [(mac, dev, "hostname", host) for mac, (dev, host) in picks.items()
+            if hosts[host] == 1 and taken[dev] == 1 and dev not in picks]
 
 
 def _rekey(b: Batch, keys: dict[str, str]) -> Batch:
@@ -238,6 +292,10 @@ class MergeResult:
     # last_present on None)
     seen: list[tuple[str, str, int, int | None]] = field(default_factory=list)
     aliases: list[tuple[str, str, str, str]] = field(default_factory=list)  # new (alias, device, reason, detail)
+    # (candidate, device, "hostname", hostname): an existing row folded into the device this poll (also in aliases).
+    # The writer moves the candidate's history, events (its `new` event deleted) and seen rows to the device and
+    # deletes its row; this poll's records are already on the device
+    folds: list[tuple[str, str, str, str]] = field(default_factory=list)
     alias_seen: list[str] = field(default_factory=list)       # alias MACs (known or new) listed this poll
     # (device key, ssid, ap): a controller that answered this poll lists the device on that SSID. One entry per device;
     # a device kept on its stored SSID while its controller is blind, or listed without an SSID, has none
@@ -443,7 +501,25 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
     # the producers known: otherwise a failed switch would count and hide new devices for nothing
     hold = lease_blind and state.producers is not None
-    keys, new_aliases = decide_aliases(raw, present, prev, state.aliases, state.first_run or hold, now)
+    limits: dict = {}
+    keys, new_aliases = decide_aliases(raw, present, prev, state.aliases, state.first_run or hold, now, limits)
+    folds = [] if state.first_run or hold else decide_folds(raw, present, prev, state.aliases, limits["hosts"], keys, now)
+    # one device takes at most one new alias per poll: a fresh merge and a fold into one device are two interfaces,
+    # so neither happens
+    clash = {dev for _, dev, _, _ in folds} & set(limits.get("taken", ()))
+    if clash:
+        folds = [f for f in folds if f[1] not in clash]
+        for alias, dev, _, _ in new_aliases:
+            if dev in clash:
+                keys[alias] = alias
+        new_aliases = [a for a in new_aliases if a[1] not in clash]
+    folded = {cand: prev[cand] for cand, _, _, _ in folds}
+    for cand, dev, _, _ in folds:  # this poll's records land on the device; the candidate's row is gone
+        keys[cand] = dev
+        state.no_lease_since.pop(cand, None)
+        state.undecided_since.pop(cand, None)
+    if folded:  # no offline pass, prune or result row for a folded row
+        prev = {mac: r for mac, r in prev.items() if mac not in folded}
     held: set[str] = set()
     if hold and not state.first_run:
         for mac in raw:
@@ -466,10 +542,15 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
-    res = MergeResult(aliases=new_aliases, alias_seen=sorted(m for m, k in keys.items() if k != m))
+    res = MergeResult(aliases=new_aliases + folds, folds=folds,
+                      alias_seen=sorted(m for m, k in keys.items() if k != m))
     # a merge is no new device: no `new` event and no mail, only this event on the device (owner answer Q2)
     res.events += [(dev, "merged", f"{alias} (client-id)" if reason == "client-id" else f"{alias} (hostname {value})")
                    for alias, dev, reason, value in new_aliases]
+    # a fold: the same event, saying how long the MAC had its own row
+    res.events += [(dev, "merged", f"{cand} (hostname {value}, own row for "
+                                   f"{max(0, now - folded[cand]['first_seen']) // 60} min)")
+                   for cand, dev, _, value in folds]
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}
     changes = 0
