@@ -234,6 +234,7 @@ class Config:
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))
     # archive devices not online for this many days that have no name and are not marked known; 0 = off
     prune_days: int = field(default_factory=lambda: _env_int("PRUNE_DAYS", 0))
+    backup_keep: int = field(default_factory=lambda: _env_int("BACKUP_KEEP", 7))  # dated backups the backup command keeps
     # mail on new devices (Mailgun HTTP API); leave MAILGUN_KEY empty to disable
     mailgun_key: str = field(default_factory=lambda: _env("MAILGUN_KEY"), repr=False)
     mailgun_domain: str = field(default_factory=lambda: _env("MAILGUN_DOMAIN"))
@@ -426,6 +427,11 @@ class Config:
             problems.append("PRUNE_DAYS must not be negative")
         if self.prune_days > 3650:
             problems.append("PRUNE_DAYS must be at most 3650")
+        raw_keep = _env("BACKUP_KEEP")
+        if raw_keep and not re.fullmatch(r"[+-]?\d+", raw_keep):
+            problems.append("BACKUP_KEEP must be a whole number")
+        elif not 0 <= self.backup_keep <= 1000:
+            problems.append("BACKUP_KEEP must be 0-1000")
         if self.lease_type_mode not in ("keep", "grace", "immediate"):
             problems.append("LEASE_TYPE_MODE must be keep, grace or immediate")
         if self.poll_seconds < 15:
