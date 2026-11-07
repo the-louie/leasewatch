@@ -489,6 +489,28 @@ class BrowserCollectorStaleTest(_BrowserCase):
         self.assertNotIn("Data is stale", text)
 
 
+class BrowserSourceEventsTest(_BrowserCase):
+    """source_down / source_up events name a connector as plain text: no who button, no drawer."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new])
+        with db.tx() as c:
+            now = int(time.time())
+            c.execute("INSERT INTO events (mac, kind, detail, ts) VALUES ('', 'source_down', 'fw1: boom', ?)", (now,))
+            c.execute("INSERT INTO events (mac, kind, detail, ts) VALUES ('', 'source_up', 'fw1: up after 12m', ?)", (now + 1,))
+        cls.run_scenarios(base, ("sourceevents",))
+
+    def test_source_events_are_plain_text(self) -> None:
+        d = self.result("sourceevents")
+        self.assertEqual(d["count"], 2)
+        self.assertEqual(sorted("boom" in t for t in d["texts"]), [False, True])
+        self.assertTrue(any("up after 12m" in t for t in d["texts"]), d["texts"])
+        self.assertEqual(sorted(d["kinds"]), ["k source_down", "k source_up"])
+        self.assertFalse(d["who"])
+        self.assertFalse(d["drawer_open_after_click"])
+
+
 class BrowserAuthTest(_BrowserCase):
     """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
 

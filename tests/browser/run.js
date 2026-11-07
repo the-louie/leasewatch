@@ -385,6 +385,15 @@ const scenarios = {
     res.restored.rows = await macs(); res.restored.total = await total();
     return res;
   },
+  // connector events (mac ""): plain text, no who button, nothing to open
+  async sourceevents(page) {
+    await page.waitForSelector('#events .k.source_down');
+    const rows = await page.$$eval('#events li', lis => lis.filter(li => li.querySelector('.k.source_down, .k.source_up')).map(li => ({
+      text: li.textContent, who: li.querySelector('.who') !== null, kind: li.querySelector('.k').className })));
+    await page.click('#events li:has(.k.source_down) .src');
+    return { count: rows.length, texts: rows.map(r => r.text), who: rows.some(r => r.who), kinds: rows.map(r => r.kind),
+             drawer_open_after_click: await drawerOpen(page) };
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};
