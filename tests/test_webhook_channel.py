@@ -165,7 +165,7 @@ class FormatTests(WebhookBase):
         self.assertEqual(content.count("```"), 2)
 
     def test_ntfy_long_is_cut(self) -> None:
-        # S5R15: ntfy refuses (or turns into an attachment) a message over 4096 bytes
+        # ntfy refuses (or turns into an attachment) a message over 4096 bytes
         h = self.hook(status=200)
         devs = [{**DEV, "mac": f"02:00:00:00:01:{i:02x}", "hostname": "guest-phone-ä" * 2} for i in range(50)]
         self.send(self.cfg(WEBHOOK_URL=h.url + "/lw", WEBHOOK_FORMAT="ntfy", PUBLIC_URL="https://lw.example.lan"), devs)
@@ -188,7 +188,7 @@ class FormatTests(WebhookBase):
         self.assertRegex(message, r"… and \d+ more")
 
     def test_bad_secret_is_named(self) -> None:
-        # S5R29: a decode error of the secret is not a bad URL (a Config built without validate())
+        # a decode error of the secret is not a bad URL (a Config built without validate())
         h = self.hook()
         e = self.err(self.cfg(WEBHOOK_URL=h.url + "/x", WEBHOOK_SECRET="whsec_abc"))
         self.assertEqual(e, "webhook: bad WEBHOOK_SECRET")
@@ -262,11 +262,11 @@ class ConfigTests(WebhookBase):
 
     def test_secret_and_url_validated_as_used(self) -> None:
         url = "https://hooks.example.com/x"
-        # S5R10/S5R16: "whsec_" alone decodes to an empty HMAC key, which anyone can sign with
+        # "whsec_" alone decodes to an empty HMAC key, which anyone can sign with
         self.assertIn("WEBHOOK_SECRET: the whsec_ value is empty", self.problems(WEBHOOK_URL=url, WEBHOOK_SECRET="whsec_"))
-        # S5R17: os.environ keeps undecodable bytes as surrogates, which .encode() refuses
+        # os.environ keeps undecodable bytes as surrogates, which .encode() refuses
         self.assertIn("WEBHOOK_SECRET is not valid UTF-8", self.problems(WEBHOOK_URL=url, WEBHOOK_SECRET="caf\udce9"))
-        # S5R18: http.client sends the path and query as ASCII; a non-ASCII host is IDNA-encoded and fine
+        # http.client sends the path and query as ASCII; a non-ASCII host is IDNA-encoded and fine
         msg = "WEBHOOK_URL: the path and query must be ASCII (percent-encode other characters)"
         for bad in ("https://hooks.example.com/ä/topic", "https://hooks.example.com/t?auth=å"):
             self.assertIn(msg, self.problems(WEBHOOK_URL=bad), bad)

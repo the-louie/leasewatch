@@ -39,14 +39,14 @@ class _Eager(Fake):
 
 
 class CheckFallbackWhileWaitingTests(Base):
-    # the S05x setup of test_collector_edge_cases, not inherited: its tests would run twice
+    # the setup of test_collector_edge_cases, not inherited: its tests would run twice
     ENV = cedge.BaselineWaitTests.ENV
     FX_MACS = cedge.BaselineWaitTests.FX_MACS
     fx_batch = cedge.BaselineWaitTests.fx_batch
     down = staticmethod(cedge.BaselineWaitTests.down)  # class access unwraps the staticmethod; re-wrap it
     poll = cedge.BaselineWaitTests.poll
 
-    # S2R01/S2R15: a check() that keeps failing while collect() works must still reach the MAX_BACKOFF fallback
+    # a check() that keeps failing while collect() works must still reach the MAX_BACKOFF fallback
     # (collect() every poll) while the baseline waits, or the baseline is never taken
     def test_failing_check_falls_back_to_collect_while_the_baseline_waits(self):
         col, db = self.collector(self.ENV)
@@ -72,7 +72,7 @@ class CheckFallbackWhileWaitingTests(Base):
             run.retry_at = 0
         self.assertEqual((fx.checks, fx.collects, db.get_meta("first_run_done", "")), (1, 1, "1"))
 
-    # S2R32/S2R53: changes B-09 drops during the wait are not reported as 'changed'
+    # changes dropped during the baseline wait are not reported as 'changed'
     def test_changed_is_zero_while_the_baseline_waits(self):
         col, db = self.collector(self.ENV)
         col._connectors["fx"].on_collect = self.down
@@ -88,7 +88,7 @@ class CheckFallbackWhileWaitingTests(Base):
 
 
 class SetupTests(Base):
-    # S2R13/S2R14: a plugin that calls sys.exit() while it is built only disables its instance
+    # a plugin that calls sys.exit() while it is built only disables its instance
     def test_system_exit_in_the_constructor_disables_the_instance(self):
         with mock.patch.dict(registry(), {"exits": _Exits}):
             conn, problems = collector_mod.setup_instance(InstanceSpec("x", "exits", {}), HostContext())
@@ -119,7 +119,7 @@ class SetupTests(Base):
             cfg = self.cfg({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "genexit"})
             self.assertIn("connector x (genexit): cannot be set up (SystemExit)", cfg.validate())
 
-    # S2R52: device_names() works while the connectors are built
+    # device_names() works while the connectors are built
     def test_device_names_callable_while_connectors_are_built(self):
         with mock.patch.dict(registry(), {"eager": _Eager}):
             col, _ = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "eager"})

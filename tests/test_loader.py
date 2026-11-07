@@ -169,7 +169,7 @@ class TestLoad(LoaderBase):
                                        f"dirdemo 0.3.0 (lw-dirdemo 0.3.0, LW_CONNECTORS_DIR {self.dir})")
 
     def test_type_help_lists_loaded_plugin_types(self):
-        # B-08.2: the `type` help and the unknown-type problem name every loaded type, not only the built-ins
+        # the `type` help and the unknown-type problem name every loaded type, not only the built-ins
         from leasewatch.connectors import HOST_SETTINGS, InstanceSpec, instance_problems, type_help
         make_dir_dist(self.dir, "lw-dirdemo", "lwt_dirdemo", "dirdemo")
         self.use_dir()
@@ -389,7 +389,7 @@ class TestSafety(LoaderBase):
 
 class TestSecrets(LoaderBase):
     def test_secret_file_of_a_plugin_type_is_read_and_redacted(self):
-        # B-08.1: Config() must see the plugin types before it reads <KEY>_FILE, or PASSWORD_FILE is "unknown"
+        # Config() must see the plugin types before it reads <KEY>_FILE, or PASSWORD_FILE is "unknown"
         make_dir_dist(self.dir, "lw-dirdemo", "lwt_dirdemo", "dirdemo")
         secret = "pl-Secret-0123456789"
         path = os.path.join(os.path.dirname(self.dir), "password")

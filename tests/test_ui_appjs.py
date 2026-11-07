@@ -199,8 +199,8 @@ class AppJsTests(unittest.TestCase):
         for n in BASE + ["renderStatus", "renderTable", "refreshDrawer", "setFields", "seenHtml", "syncUrl", "filtered"]:
             self.assertTrue(_extract(src, n).rstrip().endswith((";", "}")), n)
 
-    # V10/V13/V15/V16: an SSID-less Wi-Fi row that a switch has since placed on a port is wired, as before R62/R68;
-    # a live SSID-less client (no stored port) still shows as Wi-Fi (R62/R68)
+    # an SSID-less Wi-Fi row that a switch has since placed on a port is wired, as before;
+    # a live SSID-less client (no stored port) still shows as Wi-Fi
     def test_stale_ssidless_wifi_with_switch_port_is_wired(self) -> None:
         out = _run(["filtered"], r"""//--
 const stale = { mac: "02:00:00:00:00:01", wifi_ssid: "", wifi_ap: "ap-hall", link: "wifi", sw_port: "GE1/0/5", sw_via: "", loc_source: "sw1", vlan: "LAN", ip: "10.0.0.5" };
@@ -218,7 +218,7 @@ state.status = "all"; state.q = "ge1/0/5"; out.search = filtered().map(d => d.ma
         self.assertEqual(out["search"], ["02:00:00:00:00:01"])
         self.assertIn("ap-hall", out["live"])
 
-    # V11/V12: a controller never places a switch port, so it is not named after one; a switch still is (S15x)
+    # a controller never places a switch port, so it is not named after one; a switch still is
     def test_port_not_labelled_with_controller(self) -> None:
         out = _run([], r"""//--
 state.meta = { connectors: [{ name: "sw1", label: "sw-rack", type: "snmp_switch" }, { name: "unifi", label: "Wi-Fi", type: "unifi" }] };
@@ -229,7 +229,7 @@ out.sw = whereHtml({ link: "wired", sw_port: "GE1/0/5", sw_via: "", loc_source: 
         self.assertIn("GE1/0/5", out["ctl"])
         self.assertIn("on sw-rack", out["sw"])
 
-    # V14: a last good poll in the future (clock stepped back) proves nothing: the instance that just failed is red
+    # a last good poll in the future (clock stepped back) proves nothing: the instance that just failed is red
     def test_failed_instance_red_when_last_poll_in_future(self) -> None:
         out = _run(["renderStatus"], r"""const showBanner = () => {};
 //--
@@ -245,7 +245,7 @@ renderStatus(); out.normal = $("#statusText").innerHTML;
         self.assertIn('title="fw1: boom"><span class="dot bad">', out["normal"])
         self.assertIn('<span class="dot "></span>sw', out["normal"])
 
-    # V17: restoring focus after a re-render must not scroll the focused row back into view
+    # restoring focus after a re-render must not scroll the focused row back into view
     def test_focus_restore_does_not_scroll(self) -> None:
         out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
 //--
@@ -259,7 +259,7 @@ out.focused = document.activeElement.dataset.mac; out.opts = focusLog[focusLog.l
         self.assertEqual(out["focused"], "02:00:00:00:00:02")
         self.assertEqual(out["opts"], {"preventScroll": True})
 
-    # V18/V19/V59: the age in a Seen-by line uses the same (server) clock as its "on the wire" badge
+    # the age in a Seen-by line uses the same (server) clock as its "on the wire" badge
     def test_seen_line_age_uses_server_clock(self) -> None:
         out = _run(["seenHtml"], r"""//--
 const srv = 2000000000; Date.now = () => (srv + 660) * 1000; state.skew = -660;
@@ -289,7 +289,7 @@ state.meta = { now: 2000000000, new_days: 7, baseline_ts: 1, connectors: [] };
 const known = () => /<dt>Known<\/dt><dd>([^<]*)/.exec(body.kv.innerHTML)[1];
 """
 
-    # V20/V21: an ack saved while the user types shows the new Known state and toggle, and keeps the typed text (R77)
+    # an ack saved while the user types shows the new Known state and toggle, and keeps the typed text
     def test_ack_with_typing_in_flight_updates_known_and_toggle(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -304,7 +304,7 @@ await byId.fAck.onclick(); out.second = posts[posts.length - 1].acked;
         self.assertEqual(out["note"], "typed")
         self.assertIs(out["second"], False)
 
-    # V62: a failed refresh after a save does not wipe text typed while the save ran
+    # a failed refresh after a save does not wipe text typed while the save ran
     def test_failed_refresh_after_save_keeps_typed_text(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -317,7 +317,7 @@ out.body = body.innerHTML.slice(0, 40); out.note = byId.fNote?.value ?? null; ou
         self.assertNotEqual(out["body"], "<p>timeout</p>")
         self.assertEqual(out["note"], "typed")
 
-    # V37: a baseline device is already known: "Save & mark known" is not the primary action
+    # a baseline device is already known: "Save & mark known" is not the primary action
     def test_baseline_device_ack_button_not_primary(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 server.baseline = 1; state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -335,7 +335,7 @@ renderTable();
 const mac = rows.list[0].kids[".c-mac .cp"]; mac.title = "Click to copy";
 """
 
-    # V60: a refused clipboard write falls back to selecting the MAC, as plain HTTP does (R71)
+    # a refused clipboard write falls back to selecting the MAC, as plain HTTP does
     def test_rejected_clipboard_write_falls_back(self) -> None:
         out = _run(["renderTable", "filtered"], "const navigator = { clipboard: { writeText: () => Promise.reject(new Error('NotAllowedError')) } };\n"
                    + self.COPY + r"""
@@ -346,7 +346,7 @@ out.title = mac.title; out.selected = !!calls.selected; out.exec = calls.exec ||
         self.assertEqual(out["exec"], 1)
         self.assertEqual(out["title"], "selected: press Ctrl+C to copy")
 
-    # V36: the "press Ctrl+C" hint belongs to that click: it is gone once the pointer leaves the cell
+    # the "press Ctrl+C" hint belongs to that click: it is gone once the pointer leaves the cell
     def test_copy_hint_reset_after_leaving(self) -> None:
         out = _run(["renderTable", "filtered"], "const navigator = {};\n" + self.COPY + r"""
 mac.onclick({ stopPropagation() {} }); out.hint = mac.title;
@@ -355,7 +355,7 @@ mac.onmouseleave?.(); out.after = mac.title;
         self.assertEqual(out["hint"], "selected: press Ctrl+C to copy")
         self.assertEqual(out["after"], "Click to copy")
 
-    # V63: a replaceState the browser throttles is written once the throttle ends, so the URL is not left stale
+    # a replaceState the browser throttles is written once the throttle ends, so the URL is not left stale
     def test_throttled_url_write_is_retried(self) -> None:
         out = _run(["urlRetry", "syncUrl"], r"""const timers = []; const setTimeout = f => timers.push(f); const clearTimeout = id => { if (id) timers[id - 1] = null; };
 const location = { pathname: "/" }; let throttled = true, url = null;
@@ -367,7 +367,7 @@ out.url = url;
 """)
         self.assertEqual(out["url"], "?q=ap-hall")
 
-    # V93: an unnamed network sorts after the named ones, as an empty IP or vendor does
+    # an unnamed network sorts after the named ones, as an empty IP or vendor does
     def test_unnamed_network_sorts_last(self) -> None:
         out = _run(["filtered"], r"""//--
 state.sort = "vlan";
@@ -397,7 +397,7 @@ state.ssid = null; out.off = filtered().map(d => d.mac);
         self.assertEqual(out["on"], ["3", "2", "1"])
         self.assertEqual(out["off"], ["3", "1", "2"])  # without the filter: online first, then the last time online
 
-    # W14: the 60 s refresh that puts focus back in the drawer form must not scroll the drawer body to it
+    # the 60 s refresh that puts focus back in the drawer form must not scroll the drawer body to it
     def test_drawer_poll_refocus_does_not_scroll(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -408,7 +408,7 @@ out.focused = document.activeElement === byId.fName; out.opts = focusLog[focusLo
         self.assertTrue(out["focused"])
         self.assertEqual(out["opts"], {"preventScroll": True})
 
-    # W45: a baseline device is shown as known already, so its ack button does not offer to "mark known"
+    # a baseline device is shown as known already, so its ack button does not offer to "mark known"
     def test_baseline_device_ack_label_not_mark_known(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 server.baseline = 1; state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -416,7 +416,7 @@ out.label = byId.fAck.textContent;
 """)
         self.assertNotIn("mark known", out["label"])
 
-    # W24: an alias (or name) equal to the hostname is not repeated on the sub-line
+    # an alias (or name) equal to the hostname is not repeated on the sub-line
     def test_hostname_equal_to_label_not_repeated(self) -> None:
         out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
 //--
@@ -428,7 +428,7 @@ out.subs = rows.list.map(t => t.kids[".dev-sub"].innerHTML);
 """)
         self.assertEqual(out["subs"], ["Apple", '<span class="host">ipad</span> · Apple'])
 
-    # W44: the status line does not name a firewall "fw1" that the configuration may not have
+    # the status line does not name a firewall "fw1" that the configuration may not have
     def test_status_line_does_not_hardcode_fw1(self) -> None:
         out = _run(["renderStatus"], r"""const showBanner = () => {};
 //--
@@ -440,7 +440,7 @@ renderStatus(); out.txt = $("#statusText").innerHTML;
         self.assertNotIn("fw1", out["txt"])
         self.assertTrue(out["txt"].startswith("polled just now"), out["txt"])
 
-    # X14: a slow poll refresh whose GET was served before a save must not rebuild the drawer with the pre-save state
+    # a slow poll refresh whose GET was served before a save must not rebuild the drawer with the pre-save state
     def test_late_poll_refresh_does_not_overwrite_saved_drawer(self) -> None:
         pre = self.DRAWER.split("//--")[0].replace(
             'if (failGet) throw new Error("timeout");',
@@ -460,7 +460,7 @@ out.known = known(); out.label = byId.fAck.textContent; out.acked = server.acked
         self.assertEqual(out["label"], "Mark unknown")
 
 
-    # Y04: a poll refresh that answers before the open's slow refresh still moves focus to Name
+    # a poll refresh that answers before the open's slow refresh still moves focus to Name
     def test_open_focus_survives_an_overtaking_poll_refresh(self) -> None:
         pre = self.DRAWER.split("//--")[0].replace(
             'if (failGet) throw new Error("timeout");',
@@ -477,7 +477,7 @@ out.focusedIsName = document.activeElement === byId.fName;
 """)
         self.assertTrue(out["focusedIsName"])
 
-    # Z01: a poll refresh that fails before the open's slow but successful refresh does not leave the error text
+    # a poll refresh that fails before the open's slow but successful refresh does not leave the error text
     def test_open_success_renders_after_an_overtaking_failed_poll(self) -> None:
         pre = self.DRAWER.split("//--")[0].replace(
             'if (failGet) throw new Error("timeout");',
@@ -495,7 +495,7 @@ out.hasForm = !!byId.fName; out.focusedIsName = !!byId.fName && document.activeE
         self.assertTrue(out["hasForm"])
         self.assertTrue(out["focusedIsName"])
 
-    # Z02: text typed during a save and then reverted: the next poll rebuild puts the caret back, not on Name
+    # text typed during a save and then reverted: the next poll rebuild puts the caret back, not on Name
     def test_poll_rebuild_after_edited_refresh_restores_caret(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
 state.open = server.mac; await refreshDrawer(server.mac, true);
@@ -509,7 +509,7 @@ out.focusedIsNote = document.activeElement === byId.fNote; out.focusedIsName = d
         self.assertTrue(out["focusedIsNote"])
         self.assertFalse(out["focusedIsName"])
 
-    # Z03: a poll reply issued before a save, released after the save's own refresh failed, does not rebuild the
+    # a poll reply issued before a save, released after the save's own refresh failed, does not rebuild the
     # form with the pre-save name (the next Save or Ack would post it back)
     def test_stale_poll_reply_after_failed_save_refresh_keeps_saved_name(self) -> None:
         pre = self.DRAWER.split("//--")[0].replace(
@@ -531,7 +531,7 @@ out.body = body.innerHTML.slice(0, 40); out.form = state.form; out.server = serv
         self.assertEqual(out["body"], "<p>timeout</p>")
         self.assertEqual(out["form"]["name"], "Printer")
 
-    # Z04: a save on A does not drop the open refresh of B, opened while A's POST ran and answered after it, when
+    # a save on A does not drop the open refresh of B, opened while A's POST ran and answered after it, when
     # load() then fails and no other refresh redraws B
     def test_save_does_not_drop_open_refresh_of_other_device(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], r"""
@@ -600,7 +600,7 @@ await byId.fSave.onclick(); out.posted = posts[posts.length - 1].name; out.serve
         self.assertEqual(out["posted"], "Printer")
         self.assertEqual(out["server"], "Printer")
 
-    # S3R01/S3R04: a close while a save's POST runs asks only about text typed after Save
+    # a close while a save's POST runs asks only about text typed after Save
     def test_close_during_save_asks_only_for_text_typed_after_save(self) -> None:
         pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return true; };')
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], pre + r"""
@@ -621,7 +621,7 @@ out.askedTyped = asked.length - out.askedPlain; out.saving = state.saving;
         self.assertEqual(out["askedTyped"], 1)
         self.assertIsNone(out["saving"])
 
-    # S3R01: after a failed save the posted text counts as unsaved again
+    # after a failed save the posted text counts as unsaved again
     def test_close_after_failed_save_asks(self) -> None:
         pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return false; };')
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], pre + r"""
@@ -635,14 +635,14 @@ out.asked = asked.length; out.open = state.open;
         self.assertEqual(out["asked"], 1)
         self.assertEqual(out["open"], "02:00:00:00:00:01")
 
-    # S3R02: the discard prompt and the refresh guard share one "edited" test
+    # the discard prompt and the refresh guard share one "edited" test
     def test_discard_and_refresh_share_formEdited(self) -> None:
         src = _read("leasewatch", "static", "app.js")
         self.assertIn("formEdited(state.open)", _extract(src, "discardOk"))
         self.assertIn("formEdited(mac)", _extract(src, "refreshDrawer"))
         self.assertEqual(src.count(".value !== "), 2)  # Name and Note compared once, in formEdited
 
-    # S3R03: opening another device from a drawer control keeps the control outside the drawer to return to
+    # opening another device from a drawer control keeps the control outside the drawer to return to
     def test_switch_from_drawer_control_keeps_return_target(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk", "syncUrl", "urlRetry"], self.DRAWER + r"""
 const drawer = $("#drawer"); body.parent = drawer; $("#dClose").parent = drawer;
@@ -656,7 +656,7 @@ closeDrawer(); out.back = document.activeElement === rowA;
         self.assertTrue(out["kept"])
         self.assertTrue(out["back"])
 
-    # Z06: where AbortSignal.any is missing (Chrome < 116, Firefox < 124, Safari < 17.4) the drawer GET, which passes its
+    # where AbortSignal.any is missing (Chrome < 116, Firefox < 124, Safari < 17.4) the drawer GET, which passes its
     # own signal, still times out after 30 s, and its timer is cleared once the request settles
     def test_drawer_get_keeps_timeout_without_abort_signal_any(self) -> None:
         out = _run(["api"], r"""
@@ -704,7 +704,7 @@ out.save = await Promise.race([p2, hung()]);
         self.assertEqual(out["load"], "rejected: TimeoutError")  # "hung" before the fix
         self.assertEqual(out["save"], "rejected: TimeoutError")
 
-    # S4R11/S4R12: a re-render while a MAC or IP copy target has keyboard focus keeps focus on that target
+    # a re-render while a MAC or IP copy target has keyboard focus keeps focus on that target
     def test_refresh_keeps_focus_on_copy_target(self) -> None:
         for sel in (".c-mac .cp", ".c-ip .cp"):
             with self.subTest(sel=sel):
@@ -720,7 +720,7 @@ out.same = document.activeElement === nt.kids[SEL]; out.tag = document.activeEle
 """.replace("SEL", json.dumps(sel)))
                 self.assertTrue(out["same"], out["tag"])  # "TR" before the fix
 
-    # S4R13: the row count leaves archived devices out of the total, as the cards do
+    # the row count leaves archived devices out of the total, as the cards do
     def test_count_total_leaves_archived_out(self) -> None:
         out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
 //--
@@ -732,7 +732,7 @@ state.status = "archived"; renderTable(); out.archived = $("#count").textContent
         self.assertEqual(out["all"], "2 of 2")  # "2 of 3" before the fix
         self.assertEqual(out["archived"], "1 of 1")
 
-    # S4R14: the "press Ctrl+C" hint of a keyboard copy goes when focus leaves, as a mouse leave clears it
+    # the "press Ctrl+C" hint of a keyboard copy goes when focus leaves, as a mouse leave clears it
     def test_copy_hint_reset_after_blur(self) -> None:
         out = _run(["renderTable", "filtered"], "const navigator = {};\n" + self.COPY + r"""
 mac.onkeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} }); out.hint = mac.title;
@@ -741,7 +741,7 @@ mac.onblur?.(); out.after = mac.title;
         self.assertEqual(out["hint"], "selected: press Ctrl+C to copy")
         self.assertEqual(out["after"], "Click to copy")
 
-    # S4R16: a second copy keeps its own "Copied" time; the first copy's timer does not end it early
+    # a second copy keeps its own "Copied" time; the first copy's timer does not end it early
     def test_second_copy_feedback_not_cut_short(self) -> None:
         out = _run(["renderTable", "filtered"], r"""const navigator = { clipboard: { writeText: () => Promise.resolve() } };
 const timers = []; const setTimeout = f => timers.push(f); const clearTimeout = id => { if (id) timers[id - 1] = null; };
@@ -754,7 +754,7 @@ out.copied = mac.classList.contains("copied"); out.title = mac.title;
         self.assertTrue(out["copied"])  # false before the fix
         self.assertEqual(out["title"], "Copied")
 
-    # S4R15: Archive posts only the archive state, so it does not flash "saved" over a typed, unsaved Name
+    # Archive posts only the archive state, so it does not flash "saved" over a typed, unsaved Name
     def test_archive_does_not_say_saved(self) -> None:
         pre = self.DRAWER.replace("server.acked = server.acked ? 1 : 0;",
                                   "server.acked = server.acked ? 1 : 0; if ('archived' in server) server.archived_ts = server.archived ? 123 : null;")
@@ -804,7 +804,7 @@ out.ids2 = state.events.map(x => x.id); out.paged2 = state.evPaged;
         self.assertEqual(out["ids2"], [60, 59, 30, 29])
         self.assertTrue(out["paged2"])
 
-    # S4R17: every event kind the server writes has a colour rule, like the older kinds
+    # every event kind the server writes has a colour rule, like the older kinds
     def test_new_event_kinds_have_a_colour(self) -> None:
         css = _read("leasewatch", "static", "style.css")
         for kind in ("archived", "restored", "merged"):

@@ -206,7 +206,7 @@ class Base(unittest.TestCase):
 
 
 class SessionReuseClassic(Base):
-    """T-03 (design §3.3)."""
+    """One login per session on a classic controller, logout on close."""
 
     def test_five_polls_one_login_then_logout_on_close(self) -> None:
         ctl = self.ctl("classic302")
@@ -275,7 +275,7 @@ class SessionReuseClassic(Base):
         self.assertEqual(ctl.count("POST", "/api/login"), 2)
 
     def test_401_after_every_fresh_login_stays_http_401_and_is_not_paced(self) -> None:
-        # S5R20: a login whose session never read must not count as an expired session
+        # a login whose session never read must not count as an expired session
         ctl = self.ctl("classic302")
         ctl.reject_stats = True
         c = self.client(ctl, "classic")
@@ -340,7 +340,7 @@ class SessionReuseClassic(Base):
 
 
 class UnifiOs(Base):
-    """T-04 (design §4.5)."""
+    """UniFi OS detection and its login path."""
 
     def test_detection(self) -> None:
         for mode, login in (("classic302", "/api/login"), ("classic_base", "/api/login"), ("os", "/api/auth/login")):
@@ -394,7 +394,7 @@ class UnifiOs(Base):
         self.assertEqual([hd.get("X-Csrf-Token") for m, p, hd, _ in ctl.requests if "/stat/" in p], [None, None])
 
     def test_unusable_jwt_csrf_is_not_sent(self) -> None:
-        # S5R19/S5R21: a csrfToken claim that cannot be a header value is ignored, so the reads (which work without
+        # a csrfToken claim that cannot be a header value is ignored, so the reads (which work without
         # CSRF) still succeed instead of failing every poll on a kept session
         for bad in ("a\r\nX", "a\nb", "\u20ac", "a b", "", "x" * 513):
             ctl = self.ctl("os", csrf_in_header=False)

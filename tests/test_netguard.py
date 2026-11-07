@@ -1,4 +1,4 @@
-"""S6 T-01: the network guard. Importing this module installs it for the whole `unittest discover` run (every
+"""The network guard. Importing this module installs it for the whole `unittest discover` run (every
 module is imported before the first test runs); the tests prove that it blocks and fails non-loopback attempts,
 including swallowed ones, and leaves loopback alone."""
 from __future__ import annotations

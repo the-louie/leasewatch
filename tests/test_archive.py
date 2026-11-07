@@ -87,7 +87,7 @@ class MergeTests(unittest.TestCase):
         self.assertIsNone(res.rows[UA]["archived_ts"])
 
     def test_prune_spares_a_device_restored_since_it_was_last_online(self):
-        # S4R07: "Restore to list" must hold until the device has been online again and then offline PRUNE_DAYS
+        # "Restore to list" must hold until the device has been online again and then offline PRUNE_DAYS
         prev = [row(UA, online=0, last_online=NOW - 40 * DAY)]
         res = self.run_merge(prev, [], prune_days=30, restored={UA: NOW - 60})
         self.assertEqual(res.rows, {})
@@ -211,7 +211,7 @@ class CollectorTests(Base):
         self.assertIsNone(db.device(DEV)["mail_queued"])
 
     def test_restore_by_hand_is_not_undone_by_prune(self):
-        # S4R07: the collector passes the restore events to the merge
+        # the collector passes the restore events to the merge
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1, "PRUNE_DAYS": "30"}, rows=[arp(DEV, "10.0.0.5")])
         db.q("INSERT INTO devices(mac, first_seen, last_seen, last_online, baseline) VALUES(?,?,?,?,1)",
              (UA, NOW - 90 * DAY, NOW - 40 * DAY, NOW - 40 * DAY))

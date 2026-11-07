@@ -38,7 +38,7 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(switch.SwitchClient, "detect_report", lambda self, n: rep):
             return self.cli("snmp-detect", *(argv or FLAGS))
 
-    # R08, R12: device strings reach the terminal with ESC/BEL intact
+    # device strings reach the terminal with ESC/BEL intact
     def test_control_characters_from_the_switch_are_escaped(self):
         rc, out = self.detect_with(report("Sw\x1b]0;x\x07\x1b[2J", "Gi1\x1b[1A\x1b[2Kfake"))
         self.assertEqual(rc, 0, out)
@@ -47,7 +47,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("sysDescr:    Sw\\x1b]0;x\\x07\\x1b[2J", out)
         self.assertIn("= Gi1\\x1b[1A\\x1b[2Kfake", out)
 
-    # R13, R109: a non-ASCII device value on an ASCII-only stdout
+    # a non-ASCII device value on an ASCII-only stdout
     def test_ascii_stdout_does_not_crash_on_a_non_ascii_value(self):
         raw = io.BytesIO()
         out = io.TextIOWrapper(raw, encoding="ascii", newline="\n")
@@ -63,7 +63,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("sysDescr:    HP Sw\\xff 5130 \\u2013", text)
         self.assertIn("= Port\\xe9", text)
 
-    # R07: `snmp-detect ... | head` closed the pipe
+    # `snmp-detect ... | head` closed the pipe
     def test_broken_pipe_is_not_a_traceback(self):
         class Gone(io.StringIO):
             def write(self, s):
@@ -102,7 +102,7 @@ class CliTests(unittest.TestCase):
         rc, out = self.cli("snmp-detect", "--host", "10.0.0.2", "--auth-key-env", "TEST_AK")
         self.assertEqual((rc, out.strip()), (2, "--host needs --priv-key-env (the name of the environment variable that holds the key)"))
 
-    # R11: the removed 1.0 switch variables are refused by name, never with their values
+    # the removed 1.0 switch variables are refused by name, never with their values
     def test_removed_switch_variables_are_named(self):
         os.environ.update({"SNMP_HOST": "10.0.0.2", "SNMP_AUTH_KEY": "test-auth-key"})
         rc, out = self.cli("snmp-detect", "switch")
@@ -112,7 +112,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("test-auth-key", out)
         self.assertNotIn("10.0.0.2", out)
 
-    # R10: parse and host-level problems of the instance
+    # parse and host-level problems of the instance
     def sw(self, **extra: str) -> None:
         os.environ.update({"LW_CONNECTORS": "sw", "LW_CONNECTOR__SW__TYPE": "snmp_switch", "LW_CONNECTOR__SW__HOST": "10.0.0.2",
                            "LW_CONNECTOR__SW__AUTH_KEY": "test-auth-key", "LW_CONNECTOR__SW__PRIV_KEY": "test-priv-key"})
@@ -140,7 +140,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual((rc, probed), (2, []), out)
         self.assertIn("TIMEOUT", out)
 
-    # Z04/Z05: a removed 1.0 variable stops the server whatever the instance is called, so it stops snmp-detect for
+    # a removed 1.0 variable stops the server whatever the instance is called, so it stops snmp-detect for
     # every name, not only for the "switch" its hint happens to name
     def test_removed_variable_blocks_every_instance_name(self):
         for name in ("switch", "sw"):
@@ -166,7 +166,7 @@ class CliTests(unittest.TestCase):
 
 
 class PysnmpProbeTests(unittest.TestCase):
-    # R09: an import that fails with something other than ImportError
+    # an import that fails with something other than ImportError
     def test_a_broken_pysnmp_install_is_not_a_traceback(self):
         saved = clean_env()
         self.addCleanup(restore, saved)
@@ -210,13 +210,13 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
                            "LW_CONNECTOR__SW__AUTH_KEY": "test-auth-key", "LW_CONNECTOR__SW__PRIV_KEY": "test-priv-key"})
         os.environ.update(env)
 
-    # V70: a key variable that holds only whitespace is as empty as an unset one (the server strips it)
+    # a key variable that holds only whitespace is as empty as an unset one (the server strips it)
     def test_blank_key_variable_is_named(self):
         os.environ["TEST_AK"] = "  "
         rc, out = self.cli("snmp-detect", *FLAGS)
         self.assertEqual((rc, out.strip()), (2, "environment variable TEST_AK (from --auth-key-env) is not set or empty"))
 
-    # V71: Ctrl-C during a subcommand
+    # Ctrl-C during a subcommand
     def test_ctrl_c_is_not_a_traceback(self):
         def interrupted(argv):
             raise KeyboardInterrupt
@@ -224,7 +224,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
             rc, _ = self.cli("snmp-detect", "sw")
         self.assertEqual(rc, 130)
 
-    # V26: the reader went away at the final flush of a failed run
+    # the reader went away at the final flush of a failed run
     def test_broken_pipe_keeps_a_failure_exit_code(self):
         class GoneAtFlush(io.StringIO):
             def flush(self):
@@ -237,7 +237,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
             rc = m.main(["snmp-detect", *FLAGS])
         self.assertEqual(rc, 2)
 
-    # V45: the parse problem that explains why the instance is missing
+    # the parse problem that explains why the instance is missing
     def test_instance_not_in_the_list_names_the_cause(self):
         self.sw(LW_CONNECTORS="fw1", LW_CONNECTOR__FW1__TYPE="opnsense")
         rc, out = self.cli("snmp-detect", "sw")
@@ -248,7 +248,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
         self.sw(LW_CONNECTORS="SW")
         rc, out = self.cli("snmp-detect", "sw")
         self.assertEqual(rc, 2)
-        # Z01: the invalid name is the cause; "sw is not in LW_CONNECTORS" would contradict the SW the operator listed
+        # the invalid name is the cause; "sw is not in LW_CONNECTORS" would contradict the SW the operator listed
         self.assertIn("config: LW_CONNECTORS: 'SW' is not a valid instance name", out)
         self.assertNotIn("not in LW_CONNECTORS", out)
 
@@ -259,7 +259,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
         self.assertIn("config: LW_CONNECTOR__SW__AUTH_KEY set but sw is not in LW_CONNECTORS", out)
         self.assertIn("config: LW_CONNECTORS is not set", out)
 
-    # V46: two spellings of the same key variable; the server refuses to start, so the switch is not probed
+    # two spellings of the same key variable; the server refuses to start, so the switch is not probed
     def test_case_duplicate_key_variable_is_not_probed(self):
         self.sw(LW_CONNECTORS="sw", LW_CONNECTOR__sw__AUTH_KEY="other-auth-key")
         probed = []
@@ -274,7 +274,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
             rc, out = self.cli("snmp-detect", "sw")
         self.assertEqual(rc, 0, out)
 
-    # W17: the BrokenPipeError path with a stdout that has no file descriptor must not leak /dev/null
+    # the BrokenPipeError path with a stdout that has no file descriptor must not leak /dev/null
     def test_broken_pipe_without_a_fileno_leaks_no_descriptor(self):
         class Gone(io.StringIO):
             def write(self, s):
@@ -289,7 +289,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
                     self.assertEqual(m.main(["snmp-detect", *FLAGS]), 0)
         self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
-    # W38: --help into a reader that has gone away
+    # --help into a reader that has gone away
     def test_help_into_a_closed_pipe_prints_nothing(self):
         r, w = os.pipe()
         os.close(r)
@@ -301,7 +301,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
             os.close(w)
         self.assertEqual((p.returncode, p.stderr.decode()), (0, ""))
 
-    # W28a, W36: another instance's orphan line is the cause for this one too (LW_CONNECTORS unset)
+    # another instance's orphan line is the cause for this one too (LW_CONNECTORS unset)
     def test_without_a_list_another_instances_orphan_line_is_shown(self):
         self.sw(LW_CONNECTOR__AA__TYPE="unifi")
         rc, out = self.cli("snmp-detect", "sw")
@@ -315,7 +315,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("'SW' is not a valid instance name", out)
 
-    # W35: the server refuses a name listed twice, so the switch is not probed
+    # the server refuses a name listed twice, so the switch is not probed
     def test_an_instance_listed_twice_is_not_probed(self):
         self.sw(LW_CONNECTORS="sw,sw")
         probed = []
@@ -324,7 +324,7 @@ class InstanceProblemAndPipeTests(unittest.TestCase):
         self.assertEqual((rc, probed), (2, []), out)
         self.assertIn("config: LW_CONNECTORS: sw is listed twice", out)
 
-    # W37: a TYPE typo does not hide the instance's other parse problems
+    # a TYPE typo does not hide the instance's other parse problems
     def test_a_type_typo_keeps_the_other_problems(self):
         self.sw(LW_CONNECTORS="sw", LW_CONNECTOR__SW__TYPE="snmp-switch", LW_CONNECTOR__sw__HOST="10.0.0.3")
         rc, out = self.cli("snmp-detect", "sw")
@@ -354,7 +354,7 @@ class PysnmpImportErrorTests(unittest.TestCase):
             self.assertEqual(m.main(["snmp-profiles"]), 0)
         return buf.getvalue().splitlines()[0]
 
-    # V44: pysnmp is there but a module it needs is not (pysnmp 4.x on Python 3.12: "imp")
+    # pysnmp is there but a module it needs is not (pysnmp 4.x on Python 3.12: "imp")
     def test_a_missing_dependency_is_not_called_not_installed(self):
         first = self.profiles_with(ModuleNotFoundError("No module named 'imp'", name="imp"))
         self.assertEqual(first, "pysnmp cannot be imported: no module imp (pysnmp 7 and its dependencies are needed)")
@@ -362,27 +362,27 @@ class PysnmpImportErrorTests(unittest.TestCase):
     def test_pysnmp_itself_missing_is_still_not_installed(self):
         self.assertEqual(self.profiles_with(ModuleNotFoundError("No module named 'pysnmp'", name="pysnmp")), m.NO_PYSNMP)
 
-    # V25: a broken install is not followed by "not installed ... pip install"
+    # a broken install is not followed by "not installed ... pip install"
     def test_a_broken_install_does_not_say_not_installed(self):
         first = self.profiles_with(AttributeError("module 'pyasn1' has no attribute 'x'"))
         self.assertNotIn("not installed", first)
         self.assertNotIn("pip install", first)
 
-    # W34: a nameless ImportError comes from inside an installed pysnmp, so pip install does not help
+    # a nameless ImportError comes from inside an installed pysnmp, so pip install does not help
     def test_a_nameless_import_error_is_not_called_not_installed(self):
         first = self.profiles_with(ImportError("pysnmp needs pyasn1>=0.6"))
         self.assertNotIn("not installed", first)
         self.assertNotIn("pip install", first)
 
 
-    # Y02: "cannot import name" from inside an installed pysnmp is an ImportError naming pysnmp, not a missing one
+    # "cannot import name" from inside an installed pysnmp is an ImportError naming pysnmp, not a missing one
     def test_a_missing_name_inside_pysnmp_is_not_called_not_installed(self):
         first = self.profiles_with(ImportError("cannot import name 'x' from 'pysnmp'", name="pysnmp"))
         self.assertNotIn("not installed", first)
         self.assertNotIn("pip install", first)
 
 class DamagedPysnmpPackageTests(unittest.TestCase):
-    # X12: an installed pysnmp whose __init__ imports a missing submodule of its own is not "not installed"
+    # an installed pysnmp whose __init__ imports a missing submodule of its own is not "not installed"
     def test_a_damaged_pysnmp_package_is_not_called_not_installed(self):
         with tempfile.TemporaryDirectory() as d:
             os.mkdir(os.path.join(d, "pysnmp"))

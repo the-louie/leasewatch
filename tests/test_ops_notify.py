@@ -1,5 +1,5 @@
 """Notification backoff per channel: a failing channel is not called again until its backoff elapsed, the other
-channels still get the batch, the queue follows the owner rules, one warning per failed spell. Synthetic data only;
+channels still get the batch, the queue follows its own rules, one warning per failed spell. Synthetic data only;
 fake channels and a fake clock (no sleeps)."""
 import os
 import sys

@@ -198,7 +198,7 @@ class MailRetryTests(Base):
         self.client.rows = [arp(MAC, "10.0.0.12"), arp("02:00:00:00:00:02", "10.0.0.13")]
         col.run_once()
         db.update_user_fields(MAC, True, None, None)
-        now = int(time.time())  # S4 T-09: the queue is devices.mail_queued
+        now = int(time.time())  # the queue is devices.mail_queued
         db.q("UPDATE devices SET mail_queued=?", (now,))
         db.q("INSERT INTO devices(mac,first_seen,last_seen,ip,vlan,lease_type,mail_queued) VALUES(?,?,?,?,?,?,?)",
              ("02:00:00:00:00:03", now, now, "10.0.0.9", "LAN", "dynamic", now))
@@ -214,7 +214,7 @@ class FailureLoggingAndPruneTests(Base):
     MAIL = {"LW_CONNECTORS": "fw1", **FW1, "MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com",
             "MAIL_TO": "a@example.com"}
 
-    def test_flapping_failure_kinds_log_one_traceback(self):  # V01
+    def test_flapping_failure_kinds_log_one_traceback(self):
         col, _ = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})
         run = col._runs["x"]
         with self.assertLogs("leasewatch.collector", "WARNING") as cm:
@@ -230,7 +230,7 @@ class FailureLoggingAndPruneTests(Base):
             col._outcome(run, "down", ConnectorError("down"))
             col._outcome(run, "ValueError", ValueError("bug"))
 
-    def test_queue_read_error_skips_mail_and_retries_next_poll(self):  # V02, S4 T-09
+    def test_queue_read_error_skips_mail_and_retries_next_poll(self):
         col, db = self.collector(self.MAIL)
         now = int(time.time())
         db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)",
@@ -244,7 +244,7 @@ class FailureLoggingAndPruneTests(Base):
             col._notify()
         self.assertEqual(sent, [["02:00:00:00:00:03"]])
 
-    def test_fixed_instance_drops_the_stale_disabled_error_at_start(self):  # V27
+    def test_fixed_instance_drops_the_stale_disabled_error_at_start(self):
         env = {"LW_CONNECTORS": "fw1,wifi", **FW1, "LW_CONNECTOR__WIFI__TYPE": "unifi",
                "LW_CONNECTOR__WIFI__URL": "ftp://x.example.lan", "LW_CONNECTOR__WIFI__USER": "u",
                "LW_CONNECTOR__WIFI__PASSWORD": "pppppp"}
@@ -254,7 +254,7 @@ class FailureLoggingAndPruneTests(Base):
         Collector(self.cfg({**env, "LW_CONNECTOR__WIFI__URL": "https://x.example.lan"}), db, self.client)
         self.assertEqual((db.get_meta("conn.wifi.enabled"), db.get_meta("conn.wifi.error")), ("1", ""))
 
-    def test_disabled_status_is_written_at_start(self):  # V47
+    def test_disabled_status_is_written_at_start(self):
         db = self.collector({"LW_CONNECTORS": "fw1", **FW1})[1]
         col = Collector(self.cfg({"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}),
                         db, self.client)
@@ -263,7 +263,7 @@ class FailureLoggingAndPruneTests(Base):
         self.assertEqual(db.get_meta("conn.switch.enabled"), "0")
         self.assertTrue(db.get_meta("conn.switch.error").startswith("disabled: "))
 
-    def test_event_prune_survives_a_clock_jump_that_lasts(self):  # V48
+    def test_event_prune_survives_a_clock_jump_that_lasts(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
         now = int(time.time())
         db.set_meta("last_poll_ts", str(now))
@@ -283,7 +283,7 @@ class FailureLoggingAndPruneTests(Base):
             col2._write(c, {}, res, jump + 600)
         self.assertEqual(db.q("SELECT COUNT(*) n FROM events")[0]["n"], 5)
 
-    def test_strategy_cleared_when_a_good_batch_has_none(self):  # V73
+    def test_strategy_cleared_when_a_good_batch_has_none(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1,sw", **FW1, "LW_CONNECTOR__SW__TYPE": "fake"})
         sw = col._connectors["sw"]
         sw.on_collect = lambda: Batch(stats={"macs": 1, "strategy": "cisco_per_vlan"})
@@ -293,7 +293,7 @@ class FailureLoggingAndPruneTests(Base):
         self.assertEqual((db.get_meta("conn.sw.ok"), db.get_meta("conn.sw.strategy")), ("1", ""))
 
 
-    def test_failed_switch_does_not_hold_the_lease_type(self):  # V05
+    def test_failed_switch_does_not_hold_the_lease_type(self):
         env = {"LW_CONNECTORS": "fw1,fx,sw", **FW1, "LW_CONNECTOR__FX__TYPE": "fakefw", "LW_CONNECTOR__SW__TYPE": "fake",
                "LEASE_TYPE_MODE": "immediate"}
         col, db = self.collector(env)
@@ -315,7 +315,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
     """A fixed instance clears its disabled error, one traceback per failure kind, and the prune reference fallbacks."""
     RES = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[], wifi=[])
 
-    def test_fixed_switch_clears_its_disabled_error_at_start(self):  # W01
+    def test_fixed_switch_clears_its_disabled_error_at_start(self):
         env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST
         col, db = self.collector(env)
         self.assertTrue(db.get_meta("conn.switch.error").startswith("disabled: "))
@@ -327,7 +327,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
         col.run_once()
         self.assertEqual(db.get_meta("conn.switch.error"), "")
 
-    def test_alternating_unexpected_failures_log_each_traceback_once(self):  # W02, W29
+    def test_alternating_unexpected_failures_log_each_traceback_once(self):
         col, _ = self.collector({"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"})
         run = col._runs["x"]
 
@@ -351,7 +351,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
             col._outcome(run, "ValueError", other_path())  # the same type from another place: a new bug
         self.assertEqual(len(cm.records), 5, [r.getMessage().splitlines()[0] for r in cm.records])
 
-    def test_non_ascii_digit_prune_reference_falls_back(self):  # W03
+    def test_non_ascii_digit_prune_reference_falls_back(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
         now = int(time.time())
         db.set_meta("events_prune_ts", "\u00b2")
@@ -360,7 +360,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
             col._write(c, {}, self.RES, now)
         self.assertEqual(db.get_meta("events_prune_ts"), str(now))
 
-    def test_clock_behind_does_not_pin_the_prune_reference(self):  # W04
+    def test_clock_behind_does_not_pin_the_prune_reference(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
         now = int(time.time())
         db.set_meta("events_prune_ts", str(now))
@@ -375,7 +375,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
             col._write(c, {}, self.RES, now + 120)  # the clock is right again: the year-old event goes
         self.assertEqual(db.q("SELECT COUNT(*) n FROM events WHERE ts>3600")[0]["n"], 0)
 
-    def test_overlong_prune_reference_falls_back(self):  # X05
+    def test_overlong_prune_reference_falls_back(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
         now = int(time.time())
         db.set_meta("events_prune_ts", "9" * 5000)  # past int()'s 4300-digit limit
@@ -508,7 +508,7 @@ class BaselineWaitTests(Base):
             run.retry_at = 0
         self.assertEqual(waits, [15, 30, 60])
 
-    # Z02: an empty poll during the baseline wait, after devices are stored, is an ordinary poll, not "first poll empty"
+    # an empty poll during the baseline wait, after devices are stored, is an ordinary poll, not "first poll empty"
     def test_empty_poll_during_the_wait_is_not_a_failed_first_poll(self):
         col, db = self.collector(self.ENV)
         sent = []

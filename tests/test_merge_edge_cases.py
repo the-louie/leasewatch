@@ -388,7 +388,7 @@ class IpFallbackAndWifiClear(Base):
 
 
 class WifiEvents(Base):
-    """B-13: a wifi event only for an SSID change or a start/stop of Wi-Fi; an AP roam is silent."""
+    """A wifi event only for an SSID change or a start/stop of Wi-Fi; an AP roam is silent."""
     ON = dict(link="wifi", wifi_ssid="HomeNet", wifi_ap="ap-hall", wifi_signal=-50, wifi_radio="5 GHz", loc_source="unifi")
 
     def test_T07a_roam_on_the_same_ssid_writes_no_event_and_updates_the_row(self):
@@ -426,7 +426,7 @@ class WifiEvents(Base):
                                                "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")])}, controllers=CTRL)
         self.assertEqual(res.events, [(A, "wifi", "HomeNet -> off Wi-Fi")])
 
-    def test_S4R09_walk_out_with_a_lingering_arp_entry_writes_no_events(self):
+    def test_walk_out_with_a_lingering_arp_entry_writes_no_events(self):
         # the controller drops the phone at once, the firewall's ARP entry stays ~20 min: without a cable shown this
         # cannot be told from a walk-out, so the stale Wi-Fi details are cleared silently, and the return is silent too
         out = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch()}, controllers=CTRL)
@@ -458,7 +458,7 @@ class WifiEvents(Base):
         self.assertEqual(res.events, [(A, "wifi", "HomeNet -> off Wi-Fi")])
         self.assertEqual(res.rows[A]["link"], "wired")
 
-    def test_S4R08_first_ssid_of_a_client_already_on_wifi_writes_no_event(self):
+    def test_first_ssid_of_a_client_already_on_wifi_writes_no_event(self):
         res = self.merge([row(A, link="wifi", wifi_ssid="", wifi_ap="ap-hall", loc_source="unifi")],
                          {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])}, controllers=CTRL)
         self.assertEqual(res.events, [])
@@ -479,7 +479,7 @@ class AliasAndClientIdOrder(Base):
     D = "00:00:5e:00:53:01"   # the device (documentation range)
     AL = "02:aa:00:00:00:01"  # its known private alias
 
-    def test_S4R05_alias_and_device_on_one_switch_edge_port_wins_in_either_order(self):
+    def test_alias_and_device_on_one_switch_edge_port_wins_in_either_order(self):
         stale = swp(self.D, "GE1/0/24", "sw1", uplink=True, via="sw2")
         edge = swp(self.AL, "GE1/0/9", "sw1")
         for order in ([stale, edge], [edge, stale]):
@@ -490,7 +490,7 @@ class AliasAndClientIdOrder(Base):
                 self.assertEqual(res.rows[self.D]["sw_port"], "GE1/0/9")
                 self.assertEqual(res.events, [(self.D, "port", "GE1/0/7 -> GE1/0/9")])
 
-    def test_S4R05_controller_lists_alias_and_device_the_active_client_wins(self):
+    def test_controller_lists_alias_and_device_the_active_client_wins(self):
         idle = wifi(self.D, ssid="OldNet", present=False)
         active = wifi(self.AL, ssid="HomeNet", present=True)
         for order in ([idle, active], [active, idle]):
@@ -501,7 +501,7 @@ class AliasAndClientIdOrder(Base):
                 self.assertEqual(res.rows[self.D]["wifi_ssid"], "HomeNet")
                 self.assertEqual(res.events, [])
 
-    def test_S4R06_client_id_does_not_depend_on_row_order(self):
+    def test_client_id_does_not_depend_on_row_order(self):
         mk = lambda c: Fw1Sighting(mac=A, ip="10.0.0.5", hostname="h", vendor="", vlan="lan", iface="igb0", source="dhcp",
                                    lease_type="dynamic", online=False, client_id=c)
         with_cid, without, other = mk("01aabbccddee01"), mk(""), mk("01ff")

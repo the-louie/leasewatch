@@ -91,7 +91,7 @@ class RuleTests(unittest.TestCase):
         cases = {
             "generic": ([row(DEV, hostname="iPhone", online=0)], [lease(NEWP, host="iphone")]),
             "generic pattern": ([row(DEV, hostname="android-1a2b3c", online=0)], [lease(NEWP, host="android-1a2b3c")]),
-            # S4R02: a default model name (brand stem + model) is shared by every device of that model
+            # a default model name (brand stem + model) is shared by every device of that model
             "model name": ([row(DEV, hostname="Galaxy-S21", online=0)], [lease(NEWP, host="Galaxy-S21.lan")]),
             "mac-derived": ([row(DEV, hostname="0a-1b-2c", online=0)], [lease(NEWP, host="0a-1b-2c")]),
             "too short": ([row(DEV, hostname="tv", online=0)], [lease(NEWP, host="tv")]),
@@ -111,7 +111,7 @@ class RuleTests(unittest.TestCase):
                 self.assertNotMerged(self.run_merge(prev, sightings), NEWP)
 
     def test_generic_brand_prefix(self):
-        # S4R02 (owner rule): a hostname that starts with a generic brand/model stem is generic, whatever follows
+        # a hostname that starts with a generic brand/model stem is generic, whatever follows
         for h in ("Galaxy-S21", "galaxy-a52", "Pixel-7", "Chromecast-Ultra", "iPhone-15", "iPad-Pro", "android-tv",
                   "pixel7"):
             with self.subTest(h):
@@ -121,7 +121,7 @@ class RuleTests(unittest.TestCase):
                 self.assertEqual(_merge_host(h), h)
 
     def test_no_decision_while_a_lease_producer_failed(self):
-        # S4R03: the failed DHCP instance may hold the new MAC's lease (its client-id); deciding now would give the
+        # the failed DHCP instance may hold the new MAC's lease (its client-id); deciding now would give the
         # MAC its own row for good. It waits (no row, not new) and merges once the lease is back
         prev = {DEV: row(DEV, client_id=CID, hostname="phone-x", online=0)}
         st = MergeState(producers=frozenset({"fw1", "dhcp"}))

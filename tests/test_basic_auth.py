@@ -501,7 +501,7 @@ class HealthcheckTests(WebTestCase):
 
 
 class DockerUserTests(unittest.TestCase):
-    """S6 T-05: the image runs as a fixed numeric uid:gid that owns /data, so bind mounts can be chowned up front."""
+    """The image runs as a fixed numeric uid:gid that owns /data, so bind mounts can be chowned up front."""
 
     def test_fixed_ids(self):
         with open(os.path.join(REPO, "Dockerfile"), encoding="utf-8") as f:

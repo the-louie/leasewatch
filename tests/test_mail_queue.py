@@ -83,7 +83,7 @@ class MailQueueTests(Base):
         self.assertEqual(self.sent, [[UA1]])
 
     def test_old_entries_stay_until_mailed(self):
-        # S4R01 (owner decision): no age limit. A device queued while the clock ran days behind (or one jumped ahead)
+        # No age limit. A device queued while the clock ran days behind (or one jumped ahead)
         # must not be dropped unmailed once the clock is right; the queue keeps it until mailed, acked or archived
         col, db = self.baseline()
         now = int(time.time())

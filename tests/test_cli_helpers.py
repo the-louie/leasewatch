@@ -33,7 +33,7 @@ class Ctx:
 
 
 class TestGlobalProblems(CliBase):
-    """S2R02, S2R03: a problem that stops the server and belongs to no instance counts for every named command."""
+    """A problem that stops the server and belongs to no instance counts for every named command."""
 
     def test_malformed_variable_blocks_check_and_collect_of_a_name(self):
         self.env("dhcp1", inst("dhcp1"), {"LW_CONNECTOR__DHCP1_MODE": "x"})
@@ -65,7 +65,7 @@ class TestGlobalProblems(CliBase):
 
 
 class TestInstanceNameKept(CliBase):
-    """S2R04, S2R07, S2R12: an instance named like its host keeps its name; the client's label survives."""
+    """An instance named like its host keeps its name; the client's label survives."""
 
     def test_check_and_collect_lines_keep_the_name(self):
         self.env("dhcp1", inst("dhcp1", "checkfail", URL="https://dhcp1"))
@@ -163,7 +163,7 @@ class TestGlobalNotOwn(CliBase):
 
 
 class TestOwnRedact(unittest.TestCase):
-    """S2R05, S2R46, S2R06, S2R47: the connector's own redact()."""
+    """The connector's own redact()."""
 
     def test_device_data_is_not_masked_by_the_connector(self):
         class C:
@@ -180,7 +180,7 @@ class TestOwnRedact(unittest.TestCase):
 
 
 class TestClose(unittest.TestCase):
-    """S2R08, S2R48: close() is bounded and never raises out of close_connector."""
+    """close() is bounded and never raises out of close_connector."""
 
     def test_hanging_close_is_abandoned(self):
         release = threading.Event()
@@ -215,7 +215,7 @@ class TestClose(unittest.TestCase):
 
 
 class TestCheckMasksProblems(CliBase):
-    """S2R09: check masks the URL host in problem texts, as collect does."""
+    """check masks the URL host in problem texts, as collect does."""
 
     def test_problem_text_host_is_masked(self):
         cls = registry()["fakecli"]
@@ -229,7 +229,7 @@ class TestCheckMasksProblems(CliBase):
 
 
 class TestCheckBuildsOnce(CliBase):
-    """S2R49: a named check builds each instance once and closes what it built."""
+    """A named check builds each instance once and closes what it built."""
 
     def test_named_builds_once(self):
         cls = registry()["fakecli"]
@@ -262,7 +262,7 @@ def _config_builds(case: CliBase) -> int:
 
 
 class TestRecordLine(unittest.TestCase):
-    """S2R10: only the declared fields are printed."""
+    """Only the declared fields are printed."""
 
     def test_subclass_extra_field_is_left_out(self):
         @dataclasses.dataclass(frozen=True)
@@ -279,7 +279,7 @@ class Bad:
 
 
 class TestOddStats(CliBase):
-    """S2R11, S2R50: stats outside dict[str, int] never break --json or the human line."""
+    """Stats outside dict[str, int] never break --json or the human line."""
 
     def test_odd_stats(self):
         cls = registry()["fakecli"]
@@ -345,7 +345,7 @@ class TestStatsReport(unittest.TestCase):
 
 
 class TestTypesLine(unittest.TestCase):
-    """S2R51: package metadata cannot add a line to the start log."""
+    """Package metadata cannot add a line to the start log."""
 
     def test_control_characters_are_escaped(self):
         with mock.patch("leasewatch.connectors.type_help", lambda: "x 0.3.0\nERROR forged\x1b"):

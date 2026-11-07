@@ -29,7 +29,6 @@ class ProfileFileTest(unittest.TestCase):
             snmp_profiles.load_file(path)
         return str(cm.exception)
 
-    # R54
     def test_utf8_bom_is_accepted(self) -> None:
         path = self.write(b"\xef\xbb\xbf" + json.dumps({"profile": "x", "api_version": 1, "extends": "standard"}).encode())
         self.assertEqual(snmp_profiles.load_file(path)["profile"], "x")
@@ -38,19 +37,16 @@ class ProfileFileTest(unittest.TestCase):
         msg = self.error(self.write(b'{"a": 1,\n "b": 2,,}'))
         self.assertIn("line 2 column", msg)
 
-    # R55, R56, R60
     def test_deep_nesting_is_profile_error(self) -> None:
         for extends in (True, False):
             for depth in (600, 1000):
                 with self.subTest(extends=extends, depth=depth):
                     self.error(self.deep(depth, extends))
 
-    # R57
     def test_comment_key_inside_section_is_allowed(self) -> None:
         p = snmp_profiles.load_file(self.write({"profile": "x", "api_version": 1, "extends": "standard", "fdb": {"_comment": "why"}}))
         self.assertEqual(p["fdb"]["_comment"], "why")
 
-    # R58
     def test_non_numeric_oid_is_rejected(self) -> None:
         for bad in ("not an oid", "1.3.6.l.2.1.17.7.1.2.2.1.2", "", "1..3"):
             with self.subTest(bad=bad):
@@ -59,19 +55,17 @@ class ProfileFileTest(unittest.TestCase):
         p = snmp_profiles.load_file(self.write({"profile": "x", "api_version": 1, "extends": "standard", "oids": {"fdb_port": "1.3.6.1.4.1.32473.1"}}))
         self.assertEqual(p["oids"]["fdb_port"], "1.3.6.1.4.1.32473.1")
 
-    # R59
     def test_empty_short_key_is_rejected(self) -> None:
         msg = self.error(self.write({"profile": "x", "api_version": 1, "extends": "standard", "port_name": {"short": {"": "X", "GigabitEthernet": "GE"}}}))
         self.assertIn("port_name.short", msg)
 
-    # R135
     def test_fifo_swapped_in_after_check_does_not_block(self) -> None:
         path = self.write({"profile": "x", "api_version": 1, "extends": "standard"})
         orig_stat, orig_open = pathlib.Path.stat, snmp_profiles.os.open
         swapped: list = []
 
         def swap(p: object) -> None:
-            # once, at whichever of stat()/open() runs first: covers today's os.open and a stat()-then-open() variant (W20)
+            # once, at whichever of stat()/open() runs first: covers today's os.open and a stat()-then-open() variant
             if not swapped and Path(p) == path:
                 swapped.append(True)
                 os.unlink(path)
@@ -112,7 +106,6 @@ class ProfileFileTest(unittest.TestCase):
         os.mkfifo(path)
         self.assertIn("not a regular file", self.error(path))
 
-    # R136
     def test_api_version_message_is_capped(self) -> None:
         for data in ({"api_version": 2, "profile": "A" * 200000}, {"api_version": [0] * 80000}):
             with self.subTest(n=len(json.dumps(data))):
@@ -122,7 +115,6 @@ class ProfileFileTest(unittest.TestCase):
         msg = self.error(self.write({"api_version": 1, "profile": "A" * 200000, "extends": ["x"]}))
         self.assertLess(len(msg), 300)
 
-    # R137
     def test_unknown_section_key_is_quoted_and_capped(self) -> None:
         msg = self.error(self.write({"api_version": 1, "profile": "x", "extends": "standard", "fdb": {"a\nsnmp profile 'x': fake\u001b[2J": 1}}))
         self.assertNotIn("\n", msg)
@@ -134,20 +126,18 @@ class ProfileFileTest(unittest.TestCase):
         msg = self.error(self.write({"api_version": 1, "profile": "x", "extends": "standard", "fdb": {"typo": 1}}))
         self.assertIn("unknown key fdb.typo", msg)
 
-    # R138
     def test_profile_name_in_validate_message_is_capped(self) -> None:
         msg = self.error(self.write({"api_version": 1, "extends": "standard", "profile": "x" * 200000, "fdb": {"strategy": "bad"}}))
         self.assertLess(len(msg), 300)
         self.assertIn("fdb.strategy 'bad'", msg)
 
-    # S14x
     def test_short_map_applies_longest_key_first(self) -> None:
         p = snmp_profiles.load_file(self.write({"profile": "x", "api_version": 1, "extends": "standard",
                                                 "port_name": {"short": {"GigabitEthernet": "GE", "Ten-GigabitEthernet": "XGE"}}}))
         self.assertEqual(short_ifname("Ten-GigabitEthernet1/0/49", p["port_name"]["short"]), "XGE1/0/49")
         self.assertEqual(short_ifname("GigabitEthernet1/0/1", p["port_name"]["short"]), "GE1/0/1")
 
-    # V31, V32, V90 (round 2): a section key is shown as written, delimited when it is not a plain name, and a cut is marked
+    # a section key is shown as written, delimited when it is not a plain name, and a cut is marked
     def test_section_key_message_shows_non_ascii_as_written(self) -> None:
         msg = self.error(self.write({"api_version": 1, "profile": "x", "extends": "standard", "fdb": {"l\u00e4nk": 1}}))
         self.assertIn("unknown key fdb.l\u00e4nk", msg)
@@ -166,14 +156,14 @@ class ProfileFileTest(unittest.TestCase):
         msg = self.error(self.write({"api_version": 1, "profile": "x", "extends": "standard", "fdb": {"x; missing key fdb.strategy": 1}}))
         self.assertIn("unknown key fdb.'x; missing key fdb.strategy'", msg)
 
-    # V33 (round 2): a device node must not become the controlling terminal while it is being rejected
+    # a device node must not become the controlling terminal while it is being rejected
     def test_open_uses_noctty(self) -> None:
         path = self.write({"profile": "x", "api_version": 1, "extends": "standard"})
         with mock.patch.object(snmp_profiles.os, "open", wraps=os.open) as m:
             snmp_profiles.load_file(path)
         self.assertTrue(m.call_args.args[1] & os.O_NOCTTY)
 
-    # V35 (round 2): MAX_DEPTH keeps resolving far from the recursion limit, so the deepest allowed file still validates
+    # MAX_DEPTH keeps resolving far from the recursion limit, so the deepest allowed file still validates
     def test_max_depth_file_reaches_validation(self) -> None:
         old = sys.getrecursionlimit()
         sys.setrecursionlimit(200)
@@ -183,7 +173,7 @@ class ProfileFileTest(unittest.TestCase):
             sys.setrecursionlimit(old)
         self.assertIn("unknown key 'deep'", msg)
 
-    # V89 (round 2): "_" comment keys are allowed in oids too
+    # "_" comment keys are allowed in oids too
     def test_comment_key_in_oids_is_allowed(self) -> None:
         p = snmp_profiles.load_file(self.write({"profile": "x", "api_version": 1, "extends": "standard", "oids": {"_comment": "vendor MIB"}}))
         self.assertEqual(p["oids"]["_comment"], "vendor MIB")
@@ -191,13 +181,13 @@ class ProfileFileTest(unittest.TestCase):
                                      "fdb": {"strategy": "cisco_per_vlan", "vlan_source": "_comment"}}))
         self.assertIn("fdb.vlan_source", msg)
 
-    # V91 (round 2): the message does not grow with the number of unknown keys
+    # the message does not grow with the number of unknown keys
     def test_many_unknown_keys_give_bounded_message(self) -> None:
         msg = self.error(self.write({"profile": "x", "api_version": 1, "extends": "standard", "fdb": {hex(i): 0 for i in range(20000)}}))
         self.assertLess(len(msg), 1000)
         self.assertIn("more", msg)
 
-    # V92 (round 2): an empty short key is reported even when a value is also wrong
+    # an empty short key is reported even when a value is also wrong
     def test_empty_short_key_and_bad_value_both_reported(self) -> None:
         msg = self.error(self.write({"profile": "x", "api_version": 1, "extends": "standard", "port_name": {"short": {"": 1}}}))
         self.assertIn("values must be strings", msg)
@@ -209,7 +199,6 @@ class SocketFileAndCommentKeyTest(unittest.TestCase):
     # the helpers only: subclassing would run every ProfileFileTest test twice
     setUp, write, error = ProfileFileTest.setUp, ProfileFileTest.write, ProfileFileTest.error
 
-    # W21
     def test_unix_socket_is_not_a_regular_file(self) -> None:
         import socket
         path = Path(self.tmp.name, "s.json")
@@ -218,7 +207,6 @@ class SocketFileAndCommentKeyTest(unittest.TestCase):
         sock.bind(str(path))
         self.assertIn("not a regular file", self.error(path))
 
-    # W22
     def test_private_oids_cannot_name_a_comment_key(self) -> None:
         for val in ("see vendor doc", ["a"]):
             with self.subTest(val=val):

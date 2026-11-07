@@ -39,7 +39,7 @@ class CollectorTests(unittest.TestCase):
         d = m["aa:bb:cc:dd:ee:01"]
         self.assertEqual(d.hostname, "phone"); self.assertTrue(d.online); self.assertEqual(d.sources, {"dhcp", "arp"}); self.assertEqual(d.lease_type, "dynamic")
 
-    # B-08.3: an injected client is not a reason to skip check(); the connector's check() runs against it
+    # an injected client is not a reason to skip check(); the connector's check() runs against it
     def test_injected_client_is_checked(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5")])
         calls = []
@@ -337,7 +337,7 @@ class MergeEventAndMailTests(unittest.TestCase):
         from leasewatch import notify
         os.environ.update({"MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example", "MAIL_TO": "a@example.lan"})
         c = FakeClient([S("02:00:00:00:00:09", "10.0.0.9")]); col = Collector(Config(), self.db, c); col.run_once()
-        now = int(time.time())  # 60 older queued devices (S4 T-09: the queue is devices.mail_queued)
+        now = int(time.time())  # 60 older queued devices (the queue is devices.mail_queued)
         for i in range(60):
             self.db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)",
                       (f"02:00:00:00:01:{i:02x}", now, now, now - 60))
