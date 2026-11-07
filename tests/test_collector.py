@@ -195,10 +195,12 @@ class FixRegressionTests(unittest.TestCase):
         from leasewatch import notify
         from unittest import mock
         sent = []
+        # 1.2: new_devices() sends only through configured channels
+        os.environ.update({"MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com", "MAIL_TO": "a@example.com"})
         # patched only inside this block, so later tests get the real _send back
         with mock.patch.object(notify, "_send", lambda cfg, subject, text: sent.append((subject, text))):
             devs = [{"mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.5", "hostname": "pc", "vendor": "Acme", "vlan": "LAN", "lease_type": "dynamic"}]
-            notify.new_devices(self.cfg, devs)
+            notify.new_devices(Config(), devs)
             self.assertEqual(sent[-1][0], "New device: pc (10.0.0.5, LAN)"); self.assertNotIn("acknowledge", sent[-1][1])  # no PUBLIC_URL: no link
             os.environ["PUBLIC_URL"] = "https://leases.example.lan"
             notify.new_devices(Config(), devs + devs)

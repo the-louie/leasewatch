@@ -536,7 +536,8 @@ def collect_cmd(argv: list[str]) -> int:
 def startup_line(cfg: Config, version: str) -> str:
     """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail."""
     conns = ", ".join(f"{s.name} ({s.type})" for s in cfg.instances)
-    return f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {'on' if cfg.mail_enabled else 'off'}"
+    mail = f"on ({', '.join(cfg.mail_channels)})" if cfg.mail_enabled else "off"  # channel names only, no settings
+    return f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {mail}"
 
 
 def hash_password_cmd(argv: list[str]) -> int:

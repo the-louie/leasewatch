@@ -372,6 +372,8 @@ class Collector:
     def _notify(self) -> None:
         """Mail the queued new devices (devices.mail_queued), up to MAIL_BATCH per mail, oldest first.
 
+        The batch goes to every channel; the queue is cleared when at least one delivered (owner answer S5 Q3: a
+        channel that failed misses that batch, logged by notify), and kept when all failed.
         Delivery is at-least-once: if the mail goes out and the UPDATE that clears the queue fails (or the process
         dies in between), the same devices are mailed again at the next poll."""
         if not self.cfg.mail_enabled:

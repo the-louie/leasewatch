@@ -1,6 +1,7 @@
 """Configuration from environment variables (see .env.example)."""
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import os
@@ -13,10 +14,11 @@ from typing import Mapping
 from urllib.parse import urlparse
 
 from .auth import parse_hash
-from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, load_problems, registry, secret_keys,
-                         url_has_credentials)
+from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, load_problems, parse_bool, registry,
+                         secret_keys, url_has_credentials, url_problems)
 
 ENV_PREFIX = "LW_CONNECTOR__"
+SMTP_PORTS = {"starttls": 587, "tls": 465, "none": 25}  # SMTP_TLS -> default SMTP_PORT
 MAX_SECRET_FILE = 64 * 1024  # bytes of a <KEY>_FILE; a secret is a few hundred at most
 
 log = logging.getLogger("leasewatch.config")
@@ -36,6 +38,14 @@ def _env_int(name: str, default: int) -> int:
         # capped: a long junk value would otherwise fill the log line
         log.warning("%s=%r is not an integer, using %d", name, v[:40], default)
         return default
+
+
+def _is_address(addr: str) -> bool:
+    """A plausible mail address: an "@" with text on both sides, no blank or control character (a CR/LF would
+    inject a header)."""
+    a = addr.strip()
+    local, at, domain = a.rpartition("@")
+    return bool(local and at and domain) and not any(c.isspace() or unicodedata.category(c) == "Cc" for c in a)
 
 
 def _is_http(url: str) -> bool:
@@ -219,6 +229,19 @@ class Config:
     # optional basic auth for every path; on only when both are set (python -m leasewatch hash-password)
     auth_user: str = field(default_factory=lambda: _env("AUTH_USER"))
     auth_password_hash: str = field(default_factory=lambda: _env("AUTH_PASSWORD_HASH"), repr=False)
+    # mail through an SMTP server (on when SMTP_HOST, SMTP_FROM and MAIL_TO are set). TLS: starttls (required, never
+    # downgraded), tls (implicit, SMTPS) or none; SMTP_PORT -1 = the default for the TLS mode (set in __post_init__)
+    smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST"))
+    smtp_tls: str = field(default_factory=lambda: _env("SMTP_TLS", "starttls").lower() or "starttls")
+    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", -1))
+    smtp_user: str = field(default_factory=lambda: _env("SMTP_USER"))
+    smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD"), repr=False)
+    smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM"))
+    smtp_verify_tls: str = field(default_factory=lambda: _env("SMTP_VERIFY_TLS", "1"))
+    # a POST per batch of new devices; the URL often carries the token (Discord, Home Assistant), so it is a secret
+    webhook_url: str = field(default_factory=lambda: _env("WEBHOOK_URL"), repr=False)
+    webhook_secret: str = field(default_factory=lambda: _env("WEBHOOK_SECRET"), repr=False)
+    webhook_format: str = field(default_factory=lambda: _env("WEBHOOK_FORMAT", "json").lower() or "json")
     # connector instances from LW_CONNECTORS (the only way to configure a source)
     connector_specs: list = field(default_factory=list, init=False)
     connector_problems: list = field(default_factory=list, init=False, repr=False)
@@ -228,6 +251,8 @@ class Config:
         # B-08.1: load the third-party types first, so parse_instances() -> secret_keys() knows a plugin type's
         # secret keys and reads its <KEY>_FILE instead of calling it an unknown setting
         registry()
+        if self.smtp_port == -1:
+            self.smtp_port = SMTP_PORTS.get(self.smtp_tls, 587)
         self.connector_specs, problems = parse_instances(os.environ)
         self.connectors_listed = bool(_env("LW_CONNECTORS"))
         if not self.connectors_listed:
@@ -269,8 +294,59 @@ class Config:
         return bool(self.auth_user and self.auth_password_hash)
 
     @property
+    def mail_channels(self) -> list[str]:
+        """The notification channels whose settings are complete, in send order."""
+        out = []
+        if self.mailgun_key and self.mailgun_domain and self.mail_to:
+            out.append("mailgun")
+        if self.smtp_host and self.smtp_from and self.mail_to:
+            out.append("smtp")
+        if self.webhook_url:
+            out.append("webhook")
+        return out
+
+    @property
     def mail_enabled(self) -> bool:
-        return bool(self.mailgun_key and self.mailgun_domain and self.mail_to)
+        """Any notification channel is configured (the name predates SMTP and webhooks)."""
+        return bool(self.mail_channels)
+
+    def _notify_problems(self) -> list[str]:
+        """SMTP and webhook settings. Never echoes a value: the password, the URL (token) and the secret are secrets,
+        and the addresses are personal data."""
+        problems = []
+        if self.smtp_tls not in SMTP_PORTS:
+            problems.append("SMTP_TLS must be starttls, tls or none")
+        if self.smtp_host:
+            if not 1 <= self.smtp_port <= 65535:
+                problems.append("SMTP_PORT must be 1-65535")
+            if not _is_address(self.smtp_from):
+                problems.append("SMTP_FROM must be an e-mail address (required with SMTP_HOST)")
+            if not self.mail_to or not all(_is_address(a) for a in self.mail_to.split(",")):
+                problems.append("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)")
+            if bool(self.smtp_user) != bool(self.smtp_password):
+                problems.append("SMTP_USER and SMTP_PASSWORD must be set together")
+            if self.smtp_password and self.smtp_tls == "none":
+                # the password would cross the network in clear text
+                problems.append("SMTP_PASSWORD needs SMTP_TLS=starttls or tls")
+            if parse_bool(self.smtp_verify_tls) is None:
+                problems.append("SMTP_VERIFY_TLS must be 1 or 0")
+        if self.webhook_url:
+            problems += url_problems("WEBHOOK_URL", self.webhook_url, "https://<host>/<path>")
+            if self.webhook_format == "ntfy" and _is_http(self.webhook_url):
+                try:
+                    topic = urlparse(self.webhook_url).path.rstrip("/").rsplit("/", 1)[-1]
+                except ValueError:
+                    topic = "-"  # reported by url_problems
+                if not topic:
+                    problems.append("WEBHOOK_URL needs a topic (https://<host>/<topic>) with WEBHOOK_FORMAT=ntfy")
+        if self.webhook_format not in ("json", "ntfy", "discord"):
+            problems.append("WEBHOOK_FORMAT must be json, ntfy or discord")
+        if self.webhook_secret.startswith("whsec_"):
+            try:
+                base64.b64decode(self.webhook_secret[6:], validate=True)
+            except ValueError:
+                problems.append("WEBHOOK_SECRET: the whsec_ value is not valid base64")
+        return problems
 
     def validate(self) -> list[str]:
         problems = []
@@ -323,6 +399,7 @@ class Config:
             problems.append("AUTH_USER must not contain ':' or control characters")  # Basic splits on the first ':'
         if self.auth_password_hash and parse_hash(self.auth_password_hash) is None:
             problems.append("AUTH_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")
+        problems += self._notify_problems()
         problems += self.connector_problems
         for spec in self.connector_specs:
             problems += instance_problems(spec)
