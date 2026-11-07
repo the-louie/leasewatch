@@ -1,5 +1,5 @@
 """Regression tests for the QA 1.1 merge findings: normalise_batch coercion, lease and location fallbacks, attachments."""
-import logging, os, sqlite3, sys, tempfile, unittest
+import logging, os, sqlite3, sys, unittest
 from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

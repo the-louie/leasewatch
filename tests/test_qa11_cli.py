@@ -1,5 +1,5 @@
 """QA 1.1 regression tests for the command line (`python -m leasewatch ...`, leasewatch/__main__.py)."""
-import contextlib, io, logging, os, sqlite3, subprocess, sys, tempfile, unittest
+import contextlib, io, logging, os, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

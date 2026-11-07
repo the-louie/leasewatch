@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore, sources
-from leasewatch import snmp_profiles, switch
+from leasewatch import snmp_profiles
 from leasewatch.__main__ import main
 from leasewatch.snmp_profiles import ProfileError
 from leasewatch.switch import SwitchClient, build_snapshot, short_ifname

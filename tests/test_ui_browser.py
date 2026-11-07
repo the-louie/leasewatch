@@ -177,7 +177,7 @@ class BrowserUITest(_BrowserCase):
     def test_network_chips_filter(self) -> None:
         d = self.result("chips")
         want = {}
-        for _, h, net, on, _ in DEVICES:
+        for _, h, net, _on, _ in DEVICES:
             want.setdefault(net, set()).add(h)
         self.assertEqual({c["vlan"] for c in d["chips"]}, set(NETS))
         for c in d["chips"]:

@@ -1,5 +1,5 @@
 """merge() called directly with Batch objects: (prev rows, batches, state) -> rows, events, history."""
-import itertools, logging, os, sys, tempfile, unittest
+import itertools, os, sys, tempfile, unittest
 from dataclasses import replace
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

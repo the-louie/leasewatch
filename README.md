@@ -128,6 +128,8 @@ Login is optional and off by default. Without it the page is meant for a trusted
 
 No test may reach the network: `tests/_netguard.py` (installed for every module, and for the contrib suites) fails any test that connects to or resolves a non-loopback address, even when the code under test swallows the error; fake or stub the client instead.
 
+`ruff check .` — lint (rules and exceptions in `pyproject.toml`); install it for development with `pip install ruff`.
+
 ## License
 
 MIT — see `LICENSE`.

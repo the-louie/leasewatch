@@ -16,9 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore, sources, swap_client  # noqa: E402
 from leasewatch.collector import MAX_BACKOFF, SKIPPED, Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, InstanceSpec,  # noqa: E402
+from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo,  # noqa: E402
                                    Setting, SettingsMixin, Sighting, registry)
-from leasewatch import snmp_profiles  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
 from leasewatch.fw1 import Fw1Error  # noqa: E402
 from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402

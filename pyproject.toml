@@ -28,3 +28,21 @@ include = ["leasewatch", "leasewatch.*"]
 [tool.setuptools.package-data]
 leasewatch = ["static/*"]
 "leasewatch.snmp_profiles" = ["*.json"]
+
+[tool.ruff]
+target-version = "py312"
+# the code base is written in long lines: 99.4% of lines fit in 140; longer ones are left as they are (E501 off)
+line-length = 140
+# build/, dist/, .venv/, venv/ and friends (also inside contrib/*) are in ruff's default exclude list
+extend-exclude = ["_doc"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+# house style, not bugs: long lines, short `x = 1; y = 2` and `if c: return` lines, named lambdas, `l` as a name;
+# B905: zip() over lists of the same length, an explicit strict= adds nothing
+ignore = ["E501", "E701", "E702", "E731", "E741", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests: `import os, sys` lines, one-letter stub classes, closures called within their own loop pass,
+# and raising inside except on purpose to build an exception chain
+"**/tests/**" = ["E401", "E742", "B023", "B904"]
