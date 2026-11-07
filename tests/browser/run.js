@@ -325,6 +325,31 @@ const scenarios = {
     res.end = await widths();
     return res;
   },
+  // archive from the drawer hides the row; the "Archived" filter shows it; restore brings it back (changes server state)
+  async archive(page) {
+    const M = '0a:00:00:00:10:03';
+    const macs = () => page.$$eval('#rows tr', trs => trs.map(t => t.dataset.mac));
+    const total = () => page.$eval('#cTotal', e => e.textContent);
+    const label = () => page.$eval('#fArch', e => e.textContent);
+    const filter = v => page.evaluate(x => { const s = document.querySelector('#fStatus'); s.value = x; s.dispatchEvent(new Event('change')); }, v);
+    const res = {};
+    await page.click(`${row(M)} .c-dev`); await waitOpen(page, M);
+    res.before = { rows: await macs(), label: await label(), total: await total() };
+    await page.click('#fArch');
+    await page.waitForFunction(s => !document.querySelector(s) && document.querySelector('#fArch').textContent === 'Restore to list', {}, row(M));
+    res.archived = { rows: await macs(), label: await label(), total: await total(), server: (await serverDevice(page, M)).archived_ts };
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await filter('archived');
+    res.filter = { rows: await macs() };
+    await page.click(`${row(M)} .c-dev`); await waitOpen(page, M);
+    await page.click('#fArch');
+    await page.waitForFunction(s => !document.querySelector(s) && document.querySelector('#fArch').textContent === 'Archive', {}, row(M));
+    res.restored = { label: await label(), filter_rows: await macs(), server: (await serverDevice(page, M)).archived_ts };
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await filter('all');
+    res.restored.rows = await macs(); res.restored.total = await total();
+    return res;
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};

@@ -170,6 +170,7 @@
     const q = state.q.trim().toLowerCase();
     const list = state.devices.filter(d => {
       if (state.vlan !== null && d.vlan !== state.vlan) return false; // null = no filter; "" is the unnamed network
+      if ((d.archived_ts != null) !== (state.status === "archived")) return false; // archived devices only under their own filter
       switch (state.status) {
         case "new": if (!isNew(d)) return false; break;
         case "unacked": if (d.acked || d.baseline) return false; break;
@@ -293,7 +294,7 @@
       ul.appendChild(li);
     }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
@@ -387,7 +388,8 @@
         <dt>First seen</dt><dd>${d.baseline ? `since the start (${esc(abs(state.meta.baseline_ts))})` : esc(abs(d.first_seen))}${isNew(d) ? ' <span class="badge new">NEW</span>' : ""}</dd>
         <dt>Last online</dt><dd>${d.last_online ? esc(abs(d.last_online)) : "never"} <span class="muted">· last listed by the firewall ${esc(abs(d.last_seen))}</span></dd>
         ${seenHtml(r.seen)}
-        <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : d.baseline ? "yes, present at the start" : "not yet"}</dd>`;
+        <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : d.baseline ? "yes, present at the start" : "not yet"}</dd>
+        ${d.archived_ts != null ? `<dt>Archived</dt><dd>${esc(abs(d.archived_ts))} <span class="muted">· not in the list until it is online again</span></dd>` : ""}`;
     // don't clobber an edit in progress, but show what a save changed outside the form (Known and the ack button)
     if (edited()) { $("dl.kv", b).innerHTML = kv; drawerActions(d); return; } // the user is typing: focus stays put
     // rebuilding the body drops keyboard focus: note the focused control (and caret) to focus its replacement
@@ -402,6 +404,7 @@
         <div class="actions">
           <button class="btn" id="fSave">Save</button>
           <button class="btn" id="fAck"></button>
+          <button class="btn" id="fArch"></button>
           <span class="saved" id="fSaved"></span>
         </div>
       </div>
@@ -424,6 +427,10 @@
     ack.textContent = d.acked ? "Mark unknown" : d.baseline ? "Save & mark checked" : "Save & mark known";
     save.onclick = () => setFields(d.mac, { name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
     ack.onclick = () => setFields(d.mac, { acked: !d.acked, name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
+    // posts only the archive state: typed Name/Note stay an unsaved edit (the drawer stays open on the device)
+    const arch = $("#fArch"), archived = d.archived_ts != null;
+    arch.textContent = archived ? "Restore to list" : "Archive";
+    arch.onclick = () => setFields(d.mac, { archived: !archived }, $("#fName"));
   }
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)

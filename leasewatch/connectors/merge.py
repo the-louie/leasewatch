@@ -166,11 +166,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
                   "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
-                  "client_id")
+                  "client_id", "archived_ts")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
-                "wifi_alias": "", "link": "", "loc_source": "", "client_id": ""}
+                "wifi_alias": "", "link": "", "loc_source": "", "client_id": "",
+                "archived_ts": None}
 
 
 @dataclass
@@ -460,8 +461,15 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                 lease_type = ""
                 state.no_lease_since.pop(mac, None)
                 ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
+        # S4 archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
+        # archived device back to the list; this `back` replaces the ordinary one. One archived while still online
+        # stays archived until it has been offline
+        if cur["archived_ts"] is not None and m.online and not cur["online"]:
+            days = max(0, now - cur["archived_ts"]) // 86400
+            ev.append(("back", f"back from the archive (archived {days} day{'' if days == 1 else 's'} ago)"))
+            cur["archived_ts"] = None
         # prev_ok: after a failed poll every device looks "away" for the outage, so "back" would be a false positive
-        if m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and state.prev_ok:
+        elif m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and state.prev_ok:
             days = (now - cur["last_online"]) // 86400
             ev.append(("back", f"back after {days} day{'' if days == 1 else 's'}"))
         res.events += [(mac, kind, detail) for kind, detail in ev]
@@ -494,6 +502,15 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
+    # PRUNE_DAYS (owner answer): archive what has been offline that long and was never named or marked known; the
+    # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
+    if cfg.prune_days > 0 and not state.first_run:
+        cutoff = now - cfg.prune_days * 86400
+        for mac, row in rows.items():
+            since = row["last_online"] or row["first_seen"]
+            if row["archived_ts"] is None and not row["online"] and since < cutoff and not row["name"] and not row["acked"]:
+                row["archived_ts"] = now
+                res.events.append((mac, "archived", f"auto: not online for {(now - since) // 86400} days"))
     if state.first_run:
         # B-09 (owner decision 2026-11-06): until the baseline is taken, a producer answering late only completes the
         # first picture (e.g. "hostname - -> laptop"), so it is no change: no events, and no history until the poll

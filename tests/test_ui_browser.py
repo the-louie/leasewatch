@@ -201,9 +201,9 @@ class BrowserUITest(_BrowserCase):
         d = self.result("trap")
         self.assertEqual(d["bg_before"], [False, False, False])
         self.assertEqual(d["bg_open"], [True, True, True])  # header, main, footer
-        # Tab from Name: Note, Save, the ack button, then around to Close and Name again
-        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fSave", "fAck", "dClose", "fName", "fNote"])
-        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fAck", "fSave", "fNote", "fName", "dClose", "fAck"])
+        # Tab from Name: Note, Save, the ack and archive buttons, then around to Close and Name again
+        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fSave", "fAck", "fArch", "dClose", "fName"])
+        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fArch", "fAck", "fSave", "fNote", "fName", "dClose"])
         self.assertTrue(all(t["in_drawer"] for t in d["tab"] + d["shift_tab"]))
         self.assertTrue(d["q_focus"]["in_drawer"], d["q_focus"])
         self.assertEqual(d["bg_closed"], [False, False, False])
@@ -298,7 +298,7 @@ class BrowserPrivateTest(_BrowserCase):
         first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
         base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
         assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
-        cls.run_scenarios(base, ("private", "copy"))
+        cls.run_scenarios(base, ("private", "copy", "archive"))  # archive changes server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -348,6 +348,24 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertFalse(d["keys"]["open"])
         self.assertEqual(d["tab_to"], "c-mac mono")
         self.assertEqual(d["keys"]["role"], ["button", 0])
+
+    def test_archive_hides_the_row_and_restore_brings_it_back(self) -> None:
+        d = self.result("archive")
+        self.assertEqual(d["before"]["label"], "Archive")
+        self.assertIn(self.OTHER, d["before"]["rows"])
+        # archived: the row leaves the list (the drawer stays open on it), the total card no longer counts it
+        self.assertNotIn(self.OTHER, d["archived"]["rows"])
+        self.assertEqual(d["archived"]["label"], "Restore to list")
+        self.assertIsInstance(d["archived"]["server"], int)
+        self.assertEqual(int(d["archived"]["total"]), int(d["before"]["total"]) - 1)
+        # the "Archived" status filter shows only archived devices
+        self.assertEqual(d["filter"]["rows"], [self.OTHER])
+        # restore from the drawer: back in the list
+        self.assertIsNone(d["restored"]["server"])
+        self.assertEqual(d["restored"]["label"], "Archive")
+        self.assertEqual(d["restored"]["filter_rows"], [])
+        self.assertIn(self.OTHER, d["restored"]["rows"])
+        self.assertEqual(d["restored"]["total"], d["before"]["total"])
 
     def test_hover_and_copy_keep_the_table_width(self) -> None:
         d = self.result("copy")

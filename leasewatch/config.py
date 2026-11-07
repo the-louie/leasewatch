@@ -202,6 +202,8 @@ class Config:
     new_days: int = field(default_factory=lambda: _env_int("NEW_DAYS", 7))
     # a device not seen for this long is "offline" even if a lease is still active
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))
+    # archive devices not online for this many days that have no name and are not marked known; 0 = off
+    prune_days: int = field(default_factory=lambda: _env_int("PRUNE_DAYS", 0))
     # mail on new devices (Mailgun HTTP API); leave MAILGUN_KEY empty to disable
     mailgun_key: str = field(default_factory=lambda: _env("MAILGUN_KEY"), repr=False)
     mailgun_domain: str = field(default_factory=lambda: _env("MAILGUN_DOMAIN"))
@@ -296,6 +298,10 @@ class Config:
             problems.append("ONLINE_GRACE_MINUTES must not be negative")
         if self.online_grace_minutes > 10080:
             problems.append("ONLINE_GRACE_MINUTES must be at most 10080")
+        if self.prune_days < 0:
+            problems.append("PRUNE_DAYS must not be negative")
+        if self.prune_days > 3650:
+            problems.append("PRUNE_DAYS must be at most 3650")
         if self.lease_type_mode not in ("keep", "grace", "immediate"):
             problems.append("LEASE_TYPE_MODE must be keep, grace or immediate")
         if self.poll_seconds < 15:

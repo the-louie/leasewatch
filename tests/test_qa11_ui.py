@@ -157,16 +157,16 @@ const tpl = { content: { cloneNode: () => ({ firstElementChild: new El("TR") }) 
 const body = new El(); body.parent = null;
 // the drawer body: pick the controls out of the HTML the code writes, as a browser would build them
 body.onHtml = h => {
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fSaved"]) delete byId[id];
+  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fSaved"]) delete byId[id];
   const kv = /<dl class="kv">([\s\S]*?)<\/dl>/.exec(h);
   body.kv = new El("DL"); body.kv.parent = body; body.kv._html = kv ? kv[1] : "";
   const name = /id="fName"[^>]*value="([^"]*)"/.exec(h);
   if (name) { byId.fName = new El("INPUT"); byId.fName.value = name[1]; }
   const note = /<textarea id="fNote"[^>]*>([^<]*)<\/textarea>/.exec(h);
   if (note) { byId.fNote = new El("TEXTAREA"); byId.fNote.value = note[1]; }
-  for (const id of ["fSave", "fAck"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
+  for (const id of ["fSave", "fAck", "fArch"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
   if (/id="fSaved"/.test(h)) byId.fSaved = new El("SPAN");
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fSaved"]) if (byId[id]) byId[id].parent = body;
+  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fSaved"]) if (byId[id]) byId[id].parent = body;
 };
 const els = { "#rows": rows, "#rowTpl": tpl, "#dBody": body };
 const $ = (s, el) => {

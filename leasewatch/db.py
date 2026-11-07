@@ -185,7 +185,8 @@ class Database:
             rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac) ORDER BY e.ts DESC, e.id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
-    def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None) -> dict | None:
+    def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
+                           archived: bool | None = None) -> dict | None:
         with self.tx() as c:
             cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
             if not cur:
@@ -199,19 +200,28 @@ class Database:
                 sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
             if note is not None:
                 sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
+            # archive: the device leaves the list and the mail queue; the same state again changes nothing
+            arch_change = archived is not None and (cur["archived_ts"] is not None) != archived
+            if arch_change:
+                sets.append("archived_ts=?"); params.append(int(time.time()) if archived else None)
+                if archived:
+                    sets.append("mail_queued=NULL")
             if sets:
                 params.append(mac)
                 c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
                 if acked is not None and bool(cur["acked"]) != bool(acked):
                     c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), mac, "acked" if acked else "unacked", ""))
+                if arch_change:
+                    c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), mac, "archived" if archived else "restored", ""))
             return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone())
 
     def stats(self, new_days: int) -> dict:
         now = int(time.time())
         with self._lock:  # one lock hold: the three counts must not straddle a collector write
-            rows = self._conn.execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices GROUP BY vlan ORDER BY n DESC").fetchall()
+            # archived devices are not in the list, so not in its counts; the arrivals chart below keeps them
+            rows = self._conn.execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices WHERE archived_ts IS NULL GROUP BY vlan ORDER BY n DESC").fetchall()
             recent = self._conn.execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
-            tot = self._conn.execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices", (now - new_days * 86400,)).fetchone()
+            tot = self._conn.execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],

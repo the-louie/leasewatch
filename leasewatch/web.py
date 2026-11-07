@@ -235,12 +235,15 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             acked = body.get("acked")
             name = body.get("name")
             note = body.get("note")
+            archived = body.get("archived")
             if acked is not None and not isinstance(acked, bool):
                 return self._error(400, "acked must be boolean")
             if name is not None and not isinstance(name, str):
                 return self._error(400, "name must be a string")
             if note is not None and not isinstance(note, str):
                 return self._error(400, "note must be a string")
+            if archived is not None and not isinstance(archived, bool):
+                return self._error(400, "archived must be boolean")
             for field, s in (("name", name), ("note", note)):
                 try:
                     if s is not None:
@@ -249,7 +252,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                     # the JSON itself is valid, so "bad json" would point the user at the wrong cause
                     return self._error(400, f"{field} must be valid Unicode text")
             try:
-                d = db.update_user_fields(mac, acked, name, note)
+                d = db.update_user_fields(mac, acked, name, note, archived)
             except Exception:
                 log.exception("POST %s failed", p)
                 return self._error(500, "internal error")
@@ -266,11 +269,11 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
             def ts(t: int | None) -> str:
                 return time.strftime("%Y-%m-%dT%H:%M%z", time.localtime(t)) if t else ""  # ISO 8601 with the server's UTC offset
-            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private", "note"])
+            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private", "archived", "note"])
             for d in db.devices():
                 w.writerow([d["mac"], d["ip"], cell(d["name"]), cell(d["hostname"]), cell(d["vendor"]), d["vlan"], d["lease_type"], d["sources"], d["online"],
                             d["link"], cell(d["sw_port"]), cell(d["sw_via"]), cell(d["loc_source"]), cell(d["wifi_ssid"]), cell(d["wifi_ap"]), d["wifi_signal"] if d["wifi_signal"] is not None else "",
-                            ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))), cell(d["note"])])
+                            ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))), ts(d["archived_ts"]), cell(d["note"])])
             self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="leasewatch-devices.csv"'})
 
     return Handler

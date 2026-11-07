@@ -16,7 +16,7 @@ from leasewatch.config import REMOVED_VARS  # noqa: E402
 # Derived with: grep -oE '_env(_int)?\("[A-Z0-9_]+"' leasewatch/config.py. Keep in sync when a setting is added.
 CONFIG_VARS = (
     "ALLOWED_HOSTS", "DATA_DIR", "LEASE_TYPE_MODE", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE",
-    "MAILGUN_DOMAIN", "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PUBLIC_URL",
+    "MAILGUN_DOMAIN", "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PRUNE_DAYS", "PUBLIC_URL",
     "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS", "LW_CONNECTORS_DIR",
 )
 # the removed 1.0 source variables: a shell that still exports one would make every Config() refuse to start
