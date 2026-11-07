@@ -173,12 +173,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
                   "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
-                  "client_id", "archived_ts")
+                  "client_id", "archived_ts", "label")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
                 "wifi_alias": "", "link": "", "loc_source": "", "client_id": "",
-                "archived_ts": None}
+                "archived_ts": None, "label": ""}
 
 
 @dataclass
@@ -194,7 +194,7 @@ class Merged:
     online: bool = False
     client_id: str = ""  # from the chosen lease only
     lease_hostname: str = ""  # the chosen lease's own hostname (option 12), not a fallback from another kind
-    label: str = ""  # see merge_sightings; not stored yet
+    label: str = ""  # see merge_sightings
 
 
 @dataclass(frozen=True)
@@ -480,7 +480,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             rows[mac] = {**ROW_DEFAULTS, "mac": mac, "first_seen": now, "baseline": int(state.first_run), "last_seen": now,
                          "last_online": now if m.online else None, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor,
                          "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online),
-                         "client_id": m.client_id}
+                         "client_id": m.client_id, "label": m.label}
             res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type}))
             if not state.first_run:
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
@@ -536,7 +536,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                    hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
                    iface=iface, lease_type=lease_type, sources=sources, online=int(online),
-                   client_id=m.client_id or cur["client_id"])
+                   client_id=m.client_id or cur["client_id"], label=m.label)
     _apply_attachments(rows, merged, batches, ok, state, res, att_macs)
     # only MACs with a device row: a switch FDB lists MACs no sighting ever named, which would leave orphan rows
     for n, b in ok.items():

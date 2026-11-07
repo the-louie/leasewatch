@@ -836,6 +836,28 @@ class BrowserGuestFlowTest(_BrowserCase):
         self.assertLessEqual(d["table"], 0, d)
 
 
+class BrowserLabelTest(_BrowserCase):
+    """A reservation description (Sighting.label) is the display name of a device with no name, Wi-Fi alias or hostname."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        s = Sighting(mac="00:00:5e:00:53:31", ip="10.0.1.31", hostname="", vendor="Acme", vlan="HomeNet", iface="lan",
+                     source="dhcp", lease_type="static", online=True, label="Kitchen shelf plug")
+        other = Sighting(mac="00:00:5e:00:53:32", ip="10.0.1.32", hostname="laptop", vendor="Acme", vlan="HomeNet", iface="lan",
+                         source="dhcp", lease_type="dynamic", online=True, label="Spare")
+        base, _db = start(cls, [s, other])
+        cls.run_scenarios(base, ("labelsearch",))
+
+    def test_label_is_name_and_searchable(self) -> None:
+        d = self.result("labelsearch")
+        self.assertEqual(sorted(d["names"]), ["Kitchen shelf plug", "laptop"])  # the hostname outranks the label
+        self.assertEqual(d["found"], ["Kitchen shelf plug"])
+        self.assertIn("Label", d["dts"])
+        self.assertEqual(d["dd"], ["Kitchen shelf plug"])
+
+
 class BrowserPerfTest(_BrowserCase):
     """Search on 2000 devices (hostnames dev-0000 .. dev-1999, all on HomeNet)."""
     N = 2000

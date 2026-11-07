@@ -76,6 +76,8 @@ MIGRATIONS = [
     ("devices", "mail_queued", "INTEGER"),
     # the device key this MAC was split from (NULL = never split); a later merge pass reads it to not fold the MAC back
     ("devices", "split_from", "TEXT"),
+    # operator-written text from the DHCP source (a reservation's description); a display fallback, never an identity
+    ("devices", "label", "TEXT NOT NULL DEFAULT ''"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)

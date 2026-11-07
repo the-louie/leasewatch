@@ -372,6 +372,19 @@ const scenarios = {
     return { shown, detail: detail.wifi_presence, none: await read() };
   },
   // a merged MAC typed into the search finds the device it was merged into, and no other row
+  // a device with only a label shows it as its name, the drawer lists it, and the search finds it by it
+  async labelsearch(page) {
+    const names = await rowNames(page);
+    await page.click('#q', { clickCount: 3 });
+    await page.type('#q', 'kitchen shelf');
+    await page.waitForFunction(v => new URLSearchParams(location.search).get('q') === v, {}, 'kitchen shelf');
+    const found = await rowNames(page);
+    await page.click('#rows tr .nm');
+    await page.waitForSelector('#dBody dt');
+    const dts = await page.$$eval('#dBody dt', e => e.map(x => x.textContent));
+    const dd = await page.$$eval('#dBody dt', e => e.filter(x => x.textContent === 'Label').map(x => x.nextElementSibling.textContent));
+    return { names, found, dts, dd };
+  },
   async aliassearch(page) {
     await page.click('#q', { clickCount: 3 });
     await page.type('#q', '06:00:00:00:10:02');

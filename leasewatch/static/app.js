@@ -66,7 +66,7 @@
   // a device without an address sorts after every real one, as an empty vendor does
   const ipCmp = (a, b) => (!a.ip - !b.ip) || ipKey(a.ip).localeCompare(ipKey(b.ip));
   const isNew = d => !d.baseline && state.meta && (state.meta.now - d.first_seen) < state.meta.new_days * 86400;
-  const label = d => d.name || d.wifi_alias || d.hostname || d.vendor || d.mac;
+  const label = d => d.name || d.wifi_alias || d.hostname || d.label || d.vendor || d.mac;
   const typeText = d => d.lease_type === "static" ? "DHCP static" : d.lease_type === "dynamic" ? "DHCP" : "fixed address";
   const sourcesText = s => String(s || "").split(",").filter(Boolean).map(x => x.toUpperCase()).join(" + ");
   // a controller client can come without an SSID (hidden network, mid-association): its AP and signal still place it.
@@ -253,7 +253,7 @@
         case "wired": if (onWifi(d) || (d.link !== "wired" && !d.sw_port)) return false; break;
       }
       if (q) {
-        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${(d.aliases || []).join(" ")}`.toLowerCase();
+        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -320,13 +320,13 @@
       cb.checked = state.sel.has(d.mac); cb.setAttribute("aria-label", `Select ${lbl}`);
       cb.onchange = () => { if (cb.checked) state.sel.add(d.mac); else state.sel.delete(d.mac); paintSel(); };
       $(".c-sel", tr).onclick = ev => { ev.stopPropagation(); if (ev.target !== cb) cb.click(); };
-      nm.classList.toggle("unnamed", !d.name && !d.wifi_alias && !d.hostname); // label() ranks the UniFi alias before the hostname
+      nm.classList.toggle("unnamed", !d.name && !d.wifi_alias && !d.hostname && !d.label); // label() ranks the UniFi alias before the hostname
       if (fresh) nm.insertAdjacentHTML("beforeend", '<span class="badge new">NEW</span>');
       else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", '<span class="badge base">not yet known</span>');
       const sub = [];
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
-      if (!sub.length && !d.name && !d.wifi_alias && !d.hostname) sub.push(`<span class="host">${esc(d.mac)}</span>`);
+      if (!sub.length && !d.name && !d.wifi_alias && !d.hostname && !d.label) sub.push(`<span class="host">${esc(d.mac)}</span>`);
       // a private address says so in words at every width; the sleuth shows here only where the MAC column is hidden
       if (d.private) sub.unshift('<span class="priv-hint"><span class="ico" aria-hidden="true">\u{1F575}\u{FE0F}</span>private address</span>');
       $(".dev-sub", tr).innerHTML = sub.join(" · ");
