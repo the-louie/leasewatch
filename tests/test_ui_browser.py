@@ -46,6 +46,8 @@ DEVICES = [
 ]
 NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
@@ -126,6 +128,8 @@ class _BrowserCase(unittest.TestCase):
         self.assertIsNone(res["error"], res["error"])
         self.assertEqual(res["console_errors"], [])
         self.assertEqual(res["failed_requests"], [])
+        self.assertEqual(res["csp_violations"], [])
+        self.assertEqual(res["csp"], CSP)  # every scenario runs under the policy the server sends
         self.assertTrue(res["pass"])
         return res["details"]
 
@@ -146,6 +150,12 @@ class BrowserUITest(_BrowserCase):
         self.assertEqual(d["title"], "HomeNet Test")
         self.assertEqual(d["rows"], 16)
         self.assertTrue(d["banner_hidden"])
+        # the network colours survive the CSP: a swatch per network and a colour on every event badge
+        self.assertEqual(len(d["swatches"]), len(NETS))
+        for bg in d["swatches"]:
+            self.assertNotIn(bg, ("", "rgba(0, 0, 0, 0)", "transparent"), d["swatches"])
+        self.assertTrue(d["event_badges"]); self.assertNotIn("", d["event_badges"])
+        self.assertEqual(d["favicon"], {"status": 200, "type": "image/svg+xml"})
 
     def test_rows_render_all_devices(self) -> None:
         d = self.result("rows")
@@ -258,6 +268,7 @@ class BrowserUITest(_BrowserCase):
         self.assertTrue(d["click"]["open"])
         self.assertEqual(d["click"]["title"], "sam-phone")
         self.assertEqual(d["click"]["focus"]["id"], "fName")
+        self.assertTrue(d["click"]["badges"]); self.assertNotIn("", d["click"]["badges"])  # network + history badges
         self.assertFalse(d["click_closed"]["open"])
         self.assertEqual(d["click_closed"]["focus"], {"id": None, "tag": "tr", "mac": mac(6)})
         # Enter on a focused row opens it too
@@ -332,6 +343,10 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(seen, "just now")
         self.assertFalse(d["plain"]["table"])
         self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_merged_event_has_a_label(self) -> None:
+        d = self.result("private")
+        self.assertEqual(d["merged_event"], [{"label": "merged address", "detail": f"{self.NEWP} (client-id)"}])
 
     def test_click_and_keys_copy_mac_and_ip(self) -> None:
         d = self.result("copy")

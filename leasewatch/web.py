@@ -24,6 +24,9 @@ log = logging.getLogger("leasewatch.web")
 STATIC_DIR = os.path.realpath(os.path.join(os.path.dirname(__file__), "static"))
 MAX_BODY = 16 * 1024
 INDEX = os.path.join(STATIC_DIR, "index.html")
+# sent on every response: the page loads only its own script, style and images, and no inline script or style
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # C0/C1 controls as \xNN and "\" as "\\", as the stdlib's own log_message does: a raw request line must not move the
 # cursor or forge lines, and a typed "\x1b" must not read the same as a real ESC
 _LOG_ESCAPE = str.maketrans({ord("\\"): "\\\\", **{c: f"\\x{c:02x}" for c in (*range(0x20), *range(0x7F, 0xA0))}})
@@ -51,7 +54,8 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
         def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
             self.send_response(status)
             headers = {"Content-Type": ctype, "Content-Length": str(len(body)), "X-Content-Type-Options": "nosniff",
-                       "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
+                       "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
+                       "Content-Security-Policy": CSP}
             headers.update(extra or {})
             for k, v in headers.items():
                 self.send_header(k, v)

@@ -19,6 +19,8 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Changed
 
+- **Content-Security-Policy** on every response (page, static files, API, CSV and errors): `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. The page no longer uses inline style attributes (the network colours are set from `data-vc`).
+- **Events:** a `merged` event shows as "merged address" in the event lists (it showed the raw kind).
 - **Copy MAC and IP:** the whole MAC and the whole IP in the device list copy on click, Enter or Space (tooltip "Click to copy", a short "Copied" above the text). The copy icon that appeared on hover, and widened the MAC column, is gone.
 - **Database:** schema 3 adds the device columns `client_id`, `archived_ts` and `mail_queued` and an `aliases` table; the first start migrates a 1.0 or 1.1 database automatically and changes no existing row. The migration is one-way: back up `DATA_DIR` before the upgrade if you may go back to 1.1.
 - **Device table:** the Type column now shows from a 1280 px wide window (was 1601 px); the table width is the same at every width from 1280 px.

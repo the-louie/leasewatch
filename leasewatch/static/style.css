@@ -71,7 +71,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 8px 24px 40px; }
 .chip { display: inline-flex; align-items: center; gap: 7px; background: var(--bg2); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px 5px 8px; font-size: 13px; cursor: pointer; }
 .chip:hover { border-color: var(--accent); }
 .chip.active { background: var(--accent-bg); border-color: var(--accent); }
-.chip .sw { width: 9px; height: 9px; border-radius: 50%; }
+.chip .sw { width: 9px; height: 9px; border-radius: 50%; background: var(--vc); }
 .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }

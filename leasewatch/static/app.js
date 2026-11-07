@@ -25,6 +25,8 @@
 
   // ---------- helpers ----------
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // the CSP blocks style="…" in parsed HTML: templates carry the network colour as data-vc, set here through the CSSOM
+  const paintVc = root => root.querySelectorAll("[data-vc]").forEach(el => el.style.setProperty("--vc", el.dataset.vc));
   const pad = n => String(n).padStart(2, "0");
   const abs = ts => { if (!ts) return "–"; const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const rel = ts => {
@@ -158,7 +160,8 @@
     for (const v of state.stats?.vlans || []) { // no stats before the first good load (Clear filters can run then)
       const c = document.createElement("button"); c.className = "chip" + (state.vlan === v.vlan ? " active" : "");
       c.setAttribute("aria-pressed", state.vlan === v.vlan); c.dataset.vlan = v.vlan ?? "";
-      c.innerHTML = `<span class="sw" style="background:${esc(vlanColor(v.vlan))}"></span>${esc(v.vlan || "?")} <span class="n">${v.online}/${v.n}</span>`;
+      c.innerHTML = `<span class="sw" data-vc="${esc(vlanColor(v.vlan))}"></span>${esc(v.vlan || "?")} <span class="n">${v.online}/${v.n}</span>`;
+      paintVc(c);
       c.title = `${v.online} online of ${v.n} devices`;
       c.onclick = () => { state.vlan = state.vlan === v.vlan ? null : v.vlan; renderVlans(); renderTable(); syncUrl(); };
       box.appendChild(c);
@@ -289,12 +292,13 @@
         if (e.vlan && detail.endsWith(net)) detail = detail.slice(0, -net.length);
         if (e.hostname && who === e.hostname) detail = ` ${detail} `.replace(` ${who} `, " ").trim();
       }
-      li.innerHTML = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span><span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" style="--vc:${esc(vlanColor(e.vlan))}" title="current network of the device">${esc(e.vlan)}</span>` : ""}</span>`;
+      li.innerHTML = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span><span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" data-vc="${esc(vlanColor(e.vlan))}" title="current network of the device">${esc(e.vlan)}</span>` : ""}</span>`;
+      paintVc(li);
       $(".who", li).onclick = () => openDrawer(e.mac);
       ul.appendChild(li);
     }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
@@ -382,7 +386,7 @@
         ${d.private ? '<dt>Address</dt><dd><span class="priv" title="private address"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> private (locally administered): the device may change it</dd>' : ""}
         <dt>Hostname</dt><dd>${esc(d.hostname || "–")}</dd>
         <dt>Vendor</dt><dd>${esc(d.vendor || "unknown")}</dd>
-        <dt>Network</dt><dd><span class="badge vlan" style="--vc:${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="fw1 interface">${esc(d.iface)}</span></dd>
+        <dt>Network</dt><dd><span class="badge vlan" data-vc="${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="fw1 interface">${esc(d.iface)}</span></dd>
         <dt>Type</dt><dd>${esc(typeText(d))} <span class="muted">· seen in ${esc(sourcesText(d.sources))}</span></dd>
         ${whereHtml(d, true) ? `<dt>Connected via</dt><dd>${whereHtml(d, true)}</dd>` : ""}${d.wifi_alias ? `<dt>UniFi name</dt><dd>${esc(d.wifi_alias)}</dd>` : ""}
         <dt>First seen</dt><dd>${d.baseline ? `since the start (${esc(abs(state.meta.baseline_ts))})` : esc(abs(d.first_seen))}${isNew(d) ? ' <span class="badge new">NEW</span>' : ""}</dd>
@@ -391,7 +395,7 @@
         <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : d.baseline ? "yes, present at the start" : "not yet"}</dd>
         ${d.archived_ts != null ? `<dt>Archived</dt><dd>${esc(abs(d.archived_ts))} <span class="muted">· not in the list until it is online again</span></dd>` : ""}`;
     // don't clobber an edit in progress, but show what a save changed outside the form (Known and the ack button)
-    if (edited()) { $("dl.kv", b).innerHTML = kv; drawerActions(d); return; } // the user is typing: focus stays put
+    if (edited()) { $("dl.kv", b).innerHTML = kv; paintVc(b); drawerActions(d); return; } // the user is typing: focus stays put
     // rebuilding the body drops keyboard focus: note the focused control (and caret) to focus its replacement
     const fe = b.contains(document.activeElement) ? document.activeElement : null;
     const fid = fe?.id || "", caret = fe && "selectionStart" in fe ? [fe.selectionStart, fe.selectionEnd] : null;
@@ -410,9 +414,10 @@
       </div>
       ${aliasesHtml(r.aliases)}
       <h3>History</h3>
-      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" style="--vc:${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
+      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
       <h3>Events</h3>
       <ul class="tl">${r.events.map(e => `<li><span class="t">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span> <span class="muted">${esc(String(e.detail || "").replace(" -> ", " → "))}</span></li>`).join("") || '<li class="none">No events</li>'}</ul>`;
+    paintVc(b);
     drawerActions(d);
     state.form = { mac, name: $("#fName").value, note: $("#fNote").value };
     if (focus) $("#fName").focus();

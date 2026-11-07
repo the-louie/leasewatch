@@ -28,6 +28,8 @@ MAC3 = "aa:bb:cc:dd:ee:03"  # new device, ARP only, non-ASCII hostname/vendor
 UNKNOWN = "02:11:22:33:44:55"
 SITE = "Hemnät Test"
 VERSION = "9.9.9-test"
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
        "SITE_NAME": SITE, "MAILGUN_KEY": "", "MAILGUN_DOMAIN": "", "MAIL_TO": "", "POLL_SECONDS": "120"}
 
@@ -629,6 +631,22 @@ class HeaderTests(WebTestCase):
         status, headers, _ = self.req("POST", f"/api/devices/{MAC1}", body=b'{"acked": true}', headers={"Content-Type": "application/json"})
         self.assertEqual(status, 200)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+
+    def test_csp_on_every_response(self):
+        # the page runs under the strictest policy that works: no inline script or style, nothing from elsewhere
+        cases = [("GET", "/", None, {}, 200), ("GET", "/static/app.js", None, {}, 200),
+                 ("GET", "/static/style.css", None, {}, 200), ("GET", "/static/favicon.svg", None, {}, 200),
+                 ("GET", "/api/devices", None, {}, 200), ("GET", "/api/devices.csv", None, {}, 200),
+                 ("GET", "/nope", None, {}, 404), ("HEAD", "/nope", None, {}, 404),
+                 ("PUT", "/api/devices", b"{}", {"Content-Type": "application/json"}, 405),
+                 ("GET", "/api/devices", None, {"Host": "evil.example"}, 421),
+                 ("POST", f"/api/devices/{MAC1}", b"{", {"Content-Type": "application/json"}, 400)]
+        for method, path, body, hdrs, expect in cases:
+            status, headers, _ = self.req(method, path, body=body, headers=hdrs)
+            self.assertEqual(status, expect, (method, path))
+            self.assertEqual(headers.get_all("Content-Security-Policy"), [CSP], (method, path))
+        raw = self.raw_request(b"TRACE / HTTP/1.0\r\n\r\n")  # a stdlib send_error
+        self.assertIn(b"\r\nContent-Security-Policy: " + CSP.encode() + b"\r\n", raw.partition(b"\r\n\r\n")[0] + b"\r\n")
 
     def test_api_responses_are_no_store(self):
         for path in ("/api/devices", "/api/stats", "/api/events", "/api/devices.csv", "/healthz", f"/api/devices/{MAC1}", "/nope"):

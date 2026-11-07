@@ -54,8 +54,15 @@ const waitClosed = page => page.waitForFunction(() => !document.querySelector('#
 
 const scenarios = {
   async load(page) {
+    await page.waitForSelector('#vlans .chip .sw');
+    await page.waitForSelector('#events .badge.vlan');
     return { title: await page.title(), rows: (await rowNames(page)).length,
-             banner_hidden: await page.$eval('#banner', b => b.classList.contains('hidden')) };
+             banner_hidden: await page.$eval('#banner', b => b.classList.contains('hidden')),
+             // the network colours come from data-vc, not from a style attribute the CSP would block
+             swatches: await page.$$eval('#vlans .chip .sw', ss => ss.map(s => getComputedStyle(s).backgroundColor)),
+             event_badges: await page.$$eval('#events .badge.vlan', bs => bs.map(b => getComputedStyle(b).getPropertyValue('--vc').trim())),
+             favicon: await page.evaluate(async () => { const l = document.querySelector('link[rel~="icon"]');
+               const r = l && await fetch(l.href); return r ? { status: r.status, type: r.headers.get('content-type') } : null; }) };
   },
   async rows(page) {
     return { names: await rowNames(page), count_text: await page.$eval('#count', e => e.textContent),
@@ -285,7 +292,11 @@ const scenarios = {
     await waitOpen(page, UA);
     const plain = await page.evaluate(() => ({ table: !!document.querySelector('#dBody table.aliases'),
       heading: [...document.querySelectorAll('#dBody h3')].map(h => h.textContent) }));
-    return { rows, drawer, plain };
+    // the event list names the merge in words, like every other kind
+    await page.waitForSelector('#events .k.merged');
+    const merged_event = await page.$$eval('#events li', ls => ls.filter(l => l.querySelector('.k.merged'))
+      .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
+    return { rows, drawer, plain, merged_event };
   },
   // MAC and IP text copy on click, Enter and Space; hovering or copying does not change any column width
   async copy(page) {
@@ -357,7 +368,8 @@ const scenarios = {
     // open by click, close with Escape: focus goes back to the row
     await page.click(`${row(CLICK)} .c-dev`);
     await waitOpen(page, CLICK);
-    res.click = { open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent), focus: await focused(page) };
+    res.click = { open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent), focus: await focused(page),
+                  badges: await page.$$eval('#dBody .badge.vlan', bs => bs.map(b => getComputedStyle(b).getPropertyValue('--vc').trim())) };
     await page.keyboard.press('Escape');
     await waitClosed(page);
     res.click_closed = { open: await drawerOpen(page), focus: await focused(page) };
@@ -388,20 +400,29 @@ const scenarios = {
 };
 
 async function runScenario(browser, base, name) {
-  const res = { scenario: name, pass: false, details: null, console_errors: [], failed_requests: [], error: null };
+  const res = { scenario: name, pass: false, details: null, console_errors: [], failed_requests: [], csp_violations: [],
+                csp: null, error: null };
   const page = await browser.newPage();
   try {
     // listeners before goto, or the first load's errors are missed
-    page.on('console', m => { if (m.type() === 'error') res.console_errors.push(m.text()); });
+    page.on('console', m => {
+      if (m.type() === 'error') res.console_errors.push(m.text());
+      if (/^Refused to|Content Security Policy/.test(m.text())) res.csp_violations.push(`console: ${m.text()}`);
+    });
+    // the page's own report of anything the CSP blocked, from every document the page loads
+    await page.exposeFunction('__lwCspViolation', v => res.csp_violations.push(v));
+    await page.evaluateOnNewDocument(() => document.addEventListener('securitypolicyviolation', e =>
+      window.__lwCspViolation(`${e.effectiveDirective} blocked ${e.blockedURI || '(inline)'} at ${e.sourceFile}:${e.lineNumber}`)));
     page.on('pageerror', e => res.console_errors.push(`pageerror: ${e.message}`));
     page.on('requestfailed', r => res.failed_requests.push(`${r.failure() ? r.failure().errorText : 'failed'} ${r.url()}`));
     page.on('response', r => { if (r.status() >= 400) res.failed_requests.push(`http ${r.status()} ${r.url()}`); });
     if (!scenarios[name]) throw new Error(`unknown scenario ${name}`);
     await page.setViewport({ width: 1400, height: 900 });
-    await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const doc = await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    res.csp = doc.headers()['content-security-policy'] || null;
     await page.waitForSelector('#rows tr', { timeout: 15000 }); // the first load() has rendered
     res.details = await scenarios[name](page, base);
-    res.pass = !res.console_errors.length && !res.failed_requests.length;
+    res.pass = !res.console_errors.length && !res.failed_requests.length && !res.csp_violations.length;
   } catch (e) {
     res.error = String(e && e.message || e);
   } finally {
