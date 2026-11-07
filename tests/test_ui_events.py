@@ -70,6 +70,37 @@ class ApiTests(Base):
         self.assertEqual(len(d["events"]), 100)  # the last page is exactly full and has no next
         self.assertIsNone(d["next"])
 
+    def test_several_kinds_page_like_one_query(self) -> None:
+        kinds = {"ip", "new", "back"}
+        ref = sorted(((r["ts"], r["id"]) for r in self.db.q("SELECT ts, id FROM events WHERE kind IN ('ip','new','back')")), reverse=True)
+        seen, before = [], None
+        for _ in range(40):
+            d = self.js("/api/events?kind=ip,new,back,ip&limit=70" + (f"&before={before}" if before else ""))
+            self.assertLessEqual(len(d["events"]), 70)
+            self.assertTrue({e["kind"] for e in d["events"]} <= kinds)
+            seen += [(e["ts"], e["id"]) for e in d["events"]]
+            before = d["next"]
+            if before is None:
+                break
+        self.assertEqual(seen, ref)
+        d = self.js("/api/events?kind=ip,new,back&limit=70&since=%d&until=%d" % (T0 + 86400, T0 + 2 * 86400))
+        want = self.db.q("SELECT COUNT(*) n FROM events WHERE kind IN ('ip','new','back') AND ts>=? AND ts<?", (T0 + 86400, T0 + 2 * 86400))[0]["n"]
+        self.assertEqual(len(d["events"]), min(70, want))
+
+    def test_several_kinds_use_the_kind_index_without_a_big_sort(self) -> None:
+        captured: list[str] = []
+        orig = self.db.q
+        with mock.patch.object(self.db, "q", lambda sql, params=(): (captured.append(sql), orig(sql, params))[1]):
+            self.db.events(None, 61, ["ip", "new", "back"], T0, T0 + 10**6, None)
+        sql = next(c for c in captured if "UNION ALL" in c)
+        plan = [r["detail"] for r in orig("EXPLAIN QUERY PLAN " + sql, ("ip", T0, T0 + 10**6, 61, "new", T0, T0 + 10**6, 61,
+                                                                         "back", T0, T0 + 10**6, 61, 61, 61))]
+        searches = [p for p in plan if p.startswith("SEARCH") and "events_kind_ts" in p]
+        self.assertEqual(len(searches), 3, plan)
+        # the sorts that remain run over the bounded branch results (SCAN of a subquery), never over the base table
+        self.assertFalse([p for p in plan if p.startswith("SCAN events")], plan)
+        self.assertEqual(sum(p.startswith("SEARCH e ") for p in plan), 3, plan)
+
     def test_before_unknown_id_is_empty(self) -> None:
         d = self.js("/api/events?before=99999")
         self.assertEqual(d, {"events": [], "next": None})
@@ -117,15 +148,26 @@ class EtagTests(Base):
         st2, _, _ = self.get("/api/events", b"If-None-Match: " + hd["etag"].encode() + b"\r\n")
         self.assertEqual(st2, 304)
 
-    def test_filtered_answer_has_no_etag_and_is_never_304(self) -> None:
-        _, hd, _ = self.get("/api/events?kind=new")
-        self.assertNotIn("etag", hd)
-        tag = self.get("/api/events")[1]["etag"].encode()
-        for q in ("?kind=ip", "?limit=60", "?since=0"):
-            st, hd, body = self.get("/api/events" + q, b"If-None-Match: " + tag + b"\r\nIf-None-Match: *\r\n")
+    def test_filtered_answer_has_a_tag_per_query_and_a_304_for_the_same_one(self) -> None:
+        plain = self.get("/api/events")[1]["etag"]
+        tags = {"": plain}
+        for q in ("?kind=ip", "?kind=new", "?kind=ip,new", "?limit=60", "?since=0", "?before=500&limit=60"):
+            st, hd, body = self.get("/api/events" + q)
             self.assertEqual(st, 200, q)
-            self.assertNotIn("etag", hd)
             self.assertTrue(json.loads(body)["events"])
+            tags[q] = hd["etag"]
+            self.assertRegex(hd["etag"], r'^W/"[0-9a-f]{8}\.\d+\.[01]{3}\.[0-9a-f]{8}"$')
+            st, hd2, _ = self.get("/api/events" + q, b"If-None-Match: " + hd["etag"].encode() + b"\r\n")
+            self.assertEqual((st, hd2["etag"]), (304, hd["etag"]), q)
+        self.assertEqual(len(set(tags.values())), len(tags))
+        self.assertTrue(plain.endswith('.0"'), plain)
+        # another query's tag, or "*" in a second header line, is only a 304 for the one it names
+        other = tags["?kind=ip"].encode()
+        st, _, _ = self.get("/api/events?kind=new", b"If-None-Match: " + other + b"\r\n")
+        self.assertEqual(st, 200)
+        # the same parameters in another order, unknown parameters and an empty query share a tag
+        self.assertEqual(self.get("/api/events?limit=60&kind=ip,new")[1]["etag"], self.get("/api/events?kind=ip,new&limit=60&x=1")[1]["etag"])
+        self.assertEqual(self.get("/api/events?")[1]["etag"], plain)
 
 
 class CsvTests(Base):

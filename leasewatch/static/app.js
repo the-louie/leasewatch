@@ -110,15 +110,17 @@
 
   // ---------- load ----------
   async function load() {
-    const seq = ++state.loadSeq, gen = state.evGen;
+    const seq = ++state.loadSeq, gen = state.evGen, bad = eventsFilter() === null;
     try {
-      const [d, s, e] = await Promise.all([api("/api/devices"), api("/api/stats"), api(eventsPath())]);
+      const [d, s, e] = await Promise.all([api("/api/devices"), api("/api/stats"), bad ? null : api(eventsPath())]);
       if (seq !== state.loadSeq) return; // a newer load (e.g. the one after a save) already rendered fresher data
       state.skew = d.meta?.now ? d.meta.now - Date.now() / 1000 : 0;
-      state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) mergeFirstPage(e);
+      state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) { if (bad) clearEvents(); else mergeFirstPage(e); }
       state.renderError = null;
       try { renderStatus(); renderCards(); renderVlans(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
       catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
+      // a ?device= link not opened yet (the first load failed): this render has the list and meta it needs
+      if (state.deepLink) await openDeepLink();
     } catch (err) {
       if (seq !== state.loadSeq) return;
       state.apiDown = true; showBanner(`Cannot reach the leasewatch API: ${err.message}`); $("#statusDot").className = "dot bad";
@@ -377,7 +379,12 @@
   const EV_PAGE = 60;
   const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged"]], ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
     ["Review", ["acked", "unacked"]], ["Sources", ["source_down", "source_up"]]];
-  const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(new Date(`${v}T00:00:00`));
+  // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
+  const isDay = v => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+    const [y, m, d] = v.split("-").map(Number), t = new Date(y, m - 1, d);
+    return t.getFullYear() === y && t.getMonth() === m - 1 && t.getDate() === d;
+  };
   // local midnight of a YYYY-MM-DD day, plus n days, as epoch seconds
   const dayTs = (v, n = 0) => { const [y, m, d] = v.split("-").map(Number); return Math.floor(new Date(y, m - 1, d + n).getTime() / 1000); };
   // the filters as query parameters; null when From is after To (the server would answer 400)
@@ -403,16 +410,17 @@
   }
   // the periodic refresh: the first page. With "Load more" pages on screen it only adds the newer events, and only when
   // the page still reaches the newest one shown; otherwise more than a page arrived, there could be a gap, so reset
+  function clearEvents() { state.events = []; state.evNext = null; state.evPaged = false; }
   function mergeFirstPage(e) {
     const had = state.events, top = had.length ? had[0].id : null, i = e.events.findIndex(x => x.id === top);
     if (state.evPaged && i >= 0) state.events = e.events.slice(0, i).concat(had);
-    else { state.events = e.events; state.evNext = e.next; state.evPaged = false; }
+    else { state.events = e.events; state.evNext = e.next; state.evPaged = false; state.evGen++; } // replaced: a "Load more" in flight is for the old list
   }
   // a changed filter starts over: first page, with the address and the controls following
   async function eventsFilterChanged() {
     const gen = ++state.evGen;
     syncUrl();
-    if (eventsFilter() === null) { state.events = []; state.evNext = null; state.evPaged = false; renderEvents(); return; }
+    if (eventsFilter() === null) { clearEvents(); renderEvents(); return; }
     try {
       const e = await api(eventsPath());
       if (gen !== state.evGen) return;
@@ -426,7 +434,7 @@
     btn.disabled = true;
     try {
       const e = await api(eventsPath(next));
-      if (gen !== state.evGen) return;
+      if (gen !== state.evGen || next !== state.evNext) return; // a refresh replaced the list meanwhile: its cursor is not this one
       const seen = new Set(state.events.map(x => x.id));
       state.events = state.events.concat(e.events.filter(x => !seen.has(x.id))); state.evNext = e.next; state.evPaged = true;
       renderEvents();

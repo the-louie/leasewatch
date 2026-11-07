@@ -288,10 +288,11 @@ class Database:
         if mac:
             rows = self.q("SELECT e.ts, e.mac, e.kind, e.detail FROM events e WHERE mac=? ORDER BY e.ts DESC, e.id DESC LIMIT ?", (mac, limit))
             return [dict(r) for r in rows]
+        kinds = list(dict.fromkeys(kinds)) if kinds else None
         where: list[str] = []
         params: list = []
-        if kinds:
-            where.append(f"e.kind IN ({','.join('?' * len(kinds))})"); params += kinds
+        if kinds and len(kinds) == 1:
+            where.append("e.kind = ?"); params.append(kinds[0])
         if since is not None:
             where.append("e.ts >= ?"); params.append(since)
         if until is not None:
@@ -301,8 +302,21 @@ class Database:
             if not row:
                 return []
             where.append("(e.ts, e.id) < (?, ?)"); params += [row[0]["ts"], before]
-        sql = ("SELECT e.id, e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan FROM events e LEFT JOIN devices d USING(mac)"
-               + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY e.ts DESC, e.id DESC LIMIT ?")
+        order = " ORDER BY e.ts DESC, e.id DESC LIMIT ?"
+        cols = "e.id, e.ts, e.mac, e.kind, e.detail, d.name, d.hostname, d.vlan"
+        if kinds and len(kinds) > 1:
+            # one index range per kind with its own LIMIT, so the final sort sees at most len(kinds) * limit rows
+            # instead of every matching row in a temp B-tree
+            branch_where = " WHERE " + " AND ".join(["e.kind = ?", *where])
+            branch = ("SELECT * FROM (SELECT e.id, e.ts, e.mac, e.kind, e.detail FROM events e" + branch_where + order + ")")
+            top = "SELECT * FROM (" + " UNION ALL ".join([branch] * len(kinds)) + ") e" + order
+            sql = f"SELECT {cols} FROM ({top}) e LEFT JOIN devices d USING(mac)" + order
+            args: list = []
+            for k in kinds:
+                args += [k, *params, limit]
+            return [dict(r) for r in self.q(sql, (*args, limit, limit))]
+        sql = (f"SELECT {cols} FROM events e LEFT JOIN devices d USING(mac)"
+               + (" WHERE " + " AND ".join(where) if where else "") + order)
         return [dict(r) for r in self.q(sql, (*params, limit))]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
@@ -342,7 +356,8 @@ class Database:
         from the drawer updates the device it was merged into), else ""."""
         if c.execute("SELECT 1 FROM devices WHERE mac=?", (mac,)).fetchone():
             return mac
-        return self._alias_owner(c, mac)
+        owner = self._alias_owner(c, mac)
+        return owner if owner and c.execute("SELECT 1 FROM devices WHERE mac=?", (owner,)).fetchone() else ""
 
     @staticmethod
     def _apply_user_fields(c: sqlite3.Connection, mac: str, now: int, acked: bool | None, name: str | None,

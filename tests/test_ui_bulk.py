@@ -68,6 +68,14 @@ class BulkTests(_Bulk):
         self.assertEqual(self.rows(), before)
         self.assertEqual(self.events(), [])
 
+    def test_alias_of_a_missing_device_is_404_single_and_bulk(self) -> None:
+        self.db.q("INSERT INTO aliases(mac,device,reason,merged_ts,last_seen) VALUES(?,?,'hostname',1,1)", (ALIAS, "02:00:00:00:99:99"))
+        self.assertEqual(self.post(path=f"/api/devices/{ALIAS}", body={"acked": True})[0], 404)
+        st, body = self.bulk({"macs": [ALIAS, MACS[0]], "acked": True})
+        self.assertEqual(st, 404)
+        self.assertIn(ALIAS, json.dumps(body))
+        self.assertEqual(self.events(), [])
+
     def test_alias_resolves_to_its_device_and_counts_once(self) -> None:
         self.db.q("INSERT INTO aliases(mac,device,reason,merged_ts,last_seen) VALUES(?,?,'hostname',1,1)", (ALIAS, MACS[0]))
         st, body = self.bulk({"macs": [ALIAS, MACS[0], MACS[1]], "acked": True})

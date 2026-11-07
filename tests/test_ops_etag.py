@@ -1,4 +1,4 @@
-"""ETag / 304 on /api/devices and /api/events: a weak tag from the start id, the database version and three bits."""
+"""ETag / 304 on /api/devices and /api/events: a weak tag from the start id, the database version, three bits and the query hash."""
 from __future__ import annotations
 
 import gzip
@@ -18,7 +18,7 @@ from leasewatch import web  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.fw1 import Sighting  # noqa: E402
 
-TAG = re.compile(r'^W/"[0-9a-f]{8}\.\d+\.[01][01][01]"$')
+TAG = re.compile(r'^W/"[0-9a-f]{8}\.\d+\.[01][01][01]\.[0-9a-f]{1,8}"$')
 
 
 class _Client:
@@ -59,7 +59,7 @@ class EtagTests(QW.Base):
             st, h, body = self.get(path)
             self.assertEqual(st, 200, path)
             self.assertRegex(h["etag"], TAG)
-            self.assertTrue(h["etag"].endswith('.100"'), h["etag"])  # may write, not stale
+            self.assertTrue(h["etag"].endswith('.100.0"'), h["etag"])  # may write, not stale
             json.loads(body)
 
     def test_same_tag_gives_exact_304(self) -> None:
@@ -109,18 +109,18 @@ class EtagTests(QW.Base):
             st, h2, body = self.get(inm=h["etag"])
         self.assertEqual(st, 200)
         self.assertTrue(json.loads(body)["meta"]["stale"])
-        self.assertEqual((h["etag"][-4:], h2["etag"][-4:]), ('100"', '111"'))
-        self.assertEqual(h2["etag"][:-4], h["etag"][:-4])
+        self.assertEqual((h["etag"][-6:], h2["etag"][-6:]), ('100.0"', '111.0"'))
+        self.assertEqual(h2["etag"][:-6], h["etag"][:-6])
 
     def test_collector_stale_flip_changes_tag(self) -> None:
         self.db.set_meta("last_attempt_ts", str(int(time.time())))
         _, h, _ = self.get()
-        self.assertTrue(h["etag"].endswith('.100"'), h["etag"])
+        self.assertTrue(h["etag"].endswith('.100.0"'), h["etag"])
         self.db.set_meta("last_attempt_ts", "1")  # far back, no other change to the tag's inputs
         st, h2, body = self.get(inm=h["etag"])
         self.assertEqual(st, 200)
         self.assertTrue(json.loads(body)["meta"]["collector_stale"])
-        self.assertTrue(h2["etag"].endswith('.101"') or h2["etag"].endswith('.111"'), h2["etag"])
+        self.assertTrue(h2["etag"].endswith('.101.0"') or h2["etag"].endswith('.111.0"'), h2["etag"])
 
     def test_write_between_version_and_body_gives_200_next(self) -> None:
         _, h0, _ = self.get()
@@ -210,8 +210,8 @@ class WriteBitTests(QW.Base):
         for path in ("/api/devices", "/api/events"):
             _, ok, _ = self.get(path, client="10.0.1.7")
             _, no, _ = self.get(path, client="10.0.9.9")
-            self.assertTrue(ok["etag"].endswith('.100"'), ok["etag"])
-            self.assertTrue(no["etag"].endswith('.000"'), no["etag"])
+            self.assertTrue(ok["etag"].endswith('.100.0"'), ok["etag"])
+            self.assertTrue(no["etag"].endswith('.000.0"'), no["etag"])
             self.assertEqual(self.get(path, ok["etag"], client="10.0.9.9")[0], 200, path)
             self.assertEqual(self.get(path, no["etag"], client="10.0.1.7")[0], 200, path)
             self.assertEqual(self.get(path, ok["etag"], client="10.0.1.8")[0], 304, path)  # same right, same tag
@@ -219,7 +219,7 @@ class WriteBitTests(QW.Base):
     def test_read_only_clears_the_bit(self) -> None:
         with mock.patch.object(self.cfg, "read_only", "1"):
             _, h, _ = self.get(client="10.0.1.7")
-        self.assertTrue(h["etag"].endswith('.000"'), h["etag"])
+        self.assertTrue(h["etag"].endswith('.000.0"'), h["etag"])
 
 
 if __name__ == "__main__":

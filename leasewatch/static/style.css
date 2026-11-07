@@ -200,6 +200,11 @@ table.aliases td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-ali
 footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 1279px) { .c-type { display: none; } } /* the table is capped at 1232 px (main): Type fits from 1280 px */
+/* Select mode adds the 24 px checkbox column. It is paid for by Type from 1280 px, and by First seen up to 1400 px (the
+   long names of the rows, and the Connected via text, take the width the column would need), then by Last seen and
+   Connected via; the drawer shows every one of them */
+@media (max-width: 1400px) { #tbl.selecting .c-first { display: none; } }
+@media (max-width: 1100px) { #tbl.selecting .c-last, #tbl.selecting .c-where { display: none; } }
 @media (max-width: 1400px) { .c-where .sig { display: none; } }
 @media (max-width: 900px) {
   .cards, .cards.five { grid-template-columns: repeat(2, 1fr); }

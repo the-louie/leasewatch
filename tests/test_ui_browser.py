@@ -175,9 +175,11 @@ class BrowserUITest(_BrowserCase):
         events = [r for r in d["responses"] if r["path"] == "/api/events"]
         self.assertEqual(len(devices), 1, d["responses"])
         # the page sent the tag of its first load itself and got a 304 with the same tag
-        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100"$')
+        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100\.[0-9a-f]+"$')
         self.assertEqual((devices[0]["status"], devices[0]["etag"]), (304, devices[0]["sent"]))
-        self.assertEqual([r["status"] for r in events], [200])  # the paged request has parameters, so no ETag
+        self.assertEqual(len(events), 1, d["responses"])  # the query hash is in the tag: the events request revalidates too
+        self.assertRegex(events[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100\.[0-9a-f]+"$')
+        self.assertEqual((events[0]["status"], events[0]["etag"]), (304, events[0]["sent"]))
         self.assertEqual((d["rows_before"], d["rows_after"]), (16, 16))
         self.assertTrue(d["status_after"].startswith("polled"), d["status_after"])
         self.assertTrue(d["banner_hidden"])
@@ -380,7 +382,7 @@ class BrowserPrivateTest(_BrowserCase):
         first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
         base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
         assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
-        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "archive", "vlancolor"))  # archive changes server state: last
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "archive", "vlancolor"))  # archive changes server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -427,6 +429,16 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(d["after"]["row"], d["before"]["row"])
         self.assertEqual(d["before"]["chips"]["HomeNet"], d["before"]["row"])
         self.assertNotEqual(d["before"]["chips"]["Aaa"], d["before"]["chips"]["HomeNet"])
+
+    def test_deep_link_opens_after_a_failed_first_load(self) -> None:
+        d = self.result("deeplinkretry")
+        self.assertEqual(d["refused"], 1)
+        self.assertIn("Cannot reach", d["banner"])
+        self.assertFalse(d["open_before"])
+        self.assertIn(self.DEV, d["url_before"])  # the key waits in the address
+        self.assertTrue(d["open_after"])
+        self.assertIn(self.DEV, d["url_after"])
+        self.assertTrue(d["banner_hidden"])
 
     def test_drawer_lists_merged_macs(self) -> None:
         d = self.result("private")
@@ -656,7 +668,7 @@ class BrowserEventsViewTest(_BrowserCase):
             for i in range(150):
                 ts = int((noon - datetime.timedelta(days=3 - i // 50)).timestamp()) + i
                 c.execute("INSERT INTO events (mac, kind, detail, ts) VALUES (?, ?, ?, ?)", (mac(1), cls.KINDS[i % 3], f"n{i}", ts))
-        cls.run_scenarios(base, ("eventsview",))
+        cls.run_scenarios(base, ("eventsview", "evinvalid", "evbadday"))
 
     @staticmethod
     def params(href: str) -> dict:
@@ -698,6 +710,25 @@ class BrowserEventsViewTest(_BrowserCase):
         p = self.params(d["day_csv"])
         self.assertEqual(p, {"path": "/api/events.csv", "since": str(self.midnight(d["day"])), "until": str(self.midnight(d["day"], 1))})
         self.assertEqual(d["kind_day_rows"], 16)  # a changed filter starts again at the first page
+
+    def test_from_after_to_shows_no_events_and_asks_for_none(self) -> None:
+        d = self.result("evinvalid")
+        self.assertEqual(d["asked_on_load"], 0)
+        self.assertEqual(d["asked_after_reload"], 0)
+        for when in ("loaded", "reloaded"):
+            with self.subTest(when=when):
+                self.assertEqual(d[when]["items"], 0)
+                self.assertTrue(d[when]["empty"])
+                self.assertFalse(d[when]["note_hidden"])
+                self.assertEqual(d[when]["note"], "From is after To.")
+                self.assertTrue(d[when]["csv_hidden"])
+                self.assertTrue(d[when]["more_hidden"])
+        self.assertGreater(d["fixed"]["items"], 0)  # a valid range brings the list back
+        self.assertTrue(d["fixed"]["note_hidden"])
+
+    def test_impossible_day_in_the_address_is_dropped(self) -> None:
+        d = self.result("evbadday")
+        self.assertEqual(d, {"search": "", "csv": "/api/events.csv", "from": "", "to": ""})
 
     def test_no_horizontal_scroll(self) -> None:
         d = self.result("eventsview")
@@ -782,6 +813,29 @@ class BrowserBulkTest(_BrowserCase):
         self.assertFalse(d["none"]["all"])
         self.assertEqual((d["one"]["count"], d["one"]["all"], d["one"]["some"]), ("1 selected", False, True))
         self.assertFalse(d["one"]["ack"])  # the one ticked row is known now: no Mark known
+
+
+class BrowserSelectNarrowTest(_BrowserCase):
+    """Select mode below 1280 px with unacked rows and 28-character names: no sideways scroll in the table or the page."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(n: int) -> Sighting:
+            return Sighting(mac=f"00:00:5e:00:53:{n:02x}", ip=f"10.0.1.{n}", hostname=f"alex-workstation-upstairs-{n:02d}",
+                            vendor="Acme", vlan="HomeNet", iface="lan", source="dhcp", lease_type="dynamic", online=True)
+        base, _ = start(cls, [s(1)], [s(n) for n in range(10, 15)])  # five newcomers: unacked
+        cls.run_scenarios(base, ("selectnarrow",))
+
+    def test_no_sideways_scroll_in_select_mode(self) -> None:
+        d = self.result("selectnarrow")
+        for width in ("1280", "1024", "800"):
+            with self.subTest(width=width):
+                self.assertEqual(d[width]["shown"][0], "c-sel")
+                self.assertLessEqual(d[width]["table_scroll"], 0, d[width])
+                self.assertLessEqual(d[width]["page_scroll"], 0, d[width])
+        self.assertNotIn("c-first", d["1024"]["shown"])
 
 
 class BrowserAuthTest(_BrowserCase):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import html
 import io
 import json
@@ -84,6 +85,7 @@ def _csv_cell(v: object) -> str:
 
 
 _KIND = re.compile(r"[a-z_]{1,20}")
+_DEFAULT_EVENT_LIMIT = 300
 _EVENT_PARAMS = {"kind", "since", "until", "before", "limit"}
 
 
@@ -117,6 +119,14 @@ def _event_filters(query: str, default_limit: int, max_limit: int, paged: bool) 
         raise ValueError("bad limit")
     out["limit"] = default_limit if limit is None else limit
     return out
+
+
+def _query_hash(f: dict) -> str:
+    """8 hex of the normalised filters (sorted key=value pairs), or "0" when there are none."""
+    pairs = sorted(f"{k}={','.join(v) if k == 'kinds' else v}" for k, v in f.items() if v is not None and k != "limit")
+    if f["limit"] != _DEFAULT_EVENT_LIMIT:
+        pairs.append(f"limit={f['limit']}")
+    return hashlib.sha256("&".join(sorted(pairs)).encode()).hexdigest()[:8] if pairs else "0"
 
 
 _EVENTS_CSV_HEADER = ["id", "time", "mac", "kind", "detail", "name", "hostname", "vlan"]
@@ -407,11 +417,11 @@ class Handler(BaseHTTPRequestHandler):
         body, extra = self._encode(body)
         self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
 
-    def _etag(self, version: int, meta: dict) -> str:
+    def _etag(self, version: int, meta: dict, query: str = "0") -> str:
         # the write bit: meta.can_write differs per client, so two clients must not share a tag (and a 304); the
         # stale and collector bits: the page shows a banner for each, so a flip must not be answered with a 304
         w = int(self.cfg.write_allowed(self.client_address[0]))
-        return f'W/"{self.boot}.{version}.{w}{int(meta["stale"])}{int(meta["collector_stale"])}"'
+        return f'W/"{self.boot}.{version}.{w}{int(meta["stale"])}{int(meta["collector_stale"])}.{query}"'
 
     def _matches(self, etag: str) -> bool:
         """If-None-Match lists this ETag (weak compare: the W/ prefix is ignored on both sides) or is "*"."""
@@ -494,17 +504,14 @@ class Handler(BaseHTTPRequestHandler):
     def _api_events(self) -> None:
         query = urlparse(self.path).query
         try:
-            f = _event_filters(query, 300, 500, True)
+            f = _event_filters(query, _DEFAULT_EVENT_LIMIT, 500, True)
         except ValueError as e:
             return self._error(400, str(e))
-        # the tag is data-wide, not per query, and the page caches by full URL: a 304 for one filter must never
-        # answer another, so a request with any parameter gets no ETag and always a 200
-        etag = None
-        if not query:
-            version = self.db.version()  # before the body, as in _api_devices
-            etag = self._etag(version, self._meta())
-            if self._matches(etag):
-                return self._not_modified(etag)
+        # the tag carries a hash of the accepted parameters: a 304 for one filter must never answer another
+        version = self.db.version()  # before the body, as in _api_devices
+        etag = self._etag(version, self._meta(), _query_hash(f))
+        if self._matches(etag):
+            return self._not_modified(etag)
         rows = self.db.events(None, f["limit"] + 1, f["kinds"], f["since"], f["until"], f["before"])
         more = len(rows) > f["limit"]
         rows = rows[:f["limit"]]

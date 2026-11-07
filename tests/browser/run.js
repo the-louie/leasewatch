@@ -491,6 +491,83 @@ const scenarios = {
     await page.setViewport({ width: 800, height: 900 }); res.scroll_800 = await scroll();
     return res;
   },
+  // From after To: the list stays empty under the active filters, on load and on the 60 s reload, and no events request goes out
+  async evinvalid(page, base) {
+    const asked = [];
+    page.on('request', r => { if (new URL(r.url()).pathname === '/api/events') asked.push(r.url()); });
+    await page.goto(`${base}?ek=ip&es=2026-05-02&eu=2026-05-01`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    await page.waitForFunction(() => window.__lwReload);
+    const state = () => page.evaluate(() => ({ items: document.querySelectorAll('#events li .k').length, empty: document.querySelector('#events').textContent.includes('No events match'),
+      note_hidden: document.querySelector('#evRange').classList.contains('hidden'), note: document.querySelector('#evRange').textContent,
+      csv_hidden: document.querySelector('#evCsv').classList.contains('hidden'), more_hidden: document.querySelector('#evMore').classList.contains('hidden') }));
+    const res = { loaded: await state(), asked_on_load: asked.length };
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(() => window.__lwReloads === 1);
+    res.reloaded = await state(); res.asked_after_reload = asked.length;
+    // a valid range brings the list back
+    await page.$eval('#evTo', el => { el.value = ''; el.dispatchEvent(new Event('change', { bubbles: true })); });
+    await page.waitForFunction(() => document.querySelectorAll('#events li .k').length > 0);
+    res.fixed = await state();
+    return res;
+  },
+  // an impossible day in the address (2026-02-31) is dropped, not kept as a hidden filter
+  async evbadday(page, base) {
+    await page.goto(`${base}?es=2026-02-31&eu=2026-04-31`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    await page.waitForSelector('#events li .k');
+    return { search: await page.evaluate(() => location.search), csv: await page.$eval('#evCsv', a => a.getAttribute('href')),
+             from: await page.$eval('#evFrom', e => e.value), to: await page.$eval('#evTo', e => e.value) };
+  },
+  // the Select mode below 1280 px: First seen gives way to the checkbox column, so neither the table nor the page scrolls sideways
+  async selectnarrow(page) {
+    const res = {};
+    const measure = () => page.evaluate(() => {
+      const wrap = document.querySelector('.table-wrap'), th = [...document.querySelectorAll('#tbl thead th')];
+      return { shown: th.filter(t => getComputedStyle(t).display !== 'none').map(t => t.className),
+               table_scroll: wrap.scrollWidth - wrap.clientWidth,
+               page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    });
+    res.plain = {};
+    for (const width of [1280, 1024, 800]) { await page.setViewport({ width, height: 900 }); res.plain[width] = await measure(); }
+    await page.click('#selBtn');
+    for (const width of [1280, 1024, 800]) {
+      await page.setViewport({ width, height: 900 });
+      res[width] = await page.evaluate(() => {
+        const wrap = document.querySelector('.table-wrap'), th = [...document.querySelectorAll('#tbl thead th')];
+        return { shown: th.filter(t => getComputedStyle(t).display !== 'none').map(t => t.className),
+                 table_scroll: wrap.scrollWidth - wrap.clientWidth,
+                 page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+      });
+    }
+    return res;
+  },
+  // a ?device= link whose first load fails: the drawer opens after the next successful load
+  async deeplinkretry(page, base) {
+    const DEV = '02:00:00:00:10:01';
+    page.__allow = [503]; // the one refused /api/devices
+    let refused = 0;
+    await page.setRequestInterception(true);
+    page.on('request', r => {
+      if (!refused && new URL(r.url()).pathname === '/api/devices') {
+        refused++;
+        r.respond({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+      } else r.continue();
+    });
+    await page.goto(`${base}?device=${DEV}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    await page.waitForFunction(() => window.__lwReload);
+    const res = { refused, banner: await page.$eval('#banner', b => b.textContent), open_before: await drawerOpen(page),
+                  url_before: await page.evaluate(() => location.search) };
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(() => window.__lwReloads === 1);
+    await waitOpen(page, DEV);
+    res.open_after = await drawerOpen(page);
+    res.title = await page.$eval('#dTitle', e => e.textContent);
+    res.url_after = await page.evaluate(() => location.search);
+    res.banner_hidden = await page.$eval('#banner', b => b.classList.contains('hidden'));
+    return res;
+  },
   // the page's 60 s reload, run now: the second /api/devices is a 304 and the table keeps its rows
   async etag(page) {
     const rows0 = (await rowNames(page)).length;
@@ -658,7 +735,7 @@ async function runScenario(browser, base, name) {
     // listeners before goto, or the first load's errors are missed
     page.on('console', m => {
       // a scenario that asks for a known 404 (page.__allow) does not fail on Chrome's console line for it
-      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \(Not Found\)/.test(m.text()))) res.console_errors.push(m.text());
+      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \((Not Found|Service Unavailable)\)/.test(m.text()))) res.console_errors.push(m.text());
       if (/^Refused to|Content Security Policy/.test(m.text())) res.csp_violations.push(`console: ${m.text()}`);
     });
     // the page's own report of anything the CSP blocked, from every document the page loads

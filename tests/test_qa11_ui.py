@@ -752,6 +752,38 @@ out.name = byId.fName.value; out.server = server.name; out.edited = formEdited(s
         self.assertEqual(out["server"], "")
         self.assertTrue(out["edited"])
 
+    # an impossible day (2026-02-31 rolls over to March 3 in Date) is no day: it must not become a hidden filter
+    def test_impossible_day_is_not_a_day(self) -> None:
+        out = _run(["isDay"], r"""//--
+out.res = ["2026-02-28", "2026-02-31", "2026-04-31", "2026-02-29", "2028-02-29", "2026-13-01", "2026-00-10", "2026-1-01", "x"].map(isDay);
+""")
+        self.assertEqual(out["res"], [True, False, False, False, True, False, False, False, False])
+
+    # a 60 s refresh that replaces the list while the first "Load more" is pending: that reply is for the old list
+    # (appended after the old cursor it would leave the events between the two first pages out for good)
+    def test_refresh_while_load_more_is_pending_drops_the_reply(self) -> None:
+        out = _run(["EV_PAGE", "isDay", "dayTs", "eventsFilter", "eventsPath", "clearEvents", "mergeFirstPage", "loadMoreEvents"], r"""
+const renderEvents = () => {}; const showBanner = () => {};
+let release = null, asked = null;
+const api = path => { asked = path; return new Promise(r => { release = () => r({ events: [{ id: 30 }, { id: 29 }], next: 29 }); }); };
+//--
+state.events = [{ id: 60 }, { id: 59 }]; state.evNext = 59; state.evPaged = false;
+const more = loadMoreEvents();
+out.asked = asked;
+mergeFirstPage({ events: [{ id: 62 }, { id: 61 }, { id: 60 }], next: 60 }); // the refresh lands first
+release(); await more;
+out.ids = state.events.map(x => x.id); out.next = state.evNext; out.paged = state.evPaged;
+// without a refresh in between the page is appended
+state.events = [{ id: 60 }, { id: 59 }]; state.evNext = 59; state.evPaged = false;
+const again = loadMoreEvents(); release(); await again;
+out.ids2 = state.events.map(x => x.id); out.paged2 = state.evPaged;
+""")
+        self.assertEqual(out["asked"], "/api/events?limit=60&before=59")
+        self.assertEqual(out["ids"], [62, 61, 60])
+        self.assertEqual((out["next"], out["paged"]), (60, False))
+        self.assertEqual(out["ids2"], [60, 59, 30, 29])
+        self.assertTrue(out["paged2"])
+
     # S4R17: every event kind the server writes has a colour rule, like the older kinds
     def test_new_event_kinds_have_a_colour(self) -> None:
         css = _read("leasewatch", "static", "style.css")
