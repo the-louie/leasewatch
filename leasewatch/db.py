@@ -292,6 +292,32 @@ class Database:
             out.setdefault(r["mac"], []).append({k: r[k] for k in r.keys() if k != "mac"})
         return out
 
+    def wifi_ssids(self) -> dict:
+        """Per SSID ever seen: devices not archived that were seen on it, those online now with it as wifi_ssid, and
+        the latest sighting of any device; most devices first. `since` is when the presence table started filling."""
+        with self._lock:  # one hold: the two counts and `since` must not straddle a collector write
+            ever = self._c().execute(
+                "SELECT p.ssid, SUM(d.mac IS NOT NULL AND d.archived_ts IS NULL) n, MAX(p.last_seen) last_seen "
+                "FROM wifi_presence p LEFT JOIN devices d ON d.mac = p.mac GROUP BY p.ssid").fetchall()
+            now_on = self._c().execute("SELECT wifi_ssid, COUNT(*) n FROM devices WHERE online=1 AND archived_ts IS NULL AND wifi_ssid != '' "
+                                       "GROUP BY wifi_ssid").fetchall()
+            since = self.get_meta("wifi_presence_since", "")
+        now_by = {r["wifi_ssid"]: r["n"] for r in now_on}
+        rows = [{"ssid": r["ssid"], "devices": r["n"] or 0, "devices_now": now_by.get(r["ssid"], 0), "last_seen": r["last_seen"]} for r in ever]
+        rows.sort(key=lambda x: (-x["devices"], x["ssid"]))
+        return {"since": int(since) if since.isdigit() else None, "ssids": rows}
+
+    def wifi_devices(self, ssid: str) -> dict:
+        """Every device (archived included) seen on exactly this SSID, by first sighting there, with its presence row."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT d.mac, d.name, d.wifi_alias, d.hostname, d.vendor, d.ip, d.archived_ts, d.online, d.wifi_ssid, "
+                "p.first_seen, p.last_seen, p.seconds_seen, p.polls_seen, p.last_ap "
+                "FROM wifi_presence p JOIN devices d ON d.mac = p.mac WHERE p.ssid = ? "
+                "ORDER BY p.first_seen, d.mac", (ssid,)).fetchall()
+            since = self.get_meta("wifi_presence_since", "")
+        return {"since": int(since) if since.isdigit() else None, "devices": [dict(r) for r in rows]}
+
     def seen(self, mac: str) -> list[dict]:
         return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]
 

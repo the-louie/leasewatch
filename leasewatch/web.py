@@ -60,6 +60,7 @@ _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
                "archived", "note", "aliases"]
+_WIFI_CSV_HEADER = ["mac", "name", "vendor", "last_ip", "private", "archived", "first_seen", "last_seen", "hours_seen", "polls_seen", "last_ap"]
 
 
 def _dev(d: dict) -> dict:
@@ -311,7 +312,8 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch_get(self, p: str) -> None:
         exact = {"/": self._route_index, "/healthz": self._healthz, "/api/devices": self._api_devices, "/api/devices.csv": self._csv,
                  "/api/status": self._api_status, "/api/stats": self._api_stats, "/api/events": self._api_events,
-                 "/api/events.csv": self._events_csv,
+                 "/api/events.csv": self._events_csv, "/api/wifi/ssids": self._api_wifi_ssids, "/api/wifi": self._api_wifi,
+                 "/api/wifi.csv": self._wifi_csv,
                  "/metrics": self._metrics}.get(p)
         if exact is not None:
             return exact()
@@ -539,6 +541,43 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
                    {"Content-Disposition": 'attachment; filename="leasewatch-events.csv"'})
 
+    def _wifi_query(self) -> str | None:
+        """The ssid parameter, compared exactly (a space is part of the name); answers 400 and returns None when it is
+        missing, repeated or longer than 64 characters."""
+        vals = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("ssid", [])
+        if len(vals) != 1 or len(vals[0]) > 64:
+            self._error(400, "ssid takes exactly one value of at most 64 characters")
+            return None
+        return vals[0]
+
+    def _api_wifi_ssids(self) -> None:
+        self._json_vary(self.db.wifi_ssids())
+
+    def _api_wifi(self) -> None:
+        ssid = self._wifi_query()
+        if ssid is None:
+            return
+        res = self.db.wifi_devices(ssid)
+        devs = [{"mac": r["mac"], "name": r["name"], "wifi_alias": r["wifi_alias"], "hostname": r["hostname"], "vendor": r["vendor"],
+                 "ip": r["ip"], "private": is_private_mac(r["mac"]), "archived_ts": r["archived_ts"], "online": r["online"],
+                 "on_now": bool(r["online"]) and r["wifi_ssid"] == ssid, "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                 "seconds_seen": r["seconds_seen"], "polls_seen": r["polls_seen"], "last_ap": r["last_ap"]} for r in res["devices"]]
+        self._json_vary({"ssid": ssid, "since": res["since"], "devices": devs})
+
+    def _wifi_csv(self) -> None:
+        ssid = self._wifi_query()
+        if ssid is None:
+            return
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(_WIFI_CSV_HEADER)
+        cell, ts = _csv_cell, _csv_ts
+        for r in self.db.wifi_devices(ssid)["devices"]:
+            w.writerow([r["mac"], cell(r["name"]), cell(r["vendor"]), r["ip"], int(is_private_mac(r["mac"])), ts(r["archived_ts"]),
+                        ts(r["first_seen"]), ts(r["last_seen"]), round(r["seconds_seen"] / 3600, 1), r["polls_seen"], cell(r["last_ap"])])
+        self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
+                   {"Content-Disposition": 'attachment; filename="leasewatch-wifi.csv"'})
+
     def _api_device_get(self, mac: str) -> None:
         if not MAC_RE.match(mac):
             return self._error(400, "bad mac")
@@ -577,6 +616,7 @@ class Handler(BaseHTTPRequestHandler):
             "last_error_ts": int(m.get("last_error_ts") or 0) or None, "last_raw": m.get("last_raw", ""),
             "baseline_ts": int(m.get("baseline_ts") or 0) or None, "poll_seconds": cfg.poll_seconds,
             "grace_minutes": cfg.online_grace_minutes,  # the drawer's "on the wire" per source uses the same window
+            "wifi_presence_since": int(m.get("wifi_presence_since") or 0) or None,  # the SSID chips' "seen since"
             "new_days": cfg.new_days, "site_name": cfg.site_name, "version": self.app_version, "mail": cfg.mail_enabled,
             # abs(): a last poll in the future (the clock stepped back) proves nothing about the collector running
             "stale": abs(now - last) > cfg.poll_seconds * 3 if last else True,
