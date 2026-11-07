@@ -10,6 +10,8 @@ import logging
 import mimetypes
 import os
 import re
+import socket
+import threading
 import time
 from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodySeparatorDefect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +44,12 @@ _ALLOW = {"Allow": "GET, HEAD, POST"}
 # sent after Content-Type and Content-Length on every response; a route may override any of them (static: no-cache)
 _SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
                      "Cache-Control": "no-store", "Content-Security-Policy": CSP}
+# the answer to a connection over the limit: built once, sent without reading the request, so the accept loop never
+# waits on the client; the same security headers as every other response
+_BUSY_BODY = b'{"error": "busy"}'
+_BUSY_RESPONSE = ("HTTP/1.0 503 Service Unavailable\r\n" + "".join(
+    f"{k}: {v}\r\n" for k, v in {"Content-Type": _JSON, "Content-Length": str(len(_BUSY_BODY)), **_SECURITY_HEADERS,
+                                  "Retry-After": "5", "Connection": "close"}.items()) + "\r\n").encode("latin-1") + _BUSY_BODY
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
@@ -83,18 +91,58 @@ def _csv_row(d: dict) -> list:
             ts(d["archived_ts"]), cell(d["note"])]
 
 
+class _DeadlineRaw(io.RawIOBase):
+    """The socket's reader with one deadline for the whole request. Each recv gets only the time left, so a client
+    that trickles a byte at a time cannot keep the thread by resetting a per-read timeout; past the deadline the
+    read raises TimeoutError. Between reads the socket is back on the handler's write timeout."""
+
+    def __init__(self, raw: io.RawIOBase, sock: socket.socket, deadline: float, write_timeout: float | None) -> None:
+        super().__init__()
+        self._raw, self._sock, self._deadline, self._write_timeout = raw, sock, deadline, write_timeout
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: bytearray | memoryview) -> int | None:  # type: ignore[override]
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request not read in time")
+        self._sock.settimeout(max(0.05, left))
+        try:
+            return self._raw.readinto(b)
+        finally:
+            try:
+                self._sock.settimeout(self._write_timeout)
+            except OSError:  # the socket was closed under us
+                pass
+
+    def close(self) -> None:
+        if not self.closed:
+            super().close()
+            self._raw.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     """The UI and API. make_handler() binds it to one config, database and version through a subclass."""
 
     server_version = "leasewatch"
     sys_version = ""
-    timeout = 30  # a client that stalls mid-request does not hold a thread forever
+    timeout = 30  # a client that stalls mid-response does not hold a thread forever
+    # request line, headers and body must all arrive within this many seconds of the connection's start
+    REQUEST_READ_SECONDS: float = 15
     # set per server by make_handler()
     cfg: Config
     db: Database
     app_version: str
     verifier: auth.Verifier | None = None  # None when auth is off
     started: float = 0.0  # process start, for the collector check before the first poll attempt
+
+    def setup(self) -> None:
+        deadline = time.monotonic() + self.REQUEST_READ_SECONDS
+        super().setup()
+        if isinstance(self.connection, socket.socket) and isinstance(self.rfile, io.BufferedReader):
+            raw = self.rfile.detach()
+            self.rfile = io.BufferedReader(_DeadlineRaw(raw, self.connection, deadline, self.timeout))
 
     def log_message(self, fmt: str, *args: object) -> None:  # quieter access log
         log.debug("%s %s", self.address_string(), (fmt % args).translate(_LOG_ESCAPE))
@@ -430,6 +478,50 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
 class Server(ThreadingHTTPServer):
     request_queue_size = 128  # socketserver's default backlog of 5 drops connections under a burst (3 per page load)
     daemon_threads = True
+    # one thread per connection: without a cap, many idle connections would use up threads and memory
+    MAX_CONNECTIONS = 64
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
+        self._refused_lock = threading.Lock()
+        self._refused = 0  # refused since the last accepted connection
+
+    def process_request(self, request: socket.socket, client_address: object) -> None:  # type: ignore[override]
+        if not self._slots.acquire(blocking=False):
+            self._refuse(request)
+            return
+        with self._refused_lock:
+            refused, self._refused = self._refused, 0
+        if refused:
+            log.info("connections accepted again (%d refused)", refused)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: object) -> None:  # type: ignore[override]
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _refuse(self, request: socket.socket) -> None:
+        with self._refused_lock:
+            self._refused += 1
+            first = self._refused == 1
+        if first:
+            log.warning("connection limit (%d) reached; refusing connections", self.MAX_CONNECTIONS)
+        try:
+            request.setblocking(False)  # a full send buffer must not stop the accept loop
+            request.send(_BUSY_RESPONSE)
+            # a request that has already arrived is dropped unread: closing with unread data would reset the
+            # connection and the client could lose the 503
+            request.recv(65536)
+        except OSError:
+            pass
+        self.shutdown_request(request)
 
 
 def serve(cfg: Config, db: Database, version: str) -> ThreadingHTTPServer:
