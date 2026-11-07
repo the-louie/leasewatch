@@ -112,7 +112,7 @@ const scenarios = {
     });
     const bg = () => page.$$eval('body > header, body > main, body > footer', es => es.map(e => e.inert));
     const res = { bg_before: await bg() };
-    await page.click(`${row(MAC)} .c-ip`);
+    await page.click(`${row(MAC)} .c-dev`);
     await waitOpen(page, MAC);
     res.bg_open = await bg();
     res.tab = [];
@@ -147,7 +147,7 @@ const scenarios = {
       });
     }
     // the visually hidden header labels: in the accessibility tree, but 1 px and clipped
-    res.sr = await page.$$eval('#tbl .sr', es => es.map(e => {
+    res.sr = await page.$$eval('#tbl thead .sr', es => es.map(e => {
       const s = getComputedStyle(e), r = e.getBoundingClientRect();
       return { text: e.textContent, w: r.width, h: r.height, overflow: s.overflow, clip: s.clipPath !== 'none' || s.clip !== 'auto',
                nowrap: s.whiteSpace === 'nowrap', left: r.left };
@@ -205,11 +205,11 @@ const scenarios = {
     }, how, mac);
     const res = {};
     // a clean form closes without asking
-    await page.click(`${row(C)} .c-ip`); await waitOpen(page, C);
+    await page.click(`${row(C)} .c-dev`); await waitOpen(page, C);
     await page.keyboard.press('Escape'); await waitClosed(page);
     res.clean_close = await shown();
     // edit A's name, then try every way out with Cancel
-    await page.click(`${row(A)} .c-ip`); await waitOpen(page, A);
+    await page.click(`${row(A)} .c-dev`); await waitOpen(page, A);
     await page.type('#fName', 'Alex printer');
     res.cancel = {};
     await page.keyboard.press('Escape'); res.cancel.escape = await shown();
@@ -238,14 +238,14 @@ const scenarios = {
     const release = async (mac, name) => { const r = held; held = null; await r.continue();
       await page.waitForFunction(m => [...document.querySelectorAll('#rows tr')].some(t => t.dataset.mac === m[0] && t.querySelector('.nm').textContent === m[1]), {}, [mac, name]); }; // the save's table render is done
     const res = {};
-    await page.click(`${row(A)} .c-ip`); await waitOpen(page, A);
+    await page.click(`${row(A)} .c-dev`); await waitOpen(page, A);
     await page.type('#fName', 'Kitchen TV');
     await saveHeld();
     await page.keyboard.press('Escape');
     res.plain = { dialogs: dialogs.length, open: await drawerOpen(page) };
     await release(A, 'Kitchen TV');
     res.plain.server = (await serverDevice(page, A)).name;
-    await page.click(`${row(B)} .c-ip`); await waitOpen(page, B);
+    await page.click(`${row(B)} .c-dev`); await waitOpen(page, B);
     await page.type('#fName', 'Desk');
     await saveHeld();
     await page.type('#fName', ' PC');
@@ -258,12 +258,79 @@ const scenarios = {
     res.dialog_log = dialogs;
     return res;
   },
+  // private (locally administered) MACs: the row's border class, the sleuth and its hint; a hardware MAC has none
+  async private(page) {
+    const rows = await page.$$eval('#rows tr', trs => trs.map(t => {
+      const p = t.querySelector('.c-mac .priv'), s = p && getComputedStyle(p);
+      return { mac: t.dataset.mac, cls: t.classList.contains('is-private'), shadow: getComputedStyle(t.querySelector('td')).boxShadow,
+               shown: !!p && s.display !== 'none' && p.offsetWidth > 0, emoji: p ? p.textContent.includes('\u{1F575}\u{FE0F}') : false,
+               title: p ? p.getAttribute('title') : null, sr: p && p.querySelector('.sr') ? p.querySelector('.sr').textContent : null,
+               copy_text: t.querySelector('.c-mac .cp') ? t.querySelector('.c-mac .cp').textContent : null };
+    }));
+    // the merged device's drawer lists the MAC merged into it and why
+    const DEV = '02:00:00:00:10:01';
+    await page.click(`${row(DEV)} .c-dev`);
+    await waitOpen(page, DEV);
+    const drawer = await page.evaluate(() => {
+      const t = document.querySelector('#dBody table.aliases');
+      return { heading: [...document.querySelectorAll('#dBody h3')].map(h => h.textContent),
+               why: t && t.previousElementSibling ? t.previousElementSibling.textContent : null,
+               head: t ? [...t.querySelectorAll('thead th')].map(th => th.textContent) : null,
+               rows: t ? [...t.querySelectorAll('tbody tr')].map(r => [...r.querySelectorAll('td')].map(td => td.textContent)) : null };
+    });
+    await page.keyboard.press('Escape');
+    await waitClosed(page);
+    const UA = '00:00:5e:00:53:01';
+    await page.click(`${row(UA)} .c-dev`);
+    await waitOpen(page, UA);
+    const plain = await page.evaluate(() => ({ table: !!document.querySelector('#dBody table.aliases'),
+      heading: [...document.querySelectorAll('#dBody h3')].map(h => h.textContent) }));
+    return { rows, drawer, plain };
+  },
+  // MAC and IP text copy on click, Enter and Space; hovering or copying does not change any column width
+  async copy(page) {
+    await page.evaluate(() => {
+      window.__copied = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText: t => { window.__copied.push(t); return Promise.resolve(); } } });
+    });
+    const MAC = '00:00:5e:00:53:01';
+    const widths = () => page.evaluate(() => ({ table: document.querySelector('#tbl').offsetWidth,
+      cols: [...document.querySelectorAll('#tbl thead th')].map(t => t.offsetWidth) }));
+    const copied = () => page.evaluate(() => window.__copied.slice());
+    const res = { before: await widths() };
+    // a private row: its sleuth already makes it the widest MAC cell, so anything added on hover widens the column
+    await page.hover(`${row('02:00:00:00:10:01')} td.c-mac`);
+    res.hover_mac = await widths();
+    res.mac_title = await page.$eval(`${row(MAC)} .c-mac .cp`, e => e.getAttribute('title'));
+    await page.hover(`${row(MAC)} td.c-ip`);
+    res.hover_ip = await widths();
+    res.ip_title = await page.$eval(`${row(MAC)} .c-ip .cp`, e => e.getAttribute('title'));
+    await page.click(`${row(MAC)} .c-mac .cp`);
+    await page.waitForFunction(() => window.__copied.length === 1);
+    res.after_click = { copied: await copied(), open: await drawerOpen(page), widths: await widths(),
+      feedback: await page.$eval(`${row(MAC)} .c-mac .cp`, e => ({ cls: e.classList.contains('copied'), title: e.getAttribute('title'),
+        bubble: getComputedStyle(e, '::after').content, position: getComputedStyle(e, '::after').position })) };
+    await page.click(`${row(MAC)} .c-ip .cp`);
+    await page.waitForFunction(() => window.__copied.length === 2);
+    // keyboard: Tab reaches the IP and the MAC text; Enter and Space copy without opening the drawer
+    await page.focus(`${row(MAC)} .c-ip .cp`);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__copied.length === 3);
+    await page.keyboard.press('Tab');
+    res.tab_to = await page.evaluate(() => document.activeElement.closest('td') ? document.activeElement.closest('td').className : null);
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => window.__copied.length === 4);
+    res.keys = { copied: await copied(), open: await drawerOpen(page), role: await page.$eval(`${row(MAC)} .c-ip .cp`, e => [e.getAttribute('role'), e.tabIndex]) };
+    res.end = await widths();
+    return res;
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};
     const CLICK = '02:00:00:00:00:06', KEY = '02:00:00:00:00:0d', ROWACK = '02:00:00:00:00:0c';
     // open by click, close with Escape: focus goes back to the row
-    await page.click(`${row(CLICK)} .c-ip`);
+    await page.click(`${row(CLICK)} .c-dev`);
     await waitOpen(page, CLICK);
     res.click = { open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent), focus: await focused(page) };
     await page.keyboard.press('Escape');

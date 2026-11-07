@@ -121,7 +121,8 @@ def _extract(src: str, name: str) -> str:
 
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
-        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "formEdited"]
+        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "formEdited", "copyable",
+        "aliasesHtml"]
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
 DOM = r"""
@@ -329,7 +330,7 @@ out.known = known(); out.ack = byId.fAck.className; out.save = byId.fSave.classN
 state.meta = { now: 2000000000, new_days: 7, baseline_ts: 1 };
 state.devices = [{ mac: "02:00:00:00:00:01", ip: "10.0.0.1", vlan: "LAN", baseline: 1, acked: 0, first_seen: 1, last_seen: 1 }];
 renderTable();
-const mac = rows.list[0].kids[".c-mac"]; mac.title = "click to copy";
+const mac = rows.list[0].kids[".c-mac .cp"]; mac.title = "Click to copy";
 """
 
     # V60: a refused clipboard write falls back to selecting the MAC, as plain HTTP does (R71)
@@ -350,7 +351,7 @@ mac.onclick({ stopPropagation() {} }); out.hint = mac.title;
 mac.onmouseleave?.(); out.after = mac.title;
 """)
         self.assertEqual(out["hint"], "selected: press Ctrl+C to copy")
-        self.assertEqual(out["after"], "click to copy")
+        self.assertEqual(out["after"], "Click to copy")
 
     # V63: a replaceState the browser throttles is written once the throttle ends, so the URL is not left stale
     def test_throttled_url_write_is_retried(self) -> None:

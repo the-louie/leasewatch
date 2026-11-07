@@ -232,8 +232,10 @@
       $(".dev-meta .last", tr).textContent = d.online ? "online" : (d.last_online ? `last ${rel(d.last_online)}` : "offline");
       $(".dev-meta .where", tr).textContent = onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || "?"}` : d.sw_port ? `${d.sw_port}${d.sw_via ? " → " + d.sw_via : ""}` : "";
       $(".c-where", tr).innerHTML = whereHtml(d, false);
-      $(".c-ip", tr).textContent = d.ip || "–";
-      const mac = $(".c-mac", tr); mac.textContent = d.mac;
+      if (d.ip) copyable($(".c-ip .cp", tr), d.ip); else $(".c-ip", tr).textContent = "–"; // nothing to copy
+      copyable($(".c-mac .cp", tr), d.mac);
+      // a private (locally administered) MAC: tinted row border, the sleuth and its "private address" hint
+      if (d.private) { tr.classList.add("is-private"); $(".c-mac .priv", tr).classList.remove("hidden"); }
       const vb = $(".c-vlan .badge", tr); vb.textContent = d.vlan || "?"; vb.style.setProperty("--vc", vlanColor(d.vlan));
       $(".c-type", tr).textContent = typeText(d);
       const fs = $(".c-first", tr); fs.textContent = d.baseline ? "since the start" : rel(d.first_seen); fs.title = d.baseline ? `Already present when leasewatch started (${abs(state.meta.baseline_ts)})` : abs(d.first_seen);
@@ -244,19 +246,6 @@
       else ack.onclick = ev => { ev.stopPropagation(); setFields(d.mac, { acked: true }); };
       tr.onclick = () => openDrawer(d.mac);
       tr.onkeydown = ev => { if (ev.target !== tr) return; /* keys on the row's buttons are theirs */ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(d.mac); } };
-      mac.onclick = ev => {
-        ev.stopPropagation();
-        const done = () => { mac.classList.add("copied"); mac.title = "copied"; setTimeout(() => { mac.classList.remove("copied"); mac.title = "click to copy"; }, 900); };
-        // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
-        // select the MAC so Ctrl+C copies it, and try the old copy command
-        const fallback = () => {
-          const sel = getSelection(), r = document.createRange(); r.selectNodeContents(mac); sel.removeAllRanges(); sel.addRange(r);
-          let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
-          if (ok) done();
-          else { mac.title = "selected: press Ctrl+C to copy"; mac.onmouseleave = () => { mac.title = "click to copy"; mac.onmouseleave = null; }; } // the hint is for this click
-        };
-        if (navigator.clipboard) navigator.clipboard.writeText(d.mac).then(done, fallback); else fallback();
-      };
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
@@ -265,6 +254,24 @@
     $("#empty").classList.toggle("hidden", list.length > 0);
     $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
     $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.status !== "all"));
+  }
+
+  // the whole MAC or IP text copies on click, Enter or Space; the feedback is a class and a title, so the table keeps
+  // its column widths
+  function copyable(el, text) {
+    el.textContent = text;
+    const done = () => { el.classList.add("copied"); el.title = "Copied"; setTimeout(() => { el.classList.remove("copied"); el.title = "Click to copy"; }, 900); };
+    // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
+    // select the text so Ctrl+C copies it, and try the old copy command
+    const fallback = () => {
+      const sel = getSelection(), r = document.createRange(); r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
+      let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
+      if (ok) done();
+      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = () => { el.title = "Click to copy"; el.onmouseleave = null; }; } // the hint is for this click
+    };
+    const copy = ev => { ev.stopPropagation(); /* not the row's drawer */ if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fallback); else fallback(); };
+    el.onclick = copy;
+    el.onkeydown = ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); copy(ev); } };
   }
 
   function renderEvents() {
@@ -335,6 +342,16 @@
     return `<dt>Seen by</dt><dd>${seen.map(line).join("<br>")}</dd>`;
   }
 
+  // the private MACs merged into the device, and why (an older server sends no aliases list: no section)
+  function aliasesHtml(aliases) {
+    if (!aliases || !aliases.length) return "";
+    const why = a => a.reason === "client-id" ? `client-id ${a.detail}` : a.reason === "hostname" ? `hostname ${a.detail}` : `${a.reason} ${a.detail}`;
+    return `<h3>Merged addresses</h3>
+      <p class="muted note">The device used these private addresses too. Each one was merged into it because it sent the same DHCP client-id or hostname as this device.</p>
+      <table class="aliases"><thead><tr><th scope="col">MAC</th><th scope="col">Matched by</th><th scope="col">Merged</th><th scope="col">Last seen</th></tr></thead>
+      <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td></tr>`).join("")}</tbody></table>`;
+  }
+
   async function refreshDrawer(mac, focus) {
     // edited = differs from what the form was rendered with or last saved, not from the server's values: a rename by
     // another viewer must still refresh a clean form, and text typed while a save ran must survive its refresh. A form
@@ -361,6 +378,7 @@
         <dt>Status</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${d.online ? "online" : (d.last_online ? `offline · last online ${esc(rel(d.last_online))}` : "offline · not seen online since leasewatch started")}</dd>
         <dt>IP</dt><dd class="mono">${esc(d.ip || "–")}</dd>
         <dt>MAC</dt><dd class="mono">${esc(d.mac)}</dd>
+        ${d.private ? '<dt>Address</dt><dd><span class="priv" title="private address"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> private (locally administered): the device may change it</dd>' : ""}
         <dt>Hostname</dt><dd>${esc(d.hostname || "–")}</dd>
         <dt>Vendor</dt><dd>${esc(d.vendor || "unknown")}</dd>
         <dt>Network</dt><dd><span class="badge vlan" style="--vc:${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="fw1 interface">${esc(d.iface)}</span></dd>
@@ -387,6 +405,7 @@
           <span class="saved" id="fSaved"></span>
         </div>
       </div>
+      ${aliasesHtml(r.aliases)}
       <h3>History</h3>
       <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" style="--vc:${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
       <h3>Events</h3>

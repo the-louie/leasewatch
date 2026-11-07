@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .config import Config
 from .connectors import InstanceSpec
+from .connectors.merge import is_private_mac
 from .db import Database
 from .fw1 import MAC_RE
 
@@ -30,6 +31,11 @@ _LOG_ESCAPE = str.maketrans({ord("\\"): "\\\\", **{c: f"\\x{c:02x}" for c in (*r
 # (or row) of its own; quotes and blanks in between are dropped by its parser, so they do not hide the formula
 # CRLF is one break: an apostrophe between "\r" and "\n" would change the note text in a restore
 _CSV_SEMI_FORMULA = re.compile(r"(?:\r\n|[;\r\n])(?=[\s\"]*[=+\-@\t\r])")
+
+
+def _dev(d: dict) -> dict:
+    """A device row as the API sends it: plus `private`, a locally administered MAC (the page marks those)."""
+    return {**d, "private": is_private_mac(d["mac"])}
 
 
 def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPRequestHandler]:
@@ -168,7 +174,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                     ok = m["last_poll_ok"] and not m["stale"]
                     return self._json({"ok": ok, **m}, 200 if ok else 503)
                 if p == "/api/devices":
-                    return self._json({"meta": self._meta(), "devices": db.devices()})
+                    return self._json({"meta": self._meta(), "devices": [_dev(d) for d in db.devices()]})
                 if p == "/api/devices.csv":
                     return self._csv()
                 if p == "/api/status":
@@ -184,7 +190,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                     out = db.device_detail(m.group(1))
                     if not out:
                         return self._error(404, "unknown device")
-                    return self._json(out)
+                    return self._json({**out, "device": _dev(out["device"])})
                 return self._error(404, "not found")
             except (BrokenPipeError, ConnectionResetError):
                 return
@@ -249,7 +255,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 return self._error(500, "internal error")
             if not d:
                 return self._error(404, "unknown device")
-            return self._json({"device": d})
+            return self._json({"device": _dev(d)})
 
         def _csv(self) -> None:
             buf = io.StringIO()
@@ -260,11 +266,11 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
             def ts(t: int | None) -> str:
                 return time.strftime("%Y-%m-%dT%H:%M%z", time.localtime(t)) if t else ""  # ISO 8601 with the server's UTC offset
-            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "note"])
+            w.writerow(["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via", "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private", "note"])
             for d in db.devices():
                 w.writerow([d["mac"], d["ip"], cell(d["name"]), cell(d["hostname"]), cell(d["vendor"]), d["vlan"], d["lease_type"], d["sources"], d["online"],
                             d["link"], cell(d["sw_port"]), cell(d["sw_via"]), cell(d["loc_source"]), cell(d["wifi_ssid"]), cell(d["wifi_ap"]), d["wifi_signal"] if d["wifi_signal"] is not None else "",
-                            ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(d["note"])])
+                            ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))), cell(d["note"])])
             self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="leasewatch-devices.csv"'})
 
     return Handler

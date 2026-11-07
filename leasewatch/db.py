@@ -162,11 +162,15 @@ class Database:
         return dict(r[0]) if r else None
 
     def device_detail(self, mac: str) -> dict | None:
-        """The drawer's device, history, events and seen rows, or None for an unknown MAC."""
-        with self._lock:  # one hold, as stats(): the four reads must not straddle a collector write
+        """The drawer's device, history, events, seen rows and merged MACs, or None for an unknown MAC."""
+        with self._lock:  # one hold, as stats(): the five reads must not straddle a collector write
             d = self.device(mac)
             return {"device": d, "history": self.history(d["mac"]), "events": self.events(d["mac"]),
-                    "seen": self.seen(d["mac"])} if d else None
+                    "seen": self.seen(d["mac"]), "aliases": self.aliases(d["mac"])} if d else None
+
+    def aliases(self, mac: str) -> list[dict]:
+        """The private MACs merged into the device mac, newest merge first."""
+        return [dict(r) for r in self.q("SELECT mac, reason, detail, merged_ts, last_seen FROM aliases WHERE device=? ORDER BY merged_ts DESC, mac", (mac,))]
 
     def seen(self, mac: str) -> list[dict]:
         return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]

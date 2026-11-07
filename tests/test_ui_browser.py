@@ -282,6 +282,81 @@ class BrowserUITest(_BrowserCase):
         self.assertEqual(d["rowack"]["unacked_card"], str(len(NEW) - 2))
 
 
+class BrowserPrivateTest(_BrowserCase):
+    """Private (locally administered) MACs, the merged-MAC list and click-to-copy. A hardware MAC from the RFC 7042
+    documentation range, a private device that sends a client-id, and a new private MAC merged into it by that id."""
+    UA, DEV, NEWP, OTHER = "00:00:5e:00:53:01", "02:00:00:00:10:01", "06:00:00:00:10:02", "0a:00:00:00:10:03"
+    CID = "ff00000000000001"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str, cid: str = "") -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True, client_id=cid)
+        first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
+        base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
+        assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
+        cls.run_scenarios(base, ("private", "copy"))
+
+    def test_private_rows_are_marked(self) -> None:
+        rows = {r["mac"]: r for r in self.result("private")["rows"]}
+        self.assertEqual(set(rows), {self.UA, self.DEV, self.OTHER})
+        for m in (self.DEV, self.OTHER):
+            with self.subTest(mac=m):
+                r = rows[m]
+                self.assertTrue(r["cls"])
+                self.assertNotEqual(r["shadow"], "none")  # the tinted border
+                self.assertTrue(r["shown"])
+                self.assertTrue(r["emoji"])
+                self.assertEqual(r["title"], "private address")
+                self.assertEqual(r["sr"], "private address")
+                self.assertEqual(r["copy_text"], m)  # the sleuth is not part of the copied text
+        ua = rows[self.UA]
+        self.assertFalse(ua["cls"])
+        self.assertEqual(ua["shadow"], "none")
+        self.assertFalse(ua["shown"])
+        self.assertEqual(ua["copy_text"], self.UA)
+
+    def test_drawer_lists_merged_macs(self) -> None:
+        d = self.result("private")
+        self.assertIn("Merged addresses", d["drawer"]["heading"])
+        self.assertIn("client-id", d["drawer"]["why"])
+        self.assertEqual(d["drawer"]["head"], ["MAC", "Matched by", "Merged", "Last seen"])
+        self.assertEqual(len(d["drawer"]["rows"]), 1)
+        mac_cell, why, merged, seen = d["drawer"]["rows"][0]
+        self.assertEqual(mac_cell, self.NEWP)
+        self.assertEqual(why, f"client-id {self.CID}")
+        self.assertRegex(merged, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertEqual(seen, "just now")
+        self.assertFalse(d["plain"]["table"])
+        self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_click_and_keys_copy_mac_and_ip(self) -> None:
+        d = self.result("copy")
+        self.assertEqual(d["mac_title"], "Click to copy")
+        self.assertEqual(d["ip_title"], "Click to copy")
+        self.assertEqual(d["after_click"]["copied"], [self.UA])
+        self.assertFalse(d["after_click"]["open"])  # copying does not open the drawer
+        fb = d["after_click"]["feedback"]
+        self.assertTrue(fb["cls"])
+        self.assertEqual(fb["title"], "Copied")
+        self.assertEqual(fb["bubble"], '"Copied"')
+        self.assertEqual(fb["position"], "absolute")  # over the text, not in the flow
+        self.assertEqual(d["keys"]["copied"], [self.UA, "10.0.1.20", "10.0.1.20", self.UA])
+        self.assertFalse(d["keys"]["open"])
+        self.assertEqual(d["tab_to"], "c-mac mono")
+        self.assertEqual(d["keys"]["role"], ["button", 0])
+
+    def test_hover_and_copy_keep_the_table_width(self) -> None:
+        d = self.result("copy")
+        for when in ("hover_mac", "hover_ip", "end"):
+            with self.subTest(when=when):
+                self.assertEqual(d[when], d["before"])
+        self.assertEqual(d["after_click"]["widths"], d["before"])
+
+
 class BrowserPerfTest(_BrowserCase):
     """Search on 2000 devices (hostnames dev-0000 .. dev-1999, all on HomeNet)."""
     N = 2000

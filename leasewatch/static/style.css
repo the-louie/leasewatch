@@ -2,6 +2,7 @@
   --bg: #f6f7f9; --bg2: #ffffff; --bg3: #eef0f4; --line: #dfe3ea; --text: #1b1f27; --muted: #667085;
   --accent: #2563eb; --accent-bg: #e8effd; --warn: #b45309; --warn-bg: #fff4e0; --ok: #15803d; --ok-bg: #e5f6ea;
   --new: #7c3aed; --new-bg: #f1eafe; --danger: #b91c1c; --danger-bg: #fdecec; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.1);
+  --priv: #e0b23c;
   --radius: 12px; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --vlan0: #64748b; --vlan1: #2563eb; --vlan2: #0d9488; --vlan3: #d97706; --vlan4: #db2777; --vlan5: #0891b2; --vlan6: #65a30d; --vlan7: #dc2626; --vlan8: #9a3412;
 }
@@ -11,12 +12,14 @@
   --bg: #0f1115; --bg2: #171a21; --bg3: #1f232c; --line: #2a2f3a; --text: #e6e8ee; --muted: #8b93a5;
   --accent: #60a5fa; --accent-bg: #16243d; --warn: #fbbf24; --warn-bg: #3a2a08; --ok: #4ade80; --ok-bg: #10301c;
   --new: #c084fc; --new-bg: #2b1a44; --danger: #f87171; --danger-bg: #3b1414; --shadow: 0 1px 2px rgba(0,0,0,.5);
+  --priv: #8a6d1f;
   --vlan0: #94a3b8; --vlan1: #60a5fa; --vlan2: #2dd4bf; --vlan3: #fbbf24; --vlan4: #f472b6; --vlan5: #22d3ee; --vlan6: #a3e635; --vlan7: #f87171; --vlan8: #fdba74;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #0f1115; --bg2: #171a21; --bg3: #1f232c; --line: #2a2f3a; --text: #e6e8ee; --muted: #8b93a5;
   --accent: #60a5fa; --accent-bg: #16243d; --warn: #fbbf24; --warn-bg: #3a2a08; --ok: #4ade80; --ok-bg: #10301c;
   --new: #c084fc; --new-bg: #2b1a44; --danger: #f87171; --danger-bg: #3b1414; --shadow: 0 1px 2px rgba(0,0,0,.5);
+  --priv: #8a6d1f;
   --vlan0: #94a3b8; --vlan1: #60a5fa; --vlan2: #2dd4bf; --vlan3: #fbbf24; --vlan4: #f472b6; --vlan5: #22d3ee; --vlan6: #a3e635; --vlan7: #f87171; --vlan8: #fdba74;
 } }
 
@@ -28,7 +31,7 @@ button { font: inherit; color: inherit; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 13.5px; font-variant-numeric: tabular-nums; }
-:is(button, a, tr.row):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:is(button, a, tr.row, .cp):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 tr.row:focus-visible { outline-offset: -2px; }
 
 .top { display: flex; align-items: center; gap: 16px; padding: 18px 24px 10px; max-width: 1280px; margin: 0 auto; }
@@ -122,9 +125,16 @@ tbody tr:last-child td { border-bottom: 0; }
 .c-first, .c-last { white-space: nowrap; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
 .c-first.recent { color: var(--text); }
 .c-act { width: 1%; text-align: right; white-space: nowrap; }
-td.c-mac { cursor: copy; }
-td.c-mac:hover::after { content: " ⧉"; color: var(--muted); }
+/* click-to-copy MAC and IP text: nothing is added on hover, and "Copied" floats above the text, so no column moves */
+.cp { position: relative; cursor: copy; border-radius: 4px; }
+.cp:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.cp.copied::after { content: "Copied"; position: absolute; left: 50%; bottom: calc(100% + 3px); transform: translateX(-50%); padding: 2px 7px; border-radius: 6px; background: var(--ok); color: var(--bg2); font: 600 11px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; white-space: nowrap; pointer-events: none; }
 .copied { color: var(--ok) !important; }
+/* a private (locally administered) MAC: a tinted inset border, drawn as a shadow so it takes no width */
+tr.row.is-private td { box-shadow: inset 0 1px 0 var(--priv), inset 0 -1px 0 var(--priv); }
+tr.row.is-private td:first-child { box-shadow: inset 2px 0 0 var(--priv), inset 0 1px 0 var(--priv), inset 0 -1px 0 var(--priv); }
+tr.row.is-private td:last-child { box-shadow: inset -1px 0 0 var(--priv), inset 0 1px 0 var(--priv), inset 0 -1px 0 var(--priv); }
+.priv { margin-left: 5px; cursor: help; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 .empty p { margin: 0 0 12px; }
 
@@ -159,6 +169,10 @@ h3 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color:
 .tl li::before { content: ""; position: absolute; left: -6px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .tl li.none { color: var(--muted); } .tl li.none::before { display: none; }
 .tl .t { color: var(--muted); font-size: 12px; display: block; }
+.note { font-size: 13px; margin: 0 0 8px; }
+table.aliases { font-size: 13px; margin-bottom: 4px; }
+table.aliases th { padding: 4px 8px 4px 0; font-size: 11px; background: none; }
+table.aliases td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }
 
 footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--muted); font-size: 12px; }
 

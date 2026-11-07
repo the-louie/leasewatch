@@ -333,7 +333,7 @@ class ApiReadTests(WebTestCase):
         self.assertTrue(body.startswith(b"\xef\xbb\xbf"), "missing UTF-8 BOM")
         text = body.decode("utf-8-sig")
         lines = text.splitlines()
-        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,loc_source,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,note")
+        self.assertEqual(lines[0], "mac,ip,name,hostname,vendor,vlan,lease_type,sources,online,link,switch_port,via,loc_source,wifi_ssid,wifi_ap,wifi_signal,first_seen,last_online,last_listed,acked,private,note")
         self.assertEqual([l.split(",")[0] for l in lines[1:]], [MAC2, MAC3, MAC1])
         self.assertIn("Kök-TV", text)
         self.assertIn("Köksbolaget", text)

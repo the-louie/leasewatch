@@ -122,16 +122,16 @@ class DeviceDetailTest(DbBase):
             c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(1,?,'new','')", (MAC,))
             c.execute("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,'fw1',1,1)", (MAC,))
         owned = []
-        orig = self.db.seen
+        orig = self.db.aliases
 
-        def seen(mac: str) -> list[dict]:  # the last of the four reads: the lock must still be held by this thread
+        def aliases(mac: str) -> list[dict]:  # the last of the reads (S4 T-05 added it): the lock must still be held
             owned.append(self.db._lock._is_owned())
             return orig(mac)
-        with mock.patch.object(self.db, "seen", seen):
+        with mock.patch.object(self.db, "aliases", aliases):
             out = self.db.device_detail(MAC)
         self.assertEqual(owned, [True])
         self.assertEqual(out, {"device": self.db.device(MAC), "history": self.db.history(MAC),
-                               "events": self.db.events(MAC), "seen": self.db.seen(MAC)})
+                               "events": self.db.events(MAC), "seen": self.db.seen(MAC), "aliases": []})
         self.assertEqual((len(out["history"]), len(out["events"]), len(out["seen"])), (1, 1, 1))
 
 
