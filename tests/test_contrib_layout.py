@@ -74,8 +74,7 @@ class ContribLayoutTest(unittest.TestCase):
         self.assertEqual(sorted(names), sorted(testing.__all__))
 
     def test_contrib_imports_only_public_names(self) -> None:
-        if not contrib_dists():
-            self.skipTest("no contrib packages yet")
+        self.assertTrue(contrib_dists(), "contrib/ has no packages")
         allowed = {PUBLIC_MODULE: set(public_names()), TESTING_MODULE: set(public_names("testing-names"))}
         bad = []
         for p in py_files(CONTRIB):
@@ -88,8 +87,7 @@ class ContribLayoutTest(unittest.TestCase):
 
     def test_contrib_package_tests_pass(self) -> None:
         dists = [d for d in contrib_dists() if os.path.isdir(os.path.join(CONTRIB, d, "tests"))]
-        if not dists:
-            self.skipTest("no contrib package has a tests directory yet")
+        self.assertTrue(dists, "no contrib package has a tests directory")
         env = {**os.environ, "PYTHONPATH": ROOT}
         for dist in dists:
             with self.subTest(dist=dist):
@@ -102,9 +100,8 @@ class ContribLayoutTest(unittest.TestCase):
 
 class ContribHelperTest(unittest.TestCase):
     def test_use_contrib_adds_and_removes_path(self) -> None:
-        if not contrib_dists():
-            self.skipTest("no contrib packages yet")
-        dist = contrib_dists()[0]
+        self.assertTrue(contrib_dists(), "contrib/ has no packages")
+        dist =contrib_dists()[0]
         inner = unittest.FunctionTestCase(lambda: None)
         path = use_contrib(inner, dist)
         self.assertEqual(sys.path[0], path)

@@ -10,7 +10,27 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "The Louie", email = "github@louie.se" }]
+keywords = ["dhcp", "arp", "opnsense", "kea", "network", "inventory", "unifi", "snmp"]
+# no "License ::" classifier: the SPDX expression in `license` replaces it (setuptools>=77 rejects both)
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Monitoring",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/the-louie/leasewatch"
+Source = "https://github.com/the-louie/leasewatch"
+Changelog = "https://github.com/the-louie/leasewatch/blob/main/CHANGELOG.md"
+Issues = "https://github.com/the-louie/leasewatch/issues"
 
 [project.optional-dependencies]
 # same pins as requirements.txt: pysnmp for SNMPv3 to the switch, cryptography as its crypto backend
@@ -26,7 +46,7 @@ version = { attr = "leasewatch.__version__" }
 include = ["leasewatch", "leasewatch.*"]
 
 [tool.setuptools.package-data]
-leasewatch = ["static/*"]
+leasewatch = ["static/*", "py.typed"]
 "leasewatch.snmp_profiles" = ["*.json"]
 
 [tool.ruff]
