@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -468,6 +469,24 @@ class BrowserPerfTest(_BrowserCase):
         self.assertEqual(d["escape"]["rows"], self.N)
         self.assertEqual(d["escape"]["value"], "")
         self.assertEqual(d["idle_enter_renders"], 0)  # Enter with no search pending does not rebuild
+
+
+class BrowserCollectorStaleTest(_BrowserCase):
+    """No poll attempt for longer than the attempt limit: the banner tells to restart, not "Data is stale"."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new])
+        db.set_meta("last_attempt_ts", str(int(time.time()) - 7200))
+        cls.run_scenarios(base, ("collector",))
+
+    def test_banner_says_restart(self) -> None:
+        text = self.result("collector")["banner"]
+        self.assertTrue(text.startswith("Collector has not run a poll since "), text)
+        self.assertTrue(text.endswith("restart the service"), text)
+        self.assertNotIn("Data is stale", text)
 
 
 class BrowserAuthTest(_BrowserCase):

@@ -362,6 +362,7 @@ class Collector:
             self.db.set_meta("last_error", msg, c)
             self.db.set_meta("last_error_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "0", c)
+            self.db.set_meta("last_attempt_ts", str(now), c)  # a failed poll is still a poll: the loop is alive
             # the grace rule still applies while fw1 is unreachable: nothing stays "online" forever
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
         return {"ok": False, "error": msg}
@@ -515,6 +516,7 @@ class Collector:
             if not waiting:
                 self.db.set_meta("first_run_done", "1", c)
             self.db.set_meta("last_poll_ts", str(now), c)
+            self.db.set_meta("last_attempt_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "1", c)
             self.db.set_meta("last_error", "", c)
             self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)

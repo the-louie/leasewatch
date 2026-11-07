@@ -50,6 +50,8 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             raise ValueError("AUTH_PASSWORD_HASH is not a valid hash")
         verifier = auth.Verifier(cfg.auth_user, parsed)
 
+    started = time.time()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "leasewatch"
         sys_version = ""
@@ -117,7 +119,15 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             m = db.all_meta()
             now = int(time.time())
             last = int(m.get("last_poll_ts") or 0)
+            attempt = int(m.get("last_attempt_ts") or 0)
+            # a poll lasts at most the producers' timeout plus the enrichers' timeout plus the mail; the loop then waits
+            # POLL_SECONDS, and one missed round is allowed on top
+            limit = (2 * cfg.poll_seconds + 2 * max([i.timeout for i in cfg.instances if m.get(f"conn.{i.name}.enabled", "1") == "1"] or [0]) + 120)
+            # abs(): an attempt in the future (the clock stepped back) proves nothing; no attempt yet: by process age
+            collector_stale = abs(now - attempt) > limit if attempt else now - started > limit
             return {
+                "last_attempt_ts": attempt or None, "last_attempt_age": abs(now - attempt) if attempt else None,
+                "attempt_limit": limit, "collector_stale": collector_stale,
                 "now": now, "last_poll_ts": last, "last_poll_age": abs(now - last) if last else None,  # abs(): as stale below
                 "last_poll_ok": m.get("last_poll_ok") == "1", "last_error": m.get("last_error", ""),
                 "last_error_ts": int(m.get("last_error_ts") or 0) or None, "last_raw": m.get("last_raw", ""),
@@ -200,7 +210,9 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 if p == "/healthz":
                     m = self._meta()
                     ok = m["last_poll_ok"] and not m["stale"]
-                    return self._json({"ok": ok, **m}, 200 if ok else 503)
+                    # collector: the poll loop is hung or dead (restart helps); source: polls run but fail or the data is old
+                    reason = "ok" if ok else "collector" if m["collector_stale"] else "source"
+                    return self._json({"ok": ok, "reason": reason, **m}, 200 if ok else 503)
                 if p == "/api/devices":
                     return self._json({"meta": self._meta(), "devices": [_dev(d) for d in db.devices()]})
                 if p == "/api/devices.csv":

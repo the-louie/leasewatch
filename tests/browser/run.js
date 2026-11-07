@@ -65,6 +65,10 @@ const scenarios = {
              favicon: await page.evaluate(async () => { const l = document.querySelector('link[rel~="icon"]');
                const r = l && await fetch(l.href); return r ? { status: r.status, type: r.headers.get('content-type') } : null; }) };
   },
+  async collector(page) {
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    return { banner: await page.$eval('#banner', b => b.textContent) };
+  },
   async rows(page) {
     return { names: await rowNames(page), count_text: await page.$eval('#count', e => e.textContent),
              total_card: await page.$eval('#cTotal', e => e.textContent) };
