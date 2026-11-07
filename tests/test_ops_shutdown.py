@@ -99,7 +99,7 @@ class UnifiCollectorClose(Base):
 
 
 class MainOrder(unittest.TestCase):
-    def test_main_closes_connectors_after_the_poller_join(self):
+    def test_main_closes_connectors_then_database_after_the_poller_join(self):
         import tempfile
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -117,6 +117,8 @@ class MainOrder(unittest.TestCase):
         def database(path: str) -> object:
             db = real(path)
             self.addCleanup(db._conn.close)
+            real_close = db.close
+            db.close = lambda *a, **k: (order.append("db"), real_close(*a, **k))[1]
             return db
         with mock.patch.object(cli, "Database", database), mock.patch.object(cli, "serve", return_value=srv), \
                 mock.patch.object(cli, "Collector", return_value=col), \
@@ -124,7 +126,7 @@ class MainOrder(unittest.TestCase):
                 mock.patch.object(cli.signal, "signal"), mock.patch.object(cli, "startup_line", return_value=""), \
                 mock.patch.object(cli, "types_line", return_value=""), self.assertLogs("leasewatch", "INFO"):
             self.assertEqual(cli.main([]), 0)
-        self.assertEqual(order, ["flush", "join", "close"])
+        self.assertEqual(order, ["flush", "join", "close", "db"])
 
 
 if __name__ == "__main__":

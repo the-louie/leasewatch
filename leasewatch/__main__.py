@@ -638,7 +638,10 @@ def main(argv: list[str] | None = None) -> int:
     if verifier is not None:  # failed logins still held back for the next log line
         verifier.flush()
     t.join(10)  # let a poll in flight commit before the interpreter goes away
-    collector.close()  # last: a connector may be logging out of its device, which the poll in flight could still use
+    if t.is_alive():
+        log.warning("collector still busy after 10 s; closing the database anyway")
+    collector.close()  # a connector may be logging out of its device, which the poll in flight could still use
+    db.close()  # last: merges the WAL into the main file
     return 0
 
 

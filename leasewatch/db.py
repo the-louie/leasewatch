@@ -83,7 +83,7 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._conn: sqlite3.Connection | None = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -126,26 +126,72 @@ class Database:
         for stmt in INDEXES:
             with self.tx() as c:
                 c.execute(stmt)
+        if sqlite3.sqlite_version_info >= (3, 46, 0):  # a bounded ANALYZE of what the schema has not seen yet
+            try:
+                self._conn.execute("PRAGMA analysis_limit=400")
+                self._conn.execute("PRAGMA optimize=0x10002")
+            except sqlite3.Error as e:
+                log.debug("startup optimize skipped: %s", e)
+
+    def _c(self) -> sqlite3.Connection:
+        conn = self._conn
+        if conn is None:
+            raise sqlite3.ProgrammingError("database is closed")
+        return conn
+
+    def close(self, timeout: float = 5.0) -> bool:
+        """Merge the WAL into the main file and close the connection. False: a query held the lock, nothing done."""
+        if not self._lock.acquire(timeout=timeout):
+            log.warning("database busy at shutdown; the WAL is not merged")
+            return False
+        try:
+            conn = self._conn
+            if conn is None:
+                return True
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error as e:
+                    log.warning("rollback at shutdown failed: %s", e)
+            try:
+                conn.execute("PRAGMA optimize")
+            except sqlite3.Error as e:
+                log.warning("PRAGMA optimize at shutdown failed: %s", e)
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if row is not None and row[0] == 1:
+                    log.warning("WAL checkpoint incomplete at shutdown (another process reads the database)")
+            except sqlite3.Error as e:
+                log.warning("WAL checkpoint at shutdown failed: %s", e)
+            try:
+                conn.close()
+            except sqlite3.Error as e:
+                log.warning("closing the database failed: %s", e)
+            self._conn = None
+        finally:
+            self._lock.release()
+        log.info("database closed")
+        return True
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
-            if self._conn.in_transaction:  # a failed COMMIT+ROLLBACK must not wedge every later transaction
-                self._conn.execute("ROLLBACK")
-            self._conn.execute("BEGIN")
+            if self._c().in_transaction:  # a failed COMMIT+ROLLBACK must not wedge every later transaction
+                self._c().execute("ROLLBACK")
+            self._c().execute("BEGIN")
             try:
-                yield self._conn
-                self._conn.execute("COMMIT")
+                yield self._c()
+                self._c().execute("COMMIT")
             except BaseException:  # also KeyboardInterrupt/GeneratorExit: never leave the transaction open
                 try:
-                    self._conn.execute("ROLLBACK")
+                    self._c().execute("ROLLBACK")
                 except Exception:  # e.g. already rolled back; the original exception is the one that matters
                     pass
                 raise
 
     def q(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+            return self._c().execute(sql, params).fetchall()
 
     # --- meta ---------------------------------------------------------------
     def get_meta(self, key: str, default: str = "") -> str:
@@ -157,7 +203,7 @@ class Database:
         # roll back the whole poll transaction around it, so it is stored as "?"
         value = str(value).encode("utf-8", "replace").decode("utf-8")
         with self._lock:  # RLock: harmless inside tx(), required outside it
-            (conn or self._conn).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+            (conn or self._c()).execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def all_meta(self) -> dict:
         return {r["key"]: r["value"] for r in self.q("SELECT key, value FROM meta")}
@@ -173,7 +219,7 @@ class Database:
     def device_detail(self, mac: str) -> dict | None:
         """The drawer's device, history, events, seen rows and merged MACs, or None for an unknown MAC."""
         with self._lock:  # one hold, as stats(): the five reads must not straddle a collector write
-            d = self.device(mac) or self.device(self._alias_owner(self._conn, mac))  # design-s4 §1: an alias MAC opens its device
+            d = self.device(mac) or self.device(self._alias_owner(self._c(), mac))  # design-s4 §1: an alias MAC opens its device
             return {"device": d, "history": self.history(d["mac"]), "events": self.events(d["mac"]),
                     "seen": self.seen(d["mac"]), "aliases": self.aliases(d["mac"])} if d else None
 
@@ -237,9 +283,9 @@ class Database:
         now = int(time.time())
         with self._lock:  # one lock hold: the three counts must not straddle a collector write
             # archived devices are not in the list, so not in its counts; the arrivals chart below keeps them
-            rows = self._conn.execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices WHERE archived_ts IS NULL GROUP BY vlan ORDER BY n DESC").fetchall()
-            recent = self._conn.execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
-            tot = self._conn.execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
+            rows = self._c().execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices WHERE archived_ts IS NULL GROUP BY vlan ORDER BY n DESC").fetchall()
+            recent = self._c().execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
+            tot = self._c().execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
         return {
             "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],

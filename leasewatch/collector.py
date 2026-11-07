@@ -533,7 +533,10 @@ class Collector:
         while not stop_event.is_set():
             try:
                 self.run_once()
-            except Exception:
+            except Exception as e:
+                if stop_event.is_set() and isinstance(e, sqlite3.ProgrammingError):
+                    log.debug("poll cut off by shutdown")  # the database was closed under a poll that outlived the join
+                    break
                 log.exception("collector crashed in run_once; continuing")
                 try:
                     self._fail("internal error in collector (see logs)")
