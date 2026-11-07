@@ -22,7 +22,7 @@ def _read(*parts: str) -> str:
 
 
 class ReadmeStatusDotTests(unittest.TestCase):
-    # S29x: a failing instance gets class "dot bad" (red, var(--danger)), not a grey dot
+    # a failing instance gets class "dot bad" (red, var(--danger)), not a grey dot
     def test_readme_failed_dot_is_red_not_grey(self) -> None:
         readme = _read("README.md")
         self.assertNotRegex(readme, r"fail\w*[^.]*\bgreys\b")
@@ -30,7 +30,7 @@ class ReadmeStatusDotTests(unittest.TestCase):
         self.assertIn("turns its dot in the status pill red", readme)
         self.assertRegex(_read("leasewatch", "static", "style.css"), r"\.dot\.bad\s*\{[^}]*var\(--danger\)")
 
-    # S17x: the grey dot the page now draws (an instance not read while polls fail) is documented
+    # the grey dot the page now draws (an instance not read while polls fail) is documented
     def test_readme_documents_grey_dot_for_unread_instance(self) -> None:
         readme = _read("README.md")
         self.assertTrue(re.search(r"grey dot", readme), "README does not say when a dot is grey")
@@ -241,7 +241,7 @@ state.meta = { ...state.meta, stale: false, last_poll_ts: now - 600 };
 renderStatus(); out.normal = $("#statusText").innerHTML;
 """)
         self.assertIn('title="fw1: boom"><span class="dot bad">', out["future"])
-        # S17x stays: with a sane clock an instance not read since the last good poll is grey
+        # with a sane clock an instance not read since the last good poll is grey
         self.assertIn('title="fw1: boom"><span class="dot bad">', out["normal"])
         self.assertIn('<span class="dot "></span>sw', out["normal"])
 

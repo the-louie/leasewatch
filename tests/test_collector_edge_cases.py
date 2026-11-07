@@ -40,7 +40,7 @@ class StartupTests(Base):
         self.assertIn("connector empty: TYPE is required", col._runs["empty"].error)
         self.assertNotIn("KeyError", col._runs["bad"].error + col._runs["empty"].error)
 
-    def test_disabled_instance_is_marked_before_the_first_poll(self):  # S26x
+    def test_disabled_instance_is_marked_before_the_first_poll(self):
         env = {"LW_CONNECTORS": "fw1,bad", **FW1, "LW_CONNECTOR__BAD__TYPE": "unifi",
                "LW_CONNECTOR__BAD__URL": "ftp://x.example.lan", "LW_CONNECTOR__BAD__USER": "u",
                "LW_CONNECTOR__BAD__PASSWORD": "pppppp"}
@@ -386,7 +386,7 @@ class DisabledErrorAndPruneReferenceTests(Base):
 
 
 class BaselineWaitTests(Base):
-    """S05x: the baseline waits until every enabled sighting producer has answered at least once."""
+    """The baseline waits until every enabled sighting producer has answered at least once."""
     ENV = {"LW_CONNECTORS": "fw1,fx", **FW1, "LW_CONNECTOR__FX__TYPE": "fakefw", "MAILGUN_KEY": "k",
            "MAILGUN_DOMAIN": "mg.example.com", "MAIL_TO": "a@example.com"}
     FX_MACS = ("02:00:00:00:00:02", "02:00:00:00:00:03")
@@ -479,7 +479,7 @@ class BaselineWaitTests(Base):
         self.assertEqual(sent, [["00:00:5e:00:53:09"]])
         self.assertEqual(self.baselines(db)["00:00:5e:00:53:09"], 0)
 
-    # B-08.4: while the baseline waits for fx, its failed check() is retried at the next poll, not backed off
+    # while the baseline waits for fx, its failed check() is retried at the next poll, not backed off
     def test_failed_check_is_retried_every_poll_while_the_baseline_waits(self):
         col, db = self.collector(self.ENV)
         sent, fx, run = [], col._connectors["fx"], col._runs["fx"]
@@ -495,7 +495,7 @@ class BaselineWaitTests(Base):
         self.assertEqual((fx.checks, fx.collects, db.get_meta("first_run_done", "")), (4, 1, "1"))
         self.assertEqual(sent, [])
 
-    # B-08.4: once the baseline is stored (here by an earlier process) a failed check() backs off as before
+    # once the baseline is stored (here by an earlier process) a failed check() backs off as before
     def test_failed_check_backs_off_after_the_baseline(self):
         col, db = self.collector(self.ENV)
         db.set_meta("first_run_done", "1")
@@ -522,7 +522,7 @@ class BaselineWaitTests(Base):
         self.assertNotEqual(db.get_meta("first_run_done", ""), "1")
         self.assertEqual(sent, [])
 
-    # B-09: while the baseline waits, a late producer's details are no change: no events, no history rows; the poll
+    # while the baseline waits, a late producer's details are no change: no events, no history rows; the poll
     # that takes the baseline writes one history row per device with the complete picture
     def test_late_details_during_the_wait_write_no_events_or_history(self):
         col, db = self.collector(self.ENV)

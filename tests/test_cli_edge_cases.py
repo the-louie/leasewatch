@@ -87,7 +87,7 @@ class CliTests(unittest.TestCase):
             os.close(w)
         self.assertEqual((p.returncode, p.stderr.decode()), (0, ""))
 
-    # S01x: a key variable that is set but empty
+    # a key variable that is set but empty
     def test_empty_key_variable_is_named(self):
         os.environ["TEST_AK"] = ""
         rc, out = self.cli("snmp-detect", *FLAGS)

@@ -211,7 +211,7 @@ class DnsmasqWithFirewallTest(ContribFitBase):
             # a later poll without changes: still nothing to mail
             col.run_once()
         mail.assert_not_called()
-        # no event at all: the late leases only complete the baseline row of fw1's device (B-09)
+        # no event at all: the late leases only complete the baseline row of fw1's device
         self.assertEqual(db.q("SELECT COUNT(*) n FROM events")[0]["n"], 0)
 
         both, lease_only = self.device(db, MAC_FW), self.device(db, MAC_LEASE)

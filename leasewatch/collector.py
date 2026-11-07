@@ -674,12 +674,12 @@ class Collector:
         now = int(time.time())
         first_run = self.db.get_meta("first_run_done", "") != "1"
         prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
-        # only a truly first poll: during the baseline wait (S05x) devices are already stored, and an empty poll then is
+        # only a truly first poll: during the baseline wait devices are already stored, and an empty poll then is
         # an ordinary one that must run the merge (devices go offline), not fail as "first poll"
         if first_run and not sightings and not self.db.q("SELECT 1 FROM devices LIMIT 1"):
             log.warning("first poll returned no devices (%s); not taking a baseline", raw_stats)
             return self._fail("first poll returned no devices", enrich_status)
-        # S05x: a baseline taken without a producer that has never answered would mail all of its devices as new once
+        # a baseline taken without a producer that has never answered would mail all of its devices as new once
         # it does. Until every enabled producer has answered, merge still runs as the first run (devices are recorded
         # as baseline, no "new" event, no mail) but the baseline is not stored as taken. A producer that never answers
         # holds it back for good. Not persisted: a restart before the baseline waits again

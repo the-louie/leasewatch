@@ -602,7 +602,7 @@ class BrowserPrivateTest(_BrowserCase):
 
 
 class BrowserLongTextTest(_BrowserCase):
-    """Long Type and "Connected via" text (B-28): neither the table nor the page scrolls sideways at laptop and desktop
+    """Long Type and "Connected via" text: neither the table nor the page scrolls sideways at laptop and desktop
     widths, and a cell that is cut short still offers its full text as a title."""
     WIFI, WIFI2, PORT, PLAIN = "02:00:00:00:20:01", "02:00:00:00:20:02", "02:00:00:00:20:03", "02:00:00:00:20:04"
     WHERE = {WIFI: ("HomeNet-Upstairs-Guest-5GHz-Extended", "ap-upstairs-hallway-ceiling-east", -67, "", ""),
