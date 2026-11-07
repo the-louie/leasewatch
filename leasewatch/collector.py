@@ -370,7 +370,8 @@ class Collector:
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
         return {"ok": False, "error": msg}
 
-    def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int) -> None:
+    def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int,
+               ref: int | None = None) -> None:
         for mac, row in res.rows.items():
             if mac in prev:
                 c.execute(f"UPDATE devices SET {', '.join(k + '=?' for k in UPDATE_COLUMNS)} WHERE mac=?",
@@ -397,7 +398,13 @@ class Collector:
         # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
         for mac in dict.fromkeys(mac for mac, _ in res.history):
             c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
-        # a clock that jumps ahead must not wipe the event log, however many polls it stays wrong: the prune reference
+        if ref is None:
+            ref = self._prune_reference(c, now)
+        c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
+
+    def _prune_reference(self, c: sqlite3.Connection, now: int) -> int:
+        """The clock that prunes (events older than a year, devices offline for PRUNE_DAYS); stores it in meta."""
+        # a clock that jumps ahead must not wipe the event log or archive devices, however many polls it stays wrong: the prune reference
         # moves at most a day past the stored one at the first poll of a process, then at most twice as fast as the
         # monotonic clock (so a lag left by downtime catches up). last_poll_ts follows a wrong clock, so it is only
         # the fallback for a database without the stored reference.
@@ -421,7 +428,7 @@ class Collector:
         else:
             self._prune_ref = (ref, mono)
             self.db.set_meta("events_prune_ts", str(ref), c)
-        c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
+        return ref
 
     def _notify(self) -> None:
         """Mail the queued new devices (devices.mail_queued), up to MAIL_BATCH per mail, oldest first.
@@ -536,8 +543,9 @@ class Collector:
             if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS (S4R07); only read when it runs
                 state.restored = {r["mac"]: r["ts"] for r in c.execute(
                     "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
+            state.prune_now = self._prune_reference(c, now)
             res = merge_batches(prev, batches, self.cfg, now, state)
-            self._write(c, prev, res, now)
+            self._write(c, prev, res, now, state.prune_now)
             for k, v in enrich_status.items():
                 self.db.set_meta(k, v, c)
             if not waiting:

@@ -221,6 +221,8 @@ class MergeState:
     # new private MAC -> first poll it was held back undecided while a lease producer failed (updated in place)
     undecided_since: dict[str, int] = field(default_factory=dict)
     restored: dict[str, int] = field(default_factory=dict)  # mac -> last "restored" event ts (PRUNE_DAYS spares it)
+    # the clamped prune clock (never ahead of the wall clock, moves slowly after a clock step); None: the wall clock
+    prune_now: int | None = None
 
 
 @dataclass
@@ -538,14 +540,15 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     # PRUNE_DAYS (owner answer): archive what has been offline that long and was never named or marked known; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
     if cfg.prune_days > 0 and not state.first_run:
-        cutoff = now - cfg.prune_days * 86400
+        ref = now if state.prune_now is None else state.prune_now
+        cutoff = ref - cfg.prune_days * 86400
         for mac, row in rows.items():
             since = row["last_online"] or row["first_seen"]
             # a restore by hand since it was last online holds until it has been online again (S4R07)
             if (row["archived_ts"] is None and not row["online"] and since < cutoff and not row["name"]
                     and not row["acked"] and state.restored.get(mac, 0) < since):
                 row["archived_ts"] = now
-                res.events.append((mac, "archived", f"auto: not online for {(now - since) // 86400} days"))
+                res.events.append((mac, "archived", f"auto: not online for {(ref - since) // 86400} days"))
     if state.first_run:
         # B-09 (owner decision 2026-11-06): until the baseline is taken, a producer answering late only completes the
         # first picture (e.g. "hostname - -> laptop"), so it is no change: no events, and no history until the poll

@@ -5,12 +5,13 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_instances import FW1, Base  # noqa: E402
+from test_instances import FW1, Base, arp  # noqa: E402
 from leasewatch.db import db_error_text  # noqa: E402
 
 
@@ -127,6 +128,41 @@ class LoopTests(Base):
             with self.assertLogs("leasewatch.collector", "DEBUG") as cm:
                 col.loop(stop)
         self.assertFalse([r for r in cm.records if r.levelno >= 30])
+
+
+class PruneClockTests(Base):
+    """PRUNE_DAYS goes by the clamped prune clock, not the wall clock."""
+    DAY = 86400
+
+    def offline_device(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1, "PRUNE_DAYS": "30"})
+        col.run_once()  # the baseline
+        t0 = int(time.time())
+        db.q("UPDATE devices SET online=0, last_online=? WHERE mac=?", (t0 - 3600, "02:00:00:00:00:01"))
+        self.client.rows = [arp("02:00:00:00:00:09", "10.0.0.9")]  # another device keeps the poll non-empty
+        return col, db, t0
+
+    def poll_at(self, col, wall, mono):
+        with mock.patch("time.time", return_value=wall), mock.patch("time.monotonic", return_value=mono):
+            r = col.run_once()
+            self.assertTrue(r["ok"], r)
+
+    def test_forward_clock_step_archives_nothing(self):
+        col, db, t0 = self.offline_device()
+        self.poll_at(col, t0 + 100 * self.DAY, time.monotonic() + 5)
+        self.assertIsNone(db.q("SELECT archived_ts FROM devices WHERE mac='02:00:00:00:00:01'")[0]["archived_ts"])
+        self.assertEqual(db.q("SELECT COUNT(*) n FROM events WHERE kind='archived'")[0]["n"], 0)
+
+    def test_real_ageing_archives_with_the_clamped_age(self):
+        col, db, t0 = self.offline_device()
+        m0 = time.monotonic()
+        for days in (10, 20):
+            self.poll_at(col, t0 + days * self.DAY, m0 + days * self.DAY)
+            self.assertIsNone(db.q("SELECT archived_ts FROM devices WHERE mac='02:00:00:00:00:01'")[0]["archived_ts"])
+        self.poll_at(col, t0 + 31 * self.DAY, m0 + 31 * self.DAY)
+        self.assertEqual(db.q("SELECT archived_ts FROM devices WHERE mac='02:00:00:00:00:01'")[0]["archived_ts"], t0 + 31 * self.DAY)
+        self.assertEqual([r["detail"] for r in db.q("SELECT detail FROM events WHERE kind='archived'")],
+                         ["auto: not online for 31 days"])
 
 
 if __name__ == "__main__":
