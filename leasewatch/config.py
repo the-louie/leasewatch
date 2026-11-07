@@ -12,6 +12,7 @@ from encodings.idna import nameprep
 from typing import Mapping
 from urllib.parse import urlparse
 
+from .auth import parse_hash
 from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, load_problems, registry, secret_keys,
                          url_has_credentials)
 
@@ -215,6 +216,9 @@ class Config:
     # Host header values that may use the API (DNS-rebinding guard). Default: the host of PUBLIC_URL. "*" = any.
     # IP literals and localhost are always accepted, because a rebinding attack has to use a name.
     allowed_hosts: tuple = field(default_factory=lambda: tuple(_host_only(x) for x in _env("ALLOWED_HOSTS").split(",") if x.strip()))
+    # optional basic auth for every path; on only when both are set (python -m leasewatch hash-password)
+    auth_user: str = field(default_factory=lambda: _env("AUTH_USER"))
+    auth_password_hash: str = field(default_factory=lambda: _env("AUTH_PASSWORD_HASH"), repr=False)
     # connector instances from LW_CONNECTORS (the only way to configure a source)
     connector_specs: list = field(default_factory=list, init=False)
     connector_problems: list = field(default_factory=list, init=False, repr=False)
@@ -259,6 +263,10 @@ class Config:
     @property
     def db_path(self) -> str:
         return os.path.join(self.data_dir, "leasewatch.sqlite3")
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.auth_user and self.auth_password_hash)
 
     @property
     def mail_enabled(self) -> bool:
@@ -308,6 +316,13 @@ class Config:
             problems.append("POLL_SECONDS below 15 is unreasonable for the firewall")
         if self.poll_seconds > 86400:
             problems.append("POLL_SECONDS must be at most 86400")
+        # never echo the values: the hash is a secret
+        if bool(self.auth_user) != bool(self.auth_password_hash):
+            problems.append("AUTH_USER and AUTH_PASSWORD_HASH must be set together")
+        if ":" in self.auth_user or any(unicodedata.category(c) == "Cc" for c in self.auth_user):
+            problems.append("AUTH_USER must not contain ':' or control characters")  # Basic splits on the first ':'
+        if self.auth_password_hash and parse_hash(self.auth_password_hash) is None:
+            problems.append("AUTH_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")
         problems += self.connector_problems
         for spec in self.connector_specs:
             problems += instance_problems(spec)

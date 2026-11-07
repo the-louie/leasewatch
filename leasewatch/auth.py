@@ -1,0 +1,147 @@
+"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH): the PBKDF2 hash format and the per-request check."""
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import hmac
+import logging
+import re
+import secrets
+import threading
+import time
+from collections import OrderedDict
+
+log = logging.getLogger("leasewatch.auth")
+
+SCHEME = "pbkdf2_sha256"
+DEFAULT_ITERATIONS = 600_000
+# floor: fewer is weak; cap: a typo must not make each login take minutes
+MIN_ITERATIONS, MAX_ITERATIONS = 100_000, 10_000_000
+MAX_HEADER = 4096
+CACHE_TTL = 600.0
+CACHE_MAX = 32
+BUSY_TIMEOUT = 10.0  # seconds a request waits for a PBKDF2 slot before it gets 503
+FAIL_LOG_EVERY = 60.0
+_B64URL = re.compile(r"[A-Za-z0-9_-]+")
+
+
+class Busy(Exception):
+    """Every PBKDF2 slot stayed taken for BUSY_TIMEOUT seconds."""
+
+
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _b64d(s: str) -> bytes:
+    if not _B64URL.fullmatch(s):  # urlsafe_b64decode itself would skip characters outside the alphabet
+        raise ValueError("not base64url")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def make_hash(password: str, iterations: int = DEFAULT_ITERATIONS) -> str:
+    """An AUTH_PASSWORD_HASH value: pbkdf2_sha256:<iterations>:<salt>:<hash>, salt 16 random bytes, hash 32 bytes."""
+    if not MIN_ITERATIONS <= iterations <= MAX_ITERATIONS:
+        raise ValueError("iterations out of range")
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"{SCHEME}:{iterations}:{_b64e(salt)}:{_b64e(dk)}"
+
+
+def parse_hash(s: str) -> tuple[int, bytes, bytes] | None:
+    """(iterations, salt, derived key) of a valid AUTH_PASSWORD_HASH, else None."""
+    parts = (s or "").split(":")
+    if len(parts) != 4 or parts[0] != SCHEME or not re.fullmatch(r"[0-9]{1,9}", parts[1]):  # ASCII digits only
+        return None
+    iterations = int(parts[1])
+    try:
+        salt, dk = _b64d(parts[2]), _b64d(parts[3])
+    except (ValueError, binascii.Error):
+        return None
+    if not MIN_ITERATIONS <= iterations <= MAX_ITERATIONS or len(salt) < 8 or len(dk) != 32:
+        return None
+    # a non-canonical encoding (trailing bits set) would decode to the same bytes; only make_hash's form is valid
+    if _b64e(salt) != parts[2] or _b64e(dk) != parts[3]:
+        return None
+    return iterations, salt, dk
+
+
+def parse_basic(header: str | None) -> tuple[str, str] | None:
+    """(user, password) from an `Authorization: Basic ...` header (RFC 7617), else None."""
+    if not header or len(header) > MAX_HEADER:
+        return None
+    scheme, _, token = header.strip().partition(" ")
+    if not scheme.isascii() or scheme.lower() != "basic":
+        return None
+    try:
+        raw = base64.b64decode(token.strip(), validate=True)
+        text = raw.decode("utf-8")
+    except (ValueError, UnicodeDecodeError):  # binascii.Error and a non-ASCII token are ValueErrors
+        return None
+    user, sep, password = text.partition(":")
+    return (user, password) if sep else None
+
+
+class Verifier:
+    """Checks the Authorization header of a request against AUTH_USER and the parsed AUTH_PASSWORD_HASH."""
+
+    def __init__(self, user: str, parsed_hash: tuple[int, bytes, bytes]) -> None:
+        self._user = user.encode("utf-8")
+        self._iterations, self._salt, self._dk = parsed_hash
+        # CPU cap: a password-guessing burst must not pin every core with PBKDF2
+        self._sem = threading.BoundedSemaphore(2)
+        # success cache, state of this verifier (one per server): HMAC of the header under a key of this process ->
+        # monotonic expiry. Keyed by an HMAC so the memory never holds the header itself. No invalidation needed:
+        # a new password means a new env var and a restart
+        self._cache_key = secrets.token_bytes(32)
+        self._cache: OrderedDict[bytes, float] = OrderedDict()
+        self._lock = threading.Lock()
+        # failed attempts since the last log line (at most one line per FAIL_LOG_EVERY)
+        self._fails = 0
+        self._fail_logged = float("-inf")
+
+    def check(self, header: str | None, client: str = "") -> bool:
+        """True when the header carries the right user and password. Raises Busy when no PBKDF2 slot frees up."""
+        creds = parse_basic(header)
+        if creds is None:
+            if header:
+                self._failed(client)
+            return False
+        # parse_basic accepted it, so the header is ASCII
+        key = hmac.new(self._cache_key, header.encode("ascii"), hashlib.sha256).digest()
+        now = time.monotonic()
+        with self._lock:
+            expiry = self._cache.get(key)
+            if expiry is not None and expiry > now:
+                return True
+        user, password = creds
+        user_ok = hmac.compare_digest(user.encode("utf-8"), self._user)
+        # computed even when the user is wrong: the answer time says nothing about the user name
+        if not self._sem.acquire(timeout=BUSY_TIMEOUT):
+            raise Busy
+        try:
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), self._salt, self._iterations)
+        finally:
+            self._sem.release()
+        ok = user_ok & hmac.compare_digest(dk, self._dk)
+        if not ok:
+            self._failed(client)
+            return False
+        with self._lock:
+            self._cache.pop(key, None)
+            self._cache[key] = time.monotonic() + CACHE_TTL
+            while len(self._cache) > CACHE_MAX:
+                self._cache.popitem(last=False)
+        return True
+
+    def _failed(self, client: str) -> None:
+        # no lockout (anyone could lock the owner out); the address only, never the user name or password
+        with self._lock:
+            self._fails += 1
+            now = time.monotonic()
+            if now - self._fail_logged < FAIL_LOG_EVERY:
+                return
+            n, self._fails, self._fail_logged = self._fails, 0, now
+        log.warning("auth: %d failed attempt%s since the last report, last from %s", n, "" if n == 1 else "s",
+                    client or "?")

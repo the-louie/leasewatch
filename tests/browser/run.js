@@ -4,6 +4,7 @@
  *
  *   node run.js --probe                          prints {"ok": true} when puppeteer and Chrome are usable
  *   node run.js <base-url> <scenario> [...]      one browser, one fresh page per scenario, one JSON line each
+ *   LW_TEST_AUTH=user:password                   basic-auth credentials the pages send (server with auth on)
  *
  * Each result line: {"scenario", "pass", "details", "console_errors", "failed_requests", "error"}.
  * "pass" covers what the page itself can tell (no exception, no console error, no failed request); the
@@ -404,6 +405,12 @@ async function runScenario(browser, base, name) {
                 csp: null, error: null };
   const page = await browser.newPage();
   try {
+    // LW_TEST_AUTH="user:password": the server has basic auth on; the browser answers its 401 with these
+    const creds = process.env.LW_TEST_AUTH;
+    if (creds) {
+      const i = creds.indexOf(':');
+      await page.authenticate({ username: creds.slice(0, i), password: creds.slice(i + 1) });
+    }
     // listeners before goto, or the first load's errors are missed
     page.on('console', m => {
       if (m.type() === 'error') res.console_errors.push(m.text());

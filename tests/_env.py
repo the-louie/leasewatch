@@ -17,7 +17,7 @@ from leasewatch.config import REMOVED_VARS  # noqa: E402
 CONFIG_VARS = (
     "ALLOWED_HOSTS", "DATA_DIR", "LEASE_TYPE_MODE", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE",
     "MAILGUN_DOMAIN", "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PRUNE_DAYS", "PUBLIC_URL",
-    "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS", "LW_CONNECTORS_DIR",
+    "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS", "LW_CONNECTORS_DIR", "AUTH_USER", "AUTH_PASSWORD_HASH",
 )
 # the removed 1.0 source variables: a shell that still exports one would make every Config() refuse to start
 REMOVED = tuple(k for names, *_ in REMOVED_VARS for k in names)

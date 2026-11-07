@@ -84,11 +84,12 @@ def setUpModule() -> None:
         raise unittest.SkipTest(f"browser tests need puppeteer and Chrome: {probe.get('reason')}")
 
 
-def start(case: type, *polls: list) -> tuple[str, Database]:
-    """Serve a fresh DB, after one collector poll per sighting list, until the class cleanups of `case` run."""
+def start(case: type, *polls: list, env: dict | None = None) -> tuple[str, Database]:
+    """Serve a fresh DB, after one collector poll per sighting list, until the class cleanups of `case` run. `env`:
+    settings on top of ENV."""
     tmp = tempfile.TemporaryDirectory()
     case.addClassCleanup(tmp.cleanup)
-    saved = clean_env(dict(ENV, DATA_DIR=tmp.name))
+    saved = clean_env(dict(ENV, DATA_DIR=tmp.name, **(env or {})))
     case.addClassCleanup(restore, saved)
     cfg = Config()
     db = Database(cfg.db_path)
@@ -113,8 +114,9 @@ class _BrowserCase(unittest.TestCase):
     stderr = ""
 
     @classmethod
-    def run_scenarios(cls, base: str, scenarios: tuple) -> None:
-        r = subprocess.run(["node", RUN_JS, base, *scenarios], capture_output=True, text=True, timeout=TIMEOUT)
+    def run_scenarios(cls, base: str, scenarios: tuple, creds: str = "") -> None:
+        env = {**os.environ, "LW_TEST_AUTH": creds} if creds else {k: v for k, v in os.environ.items() if k != "LW_TEST_AUTH"}
+        r = subprocess.run(["node", RUN_JS, base, *scenarios], capture_output=True, text=True, timeout=TIMEOUT, env=env)
         cls.stderr = r.stderr[-2000:]
         cls.results = {}
         for line in r.stdout.splitlines():
@@ -420,6 +422,35 @@ class BrowserPerfTest(_BrowserCase):
         self.assertEqual(d["escape"]["rows"], self.N)
         self.assertEqual(d["escape"]["value"], "")
         self.assertEqual(d["idle_enter_renders"], 0)  # Enter with no search pending does not rebuild
+
+
+class BrowserAuthTest(_BrowserCase):
+    """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from leasewatch import auth
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        pw = "correct horse battery"
+        cls.base, _ = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                            [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new],  # events for "load"
+                            env={"AUTH_USER": "alex", "AUTH_PASSWORD_HASH": auth.make_hash(pw, 100_000)})
+        cls.run_scenarios(cls.base, ("load", "rows"), creds=f"alex:{pw}")
+
+    def test_without_credentials_401(self) -> None:
+        import urllib.error
+        import urllib.request
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.base, timeout=10).close()
+        cm.exception.close()
+        self.assertEqual(cm.exception.code, 401)
+
+    def test_page_loads_with_credentials(self) -> None:
+        d = self.result("load")  # zero console errors, failed requests and CSP violations, as every scenario
+        self.assertEqual(d["rows"], len(DEVICES))
+        self.assertEqual(d["favicon"], {"status": 200, "type": "image/svg+xml"})  # a static file fetched by the page
+        self.assertEqual(set(self.result("rows")["names"]), NAMES)
 
 
 if __name__ == "__main__":

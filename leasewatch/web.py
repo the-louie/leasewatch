@@ -14,6 +14,7 @@ from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodyS
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from . import auth
 from .config import Config
 from .connectors import InstanceSpec
 from .connectors.merge import is_private_mac
@@ -42,6 +43,13 @@ def _dev(d: dict) -> dict:
 
 
 def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPRequestHandler]:
+    verifier = None
+    if cfg.auth_enabled:
+        parsed = auth.parse_hash(cfg.auth_password_hash)
+        if parsed is None:  # validate() reports it; a server started without validate() must not run open
+            raise ValueError("AUTH_PASSWORD_HASH is not a valid hash")
+        verifier = auth.Verifier(cfg.auth_user, parsed)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "leasewatch"
         sys_version = ""
@@ -150,6 +158,21 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             self._error(421, "unknown Host header; set ALLOWED_HOSTS or PUBLIC_URL")
             return False
 
+        def _auth_ok(self) -> bool:
+            """True when auth is off or the request carries the right credentials; else the 401 (or 503) is sent."""
+            if self.verifier is None:
+                return True
+            try:
+                if self.verifier.check(self.headers.get("Authorization"), self.client_address[0]):
+                    return True
+            except auth.Busy:
+                self._send(503, b'{"error": "busy"}', "application/json; charset=utf-8", {"Retry-After": "5"})
+                return False
+            # fixed realm, not SITE_NAME: operator text with quotes or CR must not reach a header
+            self._send(401, b'{"error": "authentication required"}', "application/json; charset=utf-8",
+                       {"WWW-Authenticate": 'Basic realm="leasewatch", charset="UTF-8"'})
+            return False
+
         def _target(self) -> str | None:
             """The path of the request target, or None after a 400 (an absolute form like "http://[x/" does not parse)."""
             if self.path.startswith("/"):  # origin form (RFC 9112 3.2.1): "//x" is a path, not an authority
@@ -163,7 +186,8 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             return (u.path or "/") if u.scheme else ""
 
         def do_GET(self) -> None:
-            if not self._host_ok():
+            # Host problems first (they say nothing about the data), then auth, then routing
+            if not self._host_ok() or not self._auth_ok():
                 return
             p = self._target()
             if p is None:
@@ -203,7 +227,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                 return self._error(500, "internal error")
 
         def do_POST(self) -> None:
-            if not self._host_ok():
+            if not self._host_ok() or not self._auth_ok():
                 return
             p = self._target()
             if p is None:
@@ -223,6 +247,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             ctype = self.headers.get("Content-Type", "")
             if ctype.split(";", 1)[0].strip().lower() != "application/json":  # exact media type: keeps POSTs out of CORS "simple requests"
                 return self._error(415, "json only")
+            # browsers send Basic credentials cross-site too: this check and the JSON type above are what stop CSRF
             if self.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
                 return self._error(403, "cross-site request")
             try:
@@ -280,6 +305,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
                             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))), ts(d["archived_ts"]), cell(d["note"])])
             self._send(200, buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="leasewatch-devices.csv"'})
 
+    Handler.verifier = verifier  # None when auth is off
     return Handler
 
 

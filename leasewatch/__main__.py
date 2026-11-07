@@ -6,7 +6,9 @@ Helper commands (they never start the server or open the database):
 `python -m leasewatch check [instance ...]` prints the loaded connector types, the config problems and each instance's
 validate()/check() result;
 `python -m leasewatch collect <instance> [--json]` runs check() and collect() once and prints the batch as the host
-would merge it.
+would merge it;
+`python -m leasewatch hash-password [--iterations N]` reads a password (prompt on a terminal, else one line from stdin)
+and prints the AUTH_PASSWORD_HASH value.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from .db import Database
 from .web import serve
 
 
-SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect")
+SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect", "hash-password")
 NO_PYSNMP = "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"
 
 
@@ -537,6 +539,41 @@ def startup_line(cfg: Config, version: str) -> str:
     return f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {'on' if cfg.mail_enabled else 'off'}"
 
 
+def hash_password_cmd(argv: list[str]) -> int:
+    import argparse
+    import getpass
+    from . import auth
+    ap = argparse.ArgumentParser(prog="python -m leasewatch hash-password",
+                                 description="Read a password (prompted twice on a terminal, else one line from stdin) "
+                                             "and print its AUTH_PASSWORD_HASH value.")
+    ap.add_argument("--iterations", type=int, default=auth.DEFAULT_ITERATIONS,
+                    help=f"PBKDF2 iterations (default {auth.DEFAULT_ITERATIONS})")
+    args = ap.parse_args(argv)
+    if not auth.MIN_ITERATIONS <= args.iterations <= auth.MAX_ITERATIONS:
+        sys.stderr.write(f"--iterations must be {auth.MIN_ITERATIONS}-{auth.MAX_ITERATIONS}\n")
+        return 1
+    # never on argv: the process list would show it
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            password = getpass.getpass("Password: ")
+            if getpass.getpass("Password again: ") != password:
+                sys.stderr.write("the passwords do not match\n")
+                return 1
+        else:
+            # one line, its line break dropped (printf '%s' sends none, echo sends one); blanks are part of it
+            password = (sys.stdin.readline() if sys.stdin is not None else "").removesuffix("\n").removesuffix("\r")
+    except (EOFError, UnicodeDecodeError):
+        sys.stderr.write("cannot read the password\n")
+        return 1
+    if not password:
+        sys.stderr.write("empty password refused\n")
+        return 1
+    if len(password) < 12:
+        sys.stderr.write("warning: a password shorter than 12 characters is easy to guess\n")
+    _out(auth.make_hash(password, args.iterations))
+    return 0
+
+
 def types_line() -> str:
     """The INFO line after startup_line(): every loaded connector type and where it comes from (no settings, and no
     path other than the configured LW_CONNECTORS_DIR)."""
@@ -553,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             try:
                 rc = {"snmp-detect": snmp_detect_cmd, "snmp-profiles": snmp_profiles_cmd, "check": check_cmd,
-                      "collect": collect_cmd}[argv[0]](argv[1:])
+                      "collect": collect_cmd, "hash-password": hash_password_cmd}[argv[0]](argv[1:])
             except SystemExit as e:  # argparse's --help or usage error: its output is flushed below like any other
                 rc = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
             sys.stdout.flush()  # here, not at exit: a reader that has gone away is caught below
