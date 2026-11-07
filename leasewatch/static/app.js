@@ -12,6 +12,7 @@
     drawerGet: null, // {mac, focus, ctl} of the one drawer GET in flight: only its reply is applied; replacing it aborts it
     skew: 0, // server clock minus browser clock at the last load: "on the wire" is judged in server time
     form: null, // {mac, name, note} the drawer form was rendered with (or last saved): what "edited" is measured against
+    saving: null, // {form, name, note} posted from that Name input while its save runs: its reference until the POST settles
   };
   const VLAN_COLORS = ["--vlan1", "--vlan2", "--vlan3", "--vlan4", "--vlan5", "--vlan6", "--vlan7", "--vlan8"];
   // stable colour per network: alphabetical position, so colours do not shift when counts change
@@ -291,15 +292,23 @@
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
   // or the user agrees to drop them
   function discardOk() {
+    return !formEdited(state.open) || confirm("Discard unsaved changes?");
+  }
+  // the drawer form of mac differs from its reference: the values a running save of this form posts, else what the
+  // form was rendered with or last saved (a close during the save asks only about text typed after Save)
+  function formEdited(mac) {
     const f = $("#fName", $("#dBody"));
-    const dirty = !!f && state.form?.mac === state.open && (f.value !== state.form.name || $("#fNote", $("#dBody")).value !== state.form.note);
-    return !dirty || confirm("Discard unsaved changes?");
+    if (!f || state.form?.mac !== mac) return false;
+    const ref = state.saving?.form === f ? state.saving : state.form;
+    return f.value !== ref.name || $("#fNote", $("#dBody")).value !== ref.note;
   }
   async function openDrawer(mac) {
     if (state.open && state.open !== mac && !discardOk()) return;
     // another device's form must not stay live while this one loads: Save would act on that device
     if (state.open !== mac) { $("#dTitle").textContent = "Device"; $("#dBody").innerHTML = '<p class="muted">loading…</p>'; state.form = null; }
-    state.open = mac; state.returnTo = document.activeElement;
+    // a switch from inside the drawer keeps the control outside it to return to (a drawer control is inert after close)
+    if (!$("#drawer").contains(document.activeElement)) state.returnTo = document.activeElement;
+    state.open = mac;
     $("#drawer").classList.add("open"); $("#scrim").classList.add("show"); $("#drawer").setAttribute("aria-hidden", "false"); $("#drawer").inert = false;
     // the page behind the modal drawer takes no focus or clicks until it closes (Tab wraps inside it, see the keydown)
     $$("body > header, body > main, body > footer").forEach(e => { e.inert = true; });
@@ -328,8 +337,9 @@
 
   async function refreshDrawer(mac, focus) {
     // edited = differs from what the form was rendered with or last saved, not from the server's values: a rename by
-    // another viewer must still refresh a clean form, and text typed while a save ran must survive its refresh
-    const edited = () => { const f = $("#fName", $("#dBody")); return !!f && state.form?.mac === mac && (f.value !== state.form.name || $("#fNote", $("#dBody")).value !== state.form.note); };
+    // another viewer must still refresh a clean form, and text typed while a save ran must survive its refresh. A form
+    // whose save runs is kept too: a poll's GET may predate the POST
+    const edited = () => formEdited(mac) || (!!state.saving && state.saving.form === $("#fName", $("#dBody")));
     // one drawer GET at a time. A poll refresh leaves a running one alone: its reply is as fresh, and an open's reply
     // still has to focus Name. An open replaces it; a close, another device's open or a save of this device abort it
     if (!focus && state.drawerGet?.mac === mac) return;
@@ -399,8 +409,12 @@
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)
   async function setFields(mac, fields, form) {
+    // module state: while the POST runs, what it posts is the reference of the form it was typed in (see formEdited)
+    const saving = form && form === $("#fName") && state.form?.mac === mac ? { form, name: fields.name ?? state.form.name, note: fields.note ?? state.form.note } : null;
+    if (saving) state.saving = saving;
     try {
-      await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
+      try { await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }); }
+      finally { if (state.saving === saving) state.saving = null; } // on a failure the form's reference is state.form again
       // a drawer GET of this device still running may have been served before the save: its reply is stale. An open's
       // pending Name focus moves to the refresh below. Another device's GET is left alone
       const g = state.drawerGet?.mac === mac ? state.drawerGet : null;
@@ -434,8 +448,8 @@
 
   // ---------- wiring ----------
   // a table rebuild per key costs ~100 ms at 2000 devices: render (and write the URL) once typing pauses
-  let qTimer = 0; // pending search render
-  const searchNow = () => { clearTimeout(qTimer); renderTable(); syncUrl(); };
+  let qTimer = 0; // pending search render (0: none)
+  const searchNow = () => { clearTimeout(qTimer); qTimer = 0; renderTable(); syncUrl(); };
   $("#q").addEventListener("input", e => { state.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(searchNow, 150); });
   $("#fStatus").addEventListener("change", e => { state.status = e.target.value; renderCards(); renderTable(); syncUrl(); });
   $("#sort").addEventListener("change", e => { state.sort = e.target.value; renderTable(); syncUrl(); });
@@ -444,7 +458,7 @@
   $("#dClose").onclick = closeDrawer; $("#scrim").onclick = closeDrawer;
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && document.activeElement === $("#q") && state.q) { state.q = ""; $("#q").value = ""; searchNow(); return; }
-    if (e.key === "Enter" && document.activeElement === $("#q")) { searchNow(); return; } // no wait for the pause
+    if (e.key === "Enter" && document.activeElement === $("#q")) { if (qTimer) searchNow(); return; } // no wait for the pause; nothing pending, no rebuild
     if (e.key === "Escape") closeDrawer();
     if (e.key === "Tab" && state.open) {
       // the background is inert, so Tab past the drawer's last control would leave the page: wrap to its first one

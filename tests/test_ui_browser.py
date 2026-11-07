@@ -46,7 +46,7 @@ DEVICES = [
 ]
 NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
-SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "dirty", "drawer")  # the ones that change server state last
+SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
 def mac(n: int) -> str:
@@ -242,6 +242,16 @@ class BrowserUITest(_BrowserCase):
         self.assertEqual(d["server"], {mac(2): "", mac(3): ""})  # discarded, not saved
         self.assertEqual({(x["type"], x["message"]) for x in d["dialog_log"]}, {("confirm", "Discard unsaved changes?")})
 
+    def test_close_during_save_asks_only_for_new_text(self) -> None:
+        d = self.result("saving")
+        # nothing typed after Save: the close goes through without a prompt and the save still lands
+        self.assertEqual(d["plain"], {"dialogs": 0, "open": False, "server": "Kitchen TV"})
+        # text typed after Save: the close asks (Cancel keeps the drawer); after the save only that text is unsaved
+        self.assertEqual(d["typed"]["dialogs"], 1)
+        self.assertTrue(d["typed"]["open"])
+        self.assertEqual(d["typed"]["after"], {"dialogs": 2, "open": False, "server": "Desk"})
+        self.assertEqual(set(d["dialog_log"]), {"Discard unsaved changes?"})
+
     def test_drawer_flows(self) -> None:
         d = self.result("drawer")
         # click opens the drawer on the device with Name focused; Escape closes it and focuses the row again
@@ -301,6 +311,7 @@ class BrowserPerfTest(_BrowserCase):
         self.assertEqual(d["enter"]["url_q"], "dev-1")
         self.assertEqual(d["escape"]["rows"], self.N)
         self.assertEqual(d["escape"]["value"], "")
+        self.assertEqual(d["idle_enter_renders"], 0)  # Enter with no search pending does not rebuild
 
 
 if __name__ == "__main__":

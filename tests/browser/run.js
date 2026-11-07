@@ -182,7 +182,14 @@ const scenarios = {
       const escape = { ms: performance.now() - t1, rows: document.querySelectorAll('#rows tr').length, value: q.value };
       return { enter, escape };
     });
-    return { rows0, value, url_q, names, ...typed, ...now };
+    // Enter with no search pending does not rebuild the table
+    const idle_enter_renders = await page.evaluate(async () => {
+      const q = document.querySelector('#q'), n = window.__renders.length; q.focus();
+      for (let i = 0; i < 3; i++) q.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise(r => setTimeout(r, 300));
+      return window.__renders.length - n;
+    });
+    return { rows0, value, url_q, names, ...typed, ...now, idle_enter_renders };
   },
   // unsaved form edits: closing the drawer or opening another device asks first; Cancel keeps both, OK goes on
   async dirty(page) {
@@ -216,6 +223,38 @@ const scenarios = {
     await page.type('#fName', 'Sam printer');
     await page.keyboard.press('Escape'); await waitClosed(page); res.ok_close = await shown();
     res.server = { [A]: (await serverDevice(page, A)).name, [B]: (await serverDevice(page, B)).name };
+    res.dialog_log = dialogs;
+    return res;
+  },
+  // a close while Save's POST is held: no prompt for the text being saved, a prompt for text typed after Save
+  async saving(page) {
+    const A = '02:00:00:00:00:05', B = '02:00:00:00:00:07';
+    let answer = false; const dialogs = [];
+    page.on('dialog', async d => { dialogs.push(d.message()); await (answer ? d.accept() : d.dismiss()); });
+    let held = null;
+    await page.setRequestInterception(true);
+    page.on('request', r => { if (r.method() === 'POST') held = r; else r.continue(); });
+    const saveHeld = async () => { held = null; await page.click("#fSave"); while (!held) await new Promise(r => setTimeout(r, 10)); };
+    const release = async (mac, name) => { const r = held; held = null; await r.continue();
+      await page.waitForFunction(m => [...document.querySelectorAll('#rows tr')].some(t => t.dataset.mac === m[0] && t.querySelector('.nm').textContent === m[1]), {}, [mac, name]); }; // the save's table render is done
+    const res = {};
+    await page.click(`${row(A)} .c-ip`); await waitOpen(page, A);
+    await page.type('#fName', 'Kitchen TV');
+    await saveHeld();
+    await page.keyboard.press('Escape');
+    res.plain = { dialogs: dialogs.length, open: await drawerOpen(page) };
+    await release(A, 'Kitchen TV');
+    res.plain.server = (await serverDevice(page, A)).name;
+    await page.click(`${row(B)} .c-ip`); await waitOpen(page, B);
+    await page.type('#fName', 'Desk');
+    await saveHeld();
+    await page.type('#fName', ' PC');
+    await page.keyboard.press('Escape');
+    res.typed = { dialogs: dialogs.length, open: await drawerOpen(page) };
+    await release(B, 'Desk');
+    await page.waitForFunction(() => document.querySelector('#fSaved').textContent === 'saved');
+    answer = true; await page.keyboard.press('Escape'); await waitClosed(page);
+    res.typed.after = { dialogs: dialogs.length, open: await drawerOpen(page), server: (await serverDevice(page, B)).name };
     res.dialog_log = dialogs;
     return res;
   },

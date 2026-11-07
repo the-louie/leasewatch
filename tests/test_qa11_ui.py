@@ -121,7 +121,7 @@ def _extract(src: str, name: str) -> str:
 
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
-        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText"]
+        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "formEdited"]
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
 DOM = r"""
@@ -576,6 +576,62 @@ await byId.fSave.onclick(); out.posted = posts[posts.length - 1].name; out.serve
         self.assertEqual(out["form"], "Printer")
         self.assertEqual(out["posted"], "Printer")
         self.assertEqual(out["server"], "Printer")
+
+    # S3R01/S3R04: a close while a save's POST runs asks only about text typed after Save
+    def test_close_during_save_asks_only_for_text_typed_after_save(self) -> None:
+        pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return true; };')
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], pre + r"""
+await openDrawer(server.mac);
+byId.fName.value = "Printer";
+typing = () => { typing = null; closeDrawer(); out.openAfterClose = state.open; };
+await byId.fSave.onclick();
+out.askedPlain = asked.length; out.server = server.name;
+await openDrawer(server.mac);
+byId.fName.value = "Printer 2";
+typing = () => { typing = null; byId.fName.value = "Printer 2 hall"; closeDrawer(); };
+await byId.fSave.onclick();
+out.askedTyped = asked.length - out.askedPlain; out.saving = state.saving;
+""")
+        self.assertEqual(out["askedPlain"], 0)
+        self.assertIsNone(out["openAfterClose"])
+        self.assertEqual(out["server"], "Printer")
+        self.assertEqual(out["askedTyped"], 1)
+        self.assertIsNone(out["saving"])
+
+    # S3R01: after a failed save the posted text counts as unsaved again
+    def test_close_after_failed_save_asks(self) -> None:
+        pre = self.DRAWER.replace('const confirm = () => true;', 'const asked = []; const confirm = m => { asked.push(m); return false; };')
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], pre + r"""
+await openDrawer(server.mac);
+byId.fName.value = "Printer";
+typing = () => { typing = null; throw new Error("HTTP 500"); };
+await byId.fSave.onclick();
+closeDrawer();
+out.asked = asked.length; out.open = state.open;
+""")
+        self.assertEqual(out["asked"], 1)
+        self.assertEqual(out["open"], "02:00:00:00:00:01")
+
+    # S3R02: the discard prompt and the refresh guard share one "edited" test
+    def test_discard_and_refresh_share_formEdited(self) -> None:
+        src = _read("leasewatch", "static", "app.js")
+        self.assertIn("formEdited(state.open)", _extract(src, "discardOk"))
+        self.assertIn("formEdited(mac)", _extract(src, "refreshDrawer"))
+        self.assertEqual(src.count(".value !== "), 2)  # Name and Note compared once, in formEdited
+
+    # S3R03: opening another device from a drawer control keeps the control outside the drawer to return to
+    def test_switch_from_drawer_control_keeps_return_target(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], self.DRAWER + r"""
+const drawer = $("#drawer"); body.parent = drawer; $("#dClose").parent = drawer;
+const rowA = new El("TR"); rowA.focus();
+await openDrawer(server.mac);
+$("#dClose").focus();
+await openDrawer("02:00:00:00:00:02");
+out.kept = state.returnTo === rowA;
+closeDrawer(); out.back = document.activeElement === rowA;
+""")
+        self.assertTrue(out["kept"])
+        self.assertTrue(out["back"])
 
     # Z06: where AbortSignal.any is missing (Chrome < 116, Firefox < 124, Safari < 17.4) the drawer GET, which passes its
     # own signal, still times out after 30 s, and its timer is cleared once the request settles
