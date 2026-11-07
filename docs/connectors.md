@@ -92,6 +92,7 @@ One device as one source saw it (an IP, a hostname, a network).
 | `iface` | `str` | Source-specific interface id (`opt3`). |
 | `lease_type` | `str` | `"static"`, `"dynamic"` or `""`. Only kind `"dhcp"` sets it. |
 | `client_id` | `str` | DHCP client-id or DUID if known. The host uses it to merge a new private (locally administered) MAC into a known device with the same client-id (see the README, *Private MACs*); at least 2 bytes count. |
+| `label` | `str` | optional (default `""`); a human label from the source, e.g. a DHCP reservation description; shown as the display name after the hostname. |
 
 ### Attachment: where a device hangs
 

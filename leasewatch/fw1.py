@@ -52,6 +52,10 @@ class Sighting:
     lease_type: str    # "dynamic" | "static" | "" (arp only)
     online: bool
     client_id: str = ""  # as the server sends it (ISC: already hex); connectors.merge.norm_client_id normalises it
+    label: str = ""  # a Kea reservation's description (an operator-written name), at most LABEL_MAX characters
+
+
+LABEL_MAX = 128  # a description is free text; a longer one would only crowd the display name
 
 
 def _reserved(v: Any) -> bool:
@@ -159,6 +163,8 @@ def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
             "mac": _s(r.get("hw_address")), "address": _s(r.get("ip_address")),
             "hostname": _s(r.get("hostname")).rstrip("."), "man": "",
             "if": ifc, "if_descr": descr, "if_dev": dev, "type": "static", "status": "",
+            # "description" is the field name in the OPNsense Kea reservation model; a row without it gives ""
+            "label": _s(r.get("description"))[:LABEL_MAX].strip(),
         })
     return out
 
@@ -331,6 +337,7 @@ class Fw1Client:
                 vlan=_s(l.get("if_descr")) or _s(l.get("if")), iface=_s(l.get("if")),
                 source="dhcp", lease_type=lease_type,
                 online=l.get("status") == "online", client_id=_s(l.get("client_id")),
+                label=_s(l.get("label"))[:LABEL_MAX],
             ))
         for a in arp:
             if not isinstance(a, dict):

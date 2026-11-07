@@ -102,6 +102,10 @@ INDEXES = (
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
 
 
+class AlreadyADevice(Exception):
+    """split_alias found a devices row with the alias MAC; nothing was written."""
+
+
 class UnknownDevices(LookupError):
     """A bulk update named MACs that are neither a device nor an alias; nothing was written."""
 
@@ -391,6 +395,36 @@ class Database:
             if not key:
                 return None
             return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived)[0]
+
+    def split_alias(self, device_mac: str, alias: str) -> tuple[dict, dict] | None:
+        """Turn the alias MAC of a device back into a device of its own: (the device, the new row), or None when
+        alias is no alias of that device. The device keeps its history, events and seen rows, because they cannot be
+        told apart by MAC. Raises AlreadyADevice (nothing written) when alias already has a devices row."""
+        with self.tx() as c:
+            key = self._resolve(c, device_mac)
+            if not key:
+                return None
+            a = c.execute("SELECT * FROM aliases WHERE mac=?", (alias,)).fetchone()
+            if a is None or a["device"] != key:
+                return None
+            if c.execute("SELECT 1 FROM devices WHERE mac=?", (alias,)).fetchone():
+                raise AlreadyADevice(alias)
+            now = int(time.time())
+            day = time.strftime("%Y-%m-%d", time.localtime(a["merged_ts"]))
+            # both rows keep the client-id after a client-id merge; a hostname merge says nothing about it
+            cid = c.execute("SELECT client_id FROM devices WHERE mac=?", (key,)).fetchone()["client_id"] if a["reason"] == "client-id" else ""
+            c.execute("DELETE FROM aliases WHERE mac=?", (alias,))
+            c.execute("INSERT INTO devices (mac, first_seen, last_seen, last_online, online, client_id, baseline, acked, split_from) "
+                      "VALUES (?, ?, ?, NULL, 0, ?, 0, 0, ?)", (alias, now, a["last_seen"], cid, key))
+            c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)",
+                      (now, key, f"{alias} split off (merged by {a['reason']} {a['detail']} on {day})"))
+            c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)", (now, alias, f"split from {key}"))
+            out = []
+            for m in (key, alias):
+                d = dict(c.execute("SELECT * FROM devices WHERE mac=?", (m,)).fetchone())
+                d["aliases"] = [r["mac"] for r in c.execute("SELECT mac FROM aliases WHERE device=? ORDER BY merged_ts DESC, mac", (m,))]
+                out.append(d)
+            return out[0], out[1]
 
     def update_many(self, macs: list[str], acked: bool | None = None,
                     archived: bool | None = None) -> tuple[list[str], list[str]]:

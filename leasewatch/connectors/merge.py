@@ -194,6 +194,7 @@ class Merged:
     online: bool = False
     client_id: str = ""  # from the chosen lease only
     lease_hostname: str = ""  # the chosen lease's own hostname (option 12), not a fallback from another kind
+    label: str = ""  # see merge_sightings; not stored yet
 
 
 @dataclass(frozen=True)
@@ -246,7 +247,8 @@ class MergeResult:
 def to_fw1(s: Sighting) -> Fw1Sighting:
     """The connector record back in the shape merge_sightings sorts on (kind -> source, presence -> online)."""
     return Fw1Sighting(mac=s.mac, ip=s.ip, hostname=s.hostname, vendor=s.vendor, vlan=s.network, iface=s.iface,
-                       source=s.kind, lease_type=s.lease_type, online=s.presence, client_id=s.client_id)
+                       source=s.kind, lease_type=s.lease_type, online=s.presence, client_id=s.client_id,
+                       label=s.label)
 
 
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
@@ -287,6 +289,9 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
         m.hostname = m.hostname or next((s.hostname for s in named if s.hostname), "")
         vendors = sorted(ss, key=lambda s: (_rank(VENDOR_KINDS, s.source), s.source) + pick(s))
         m.vendor = next((s.vendor for s in vendors if s.vendor), "")
+        # label: a DHCP sighting's label first (a reservation's description belongs to the lease the device is
+        # served), else any non-empty one in the same stable order as the name
+        m.label = next((s.label for s in dhcp + [s for s in named if s.source != "dhcp"] if s.label), "")
         out[mac] = m
     return out
 
@@ -310,7 +315,7 @@ def norm_client_id(v: object) -> str:
     return t if len(t) >= 4 else ""
 
 
-_STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind"),
+_STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind", "label"),
                Attachment: ("link", "device", "port", "via", "ssid", "ap", "radio", "alias")}
 _BOOL_FIELDS = {Sighting: ("presence",), Attachment: ("uplink", "present")}
 _OPT_INT_FIELDS = {Sighting: (), Attachment: ("vlan", "signal")}
@@ -499,6 +504,11 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                 lease_type = ""
                 state.no_lease_since.pop(mac, None)
                 ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
+        # a row made by a split has sources '' until a poll lists it: its first listing fills the empty fields and
+        # writes the history row, but the fill is no change worth an event
+        fields_changed = bool(ev)
+        if not cur["sources"]:
+            ev = []
         # S4 archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
         # archived device back to the list; this `back` replaces the ordinary one. One archived while still online
         # stays archived until it has been offline
@@ -517,7 +527,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         moved = (m.ip and m.ip != cur["ip"]) or (m.vlan and cur["vlan"] and m.vlan != cur["vlan"])
         ip = m.ip if moved else m.ip or cur["ip"]
         vlan, iface = (m.vlan, m.iface) if moved else (m.vlan or cur["vlan"], m.iface or cur["iface"])
-        if any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
+        if fields_changed or any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
             res.history.append((mac, {"ip": ip, "hostname": m.hostname or cur["hostname"],
                                       "vlan": vlan, "lease_type": lease_type}))
             changes += 1
