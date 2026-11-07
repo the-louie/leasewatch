@@ -288,18 +288,29 @@
   const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", port: "moved port", wifi: "moved Wi-Fi" }[k] || k);
 
   // ---------- drawer ----------
+  // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
+  // or the user agrees to drop them
+  function discardOk() {
+    const f = $("#fName", $("#dBody"));
+    const dirty = !!f && state.form?.mac === state.open && (f.value !== state.form.name || $("#fNote", $("#dBody")).value !== state.form.note);
+    return !dirty || confirm("Discard unsaved changes?");
+  }
   async function openDrawer(mac) {
+    if (state.open && state.open !== mac && !discardOk()) return;
     // another device's form must not stay live while this one loads: Save would act on that device
     if (state.open !== mac) { $("#dTitle").textContent = "Device"; $("#dBody").innerHTML = '<p class="muted">loading…</p>'; state.form = null; }
     state.open = mac; state.returnTo = document.activeElement;
     $("#drawer").classList.add("open"); $("#scrim").classList.add("show"); $("#drawer").setAttribute("aria-hidden", "false"); $("#drawer").inert = false;
+    // the page behind the modal drawer takes no focus or clicks until it closes (Tab wraps inside it, see the keydown)
+    $$("body > header, body > main, body > footer").forEach(e => { e.inert = true; });
     await refreshDrawer(mac, true);
   }
   function closeDrawer() {
-    if (!state.open) return;
+    if (!state.open || !discardOk()) return;
     const mac = state.open;
     state.drawerGet?.ctl.abort(); state.drawerGet = null;
     state.open = null; $("#drawer").classList.remove("open"); $("#scrim").classList.remove("show"); $("#drawer").setAttribute("aria-hidden", "true"); $("#drawer").inert = true;
+    $$("body > header, body > main, body > footer").forEach(e => { e.inert = false; }); // before the focus goes back to a row
     // the row that opened the drawer may have been re-rendered by a poll: fall back to its replacement, then the search box
     const back = state.returnTo?.isConnected ? state.returnTo : ($$("#rows tr").find(tr => tr.dataset.mac === mac) || $("#q"));
     back.focus?.();
@@ -422,15 +433,25 @@
   function clearFilters() { state.q = ""; state.vlan = null; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderTable(); syncUrl(); }
 
   // ---------- wiring ----------
-  $("#q").addEventListener("input", e => { state.q = e.target.value; renderTable(); syncUrl(); });
+  // a table rebuild per key costs ~100 ms at 2000 devices: render (and write the URL) once typing pauses
+  let qTimer = 0; // pending search render
+  const searchNow = () => { clearTimeout(qTimer); renderTable(); syncUrl(); };
+  $("#q").addEventListener("input", e => { state.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(searchNow, 150); });
   $("#fStatus").addEventListener("change", e => { state.status = e.target.value; renderCards(); renderTable(); syncUrl(); });
   $("#sort").addEventListener("change", e => { state.sort = e.target.value; renderTable(); syncUrl(); });
   $$(".card[data-filter]").forEach(c => c.onclick = () => { state.status = state.status === c.dataset.filter ? "all" : c.dataset.filter; $("#fStatus").value = state.status; renderCards(); renderTable(); syncUrl(); });
   $("#emptyClear").onclick = clearFilters;
   $("#dClose").onclick = closeDrawer; $("#scrim").onclick = closeDrawer;
   document.addEventListener("keydown", e => {
-    if (e.key === "Escape" && document.activeElement === $("#q") && state.q) { state.q = ""; $("#q").value = ""; renderTable(); syncUrl(); return; }
+    if (e.key === "Escape" && document.activeElement === $("#q") && state.q) { state.q = ""; $("#q").value = ""; searchNow(); return; }
+    if (e.key === "Enter" && document.activeElement === $("#q")) { searchNow(); return; } // no wait for the pause
     if (e.key === "Escape") closeDrawer();
+    if (e.key === "Tab" && state.open) {
+      // the background is inert, so Tab past the drawer's last control would leave the page: wrap to its first one
+      const f = $$("button, input, textarea, select, a[href], [tabindex]:not([tabindex='-1'])", $("#drawer")).filter(x => !x.disabled && x.offsetParent);
+      const i = f.indexOf(document.activeElement), last = f.length - 1;
+      if (e.shiftKey ? i <= 0 : i === last || i < 0) { e.preventDefault(); f[e.shiftKey ? last : 0]?.focus(); }
+    }
     if (e.key === "/" && !/input|textarea|select/i.test(document.activeElement.tagName)) { e.preventDefault(); $("#q").focus(); $("#q").select(); }
   });
   const store = { get: k => { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} } };

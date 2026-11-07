@@ -14,6 +14,8 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Changed
 
+- **Device table:** the Type column now shows from a 1280 px wide window (was 1601 px); the table width is the same at every width from 1280 px.
+- **Search:** the table and the URL follow the search box 150 ms after the last key instead of on every key (a rebuild of 2000 rows takes about 100 ms); Enter and Escape in the box still apply at once.
 - **Baseline:** while the baseline waits for a sighting producer, no change events (ip, hostname, network, lease type, port, Wi-Fi, back) and no history rows are written, so a late producer no longer logs its details as changes (e.g. "hostname - -> laptop"). Devices are still recorded and updated; the poll that takes the baseline writes one history row per device with its complete values.
 
 ### Removed
@@ -21,6 +23,9 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **API:** the deprecated 1.0 objects `meta.switch` and `meta.unifi` in `/api/status`, `/api/stats` and `/api/devices`, and the `switch` and `unifi` keys of the `/healthz` body; use `meta.connectors` (one entry per instance). The collector no longer writes the meta keys behind them (`switch_ok`, `switch_error`, `switch_macs`, `unifi_ok`, `unifi_error`, `unifi_clients`), and the page no longer falls back to them. Instance names `switch` and `unifi` have no special meaning any more.
 
 ### Fixed
+- The hidden column labels of the device table ("online", "actions") use the standard visually-hidden pattern instead of being moved 9999 px off-screen.
+- Closing the device drawer (Escape, the backdrop, ✕) or opening another device while Name or Note has unsaved text asks "Discard unsaved changes?" first; Cancel keeps the drawer and the text.
+- The device drawer is modal for the keyboard: Tab and Shift+Tab cycle through its controls, and the page behind it (header, table, footer) takes no focus until it closes.
 - `check <name>`, `collect <name>` and `snmp-detect <name>` now exit 2 on a config problem that belongs to no instance (e.g. `LW_CONNECTOR__FW1_SECRET` with one underscore, an invalid name in `LW_CONNECTORS`) and on a load problem, as the server does.
 - `check` and `collect` keep the instance name and the client's `fw1 <path>:` label when the instance is named like its host; only the error text is host-masked. `check` now masks the host in problem texts too.
 - `collect` shows device data unmasked again (a switch's own redact no longer masks its host and user in records), and prints only the declared record fields.

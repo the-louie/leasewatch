@@ -279,6 +279,7 @@ const api = async (path, opts) => {
 };
 const showBanner = m => { out.banner = m; };
 const setTimeout = () => 0;
+const confirm = () => true; // "Discard unsaved changes?" answered OK
 //--
 const load = async () => { if (state.open) await refreshDrawer(state.open, false); };
 state.meta = { now: 2000000000, new_days: 7, baseline_ts: 1, connectors: [] };
@@ -547,7 +548,7 @@ out.hasForm = !!byId.fName; out.name = byId.fName ? byId.fName.value : null; out
             'const g = {}; g.p = new Promise((ok, fail) => { g.ok = ok; g.fail = fail; }); gets.push(g); '
             'opts?.signal?.addEventListener("abort", () => g.fail(new Error("aborted"))); await g.p;')
         pre = pre.replace("let typing = null", "const gets = []; let typing = null")
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer"],
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"],
                    pre + "//--" + self.DRAWER.split("//--")[1] + r"""
 const row = new El("TR"); row.focus();
 const o1 = openDrawer(server.mac); // the older open: its GET will fail
@@ -563,7 +564,7 @@ out.hasForm = !!byId.fName; out.focusedIsName = !!byId.fName && document.activeE
     # close and reopen of the same drawer while a save's POST runs: after the save's refresh the inputs show the
     # saved values, and a later Save does not post the pre-save ones back
     def test_close_reopen_during_save_shows_saved_values(self) -> None:
-        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer"], self.DRAWER + r"""
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "openDrawer", "closeDrawer", "discardOk"], self.DRAWER + r"""
 await openDrawer(server.mac);
 byId.fName.value = "Printer";
 typing = async () => { typing = null; closeDrawer(); await openDrawer(server.mac); }; // the reopen is served the pre-save row
