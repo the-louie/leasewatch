@@ -73,7 +73,7 @@ GENERIC_HOSTNAMES = frozenset(
     "ubuntu debian dhcp".split())
 _GENERIC_RE = re.compile(r"(android|galaxy|iphone|ipad|esp|wlan|eth)[-_ ]?[0-9a-f]*|[0-9a-f:_-]+")
 # brand/model stems: a name that starts with one is a default model name ("galaxy-s21", "pixel-7"), shared by every
-# device of that model, so it is generic whatever follows (S4R02, owner rule)
+# device of that model, so it is generic whatever follows
 GENERIC_PREFIXES = ("iphone", "ipad", "ipod", "imac", "macbook", "apple-watch", "android", "galaxy", "pixel",
                     "chromecast", "espressif", "esp32", "esp8266", "raspberrypi")
 # a private row that nobody touched may be folded into an older device (deferred hostname merge) for this many days
@@ -111,7 +111,7 @@ def decide_aliases(raw: dict[str, Merged], present: set[str], prev: dict[str, di
                    first_run: bool, now: int, limits: dict | None = None
                    ) -> tuple[dict[str, str], list[tuple[str, str, str, str]]]:
     """(raw MAC -> device key, new (alias, device, reason, detail)) for this poll's sighting MACs. A known alias maps to
-    its device, a MAC with a row to itself; a new private MAC to the one device it matches (design S4 §2.2), else to
+    its device, a MAC with a row to itself; a new private MAC to the one device it matches, else to
     itself. present: raw MACs with a sighting or attachment that asserts presence this poll. A hostname merge needs
     the device off the wire this poll (else the new MAC is a second interface); a client-id merge does not, since two
     devices cannot share a client-id and the old MAC often lingers in the firewall's ARP table after a rotation.
@@ -323,7 +323,7 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     out: dict[str, Merged] = {}
     # an empty IP or network sorts last (it cannot be where the device is), a static lease before a dynamic one
     # vendor and iface too: every field the merge takes from a sighting is a key, so ties never depend on row order
-    # client_id too (S4R06): two leases that differ only in it would otherwise give the client-id of the first row
+    # client_id too: two leases that differ only in it would otherwise give the client-id of the first row
     # lease type: static, then dynamic, then none, so a "" lease never ties with a dynamic one
     pick = lambda s: (s.ip == "", s.vlan == "", s.vlan, s.ip, _rank(("static", "dynamic", ""), s.lease_type), s.lease_type,
                       s.hostname, s.vendor, s.iface,
@@ -494,12 +494,12 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     # (a switch or a controller lists no leases, so its failure does not count)
     lease_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
                       and (state.producers is None or n in state.producers) for n, b in batches.items())
-    # S4 private MACs: decide each raw MAC's device key, then rewrite every record to it, so an alias's history,
+    # private MACs: decide each raw MAC's device key, then rewrite every record to it, so an alias's history,
     # events, seen rows and port land on its device and the ranking below chooses between both MACs' records
     raw = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
     present = {s.mac for b in ok.values() for s in b.sightings if s.presence}
     present |= {a.mac for b in ok.values() for a in b.attachments if a.present is True}
-    # S4R03: lease-blind, a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
+    # lease-blind: a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
     # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
     # the producers known: otherwise a failed switch would count and hide new devices for nothing
     hold = lease_blind and state.producers is not None
@@ -536,7 +536,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     for b in ok.values():  # an attachment-only MAC (a switch FDB) follows a known alias too
         for a in b.attachments:
             keys.setdefault(a.mac, state.aliases.get(a.mac, a.mac))
-    # S4R05: the MAC each attachment was listed under, so an alias's record and its device's compete by rank
+    # the MAC each attachment was listed under, so an alias's record and its device's compete by rank
     att_macs = {n: [a.mac for a in b.attachments] for n, b in ok.items()}
     ok = {n: _rekey(b, keys) for n, b in ok.items()}
     if held:
@@ -547,7 +547,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     grace = now - grace_s
     res = MergeResult(aliases=new_aliases + folds, folds=folds,
                       alias_seen=sorted(m for m, k in keys.items() if k != m))
-    # a merge is no new device: no `new` event and no mail, only this event on the device (owner answer Q2)
+    # a merge is no new device: no `new` event and no mail, only this event on the device
     res.events += [(dev, "merged", f"{alias} (client-id)" if reason == "client-id" else f"{alias} (hostname {value})")
                    for alias, dev, reason, value in new_aliases]
     # a fold: the same event, saying how long the MAC had its own row
@@ -594,7 +594,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         fields_changed = bool(ev)
         if not cur["sources"] and cur.get("split_from"):
             ev = []
-        # S4 archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
+        # archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
         # archived device back to the list; this `back` replaces the ordinary one. One archived while still online
         # stays archived until it has been offline
         if cur["archived_ts"] is not None and m.online and not cur["online"]:
@@ -635,20 +635,20 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
-    # PRUNE_DAYS (owner answer): archive what has been offline that long and was never named or marked known; the
+    # PRUNE_DAYS: archive what has been offline that long and was never named or marked known; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
     if cfg.prune_days > 0 and not state.first_run:
         ref = now if state.prune_now is None else state.prune_now
         cutoff = ref - cfg.prune_days * 86400
         for mac, row in rows.items():
             since = row["last_online"] or row["first_seen"]
-            # a restore by hand since it was last online holds until it has been online again (S4R07)
+            # a restore by hand since it was last online holds until it has been online again
             if (row["archived_ts"] is None and not row["online"] and since < cutoff and not row["name"]
                     and not row["acked"] and state.restored.get(mac, 0) < since):
                 row["archived_ts"] = now
                 res.events.append((mac, "archived", f"auto: not online for {(ref - since) // 86400} days"))
     if state.first_run:
-        # B-09 (owner decision 2026-11-06): until the baseline is taken, a producer answering late only completes the
+        # until the baseline is taken, a producer answering late only completes the
         # first picture (e.g. "hostname - -> laptop"), so it is no change: no events, and no history until the poll
         # that takes the baseline writes one row per device with its complete values
         res.events = []
@@ -656,7 +656,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             (mac, {k: row[k] for k in ("ip", "hostname", "vlan", "lease_type")}) for mac, row in rows.items()]
     res.rows = {mac: row for mac, row in rows.items()
                 if mac in merged or any(row[k] != before[mac][k] for k in UPDATE_COLUMNS)}
-    # B-09: what the first run counted is no change (no event, no history row of its own), so it is not reported as one
+    # what the first run counted is no change (no event, no history row of its own), so it is not reported as one
     res.stats = {"devices": len(merged), "new": len(res.new), "changed": 0 if state.first_run else changes}
     return res
 
@@ -685,11 +685,11 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                     log.warning("connector %s: attachments with link %r ignored (allowed: wired, wifi)", n, value)
                 continue
             if n in state.controllers:
-                # an alias and its device in one client list (S4R05): the active client is where the device is
+                # an alias and its device in one client list: the active client is where the device is
                 old = wifi.get(a.mac)
                 if old is None or (old.source == n and a.present is True and old.present is not True):
                     wifi[a.mac] = a
-            # per MAC as listed: an alias and its device on one switch are two candidates, ranked below (S4R05)
+            # per MAC as listed: an alias and its device on one switch are two candidates, ranked below
             elif a.link == "wired" and lmac not in mine:
                 mine.add(lmac)
                 # the edge port is where the device is; an uplink only says which way it lies. Two edge ports (the
@@ -743,11 +743,11 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
             # this poll's listing is the evidence of presence: only here, never from the stored SSID
             if w.ssid:
                 res.wifi.append((mac, w.ssid, w.ap))
-            # B-13 (owner decision): only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
+            # only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
             if w.ssid and w.ssid != cur["wifi_ssid"]:
                 if cur["wifi_ssid"]:
                     res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> {w.ssid}"))
-                # joined from a cable only (S4R08/S4R09): on Wi-Fi without an SSID, or placed nowhere (a walk-out
+                # joined from a cable only: on Wi-Fi without an SSID, or placed nowhere (a walk-out
                 # cleared silently below), it never left Wi-Fi as far as the record shows
                 # a row wired through an uplink (sw_via names what is behind it: the AP a walked-out phone was
                 # last learned on) showed no cable either
@@ -770,7 +770,7 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         if ctrl_ok and not ctrl_failed and on_wire and (cur["wifi_ssid"] or cur["link"] == "wifi") and mac not in wifi:
             # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
             # branch above already recorded its port, so a cable is shown in this same poll.
-            # an event only with a cable shown (S4R09): ARP alone keeps a walked-out phone ~20 min after the
+            # an event only with a cable shown: ARP alone keeps a walked-out phone ~20 min after the
             # controller dropped it, so without a switch port this cannot be told from a walk-out
             if cur["wifi_ssid"] and edge:
                 res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> off Wi-Fi"))

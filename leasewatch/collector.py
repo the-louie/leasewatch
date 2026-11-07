@@ -121,7 +121,7 @@ class _Run:
     result: tuple | None = None
     skip_logged: bool = False
     answered: bool = False      # collected successfully at least once in this process (the baseline waits for it)
-    waited: int = 0             # seconds of failed check()s retried every poll while the baseline waited (B-08.4)
+    waited: int = 0             # seconds of failed check()s retried every poll while the baseline waited
     fail_polls: int = 0         # polls in a row with conn.<name>.ok written 0, counted once the baseline is taken
     fail_since: int = 0         # wall clock of the first of those polls
     down_since: int | None = None  # start of the spell a source_down event was written for (conn.<name>.down_since)
@@ -361,7 +361,7 @@ class Collector:
             else:
                 error = "collect() did not return a Batch"
             if phase == "check" and baseline_pending and not run.answered:
-                # B-08.4: the baseline waits for this one, so a source that comes up late must be seen at the next
+                # the baseline waits for this one, so a source that comes up late must be seen at the next
                 # poll, not after up to MAX_BACKOFF; the backoff is not doubled and starts once the baseline is taken
                 run.retry_at = time.monotonic() + self.cfg.poll_seconds
                 # but collect() still takes over once MAX_BACKOFF has passed: a check() that keeps failing while
@@ -476,8 +476,8 @@ class Collector:
             else:
                 c.execute(f"INSERT INTO devices({','.join(INSERT_COLUMNS)}) VALUES({','.join('?' * len(INSERT_COLUMNS))})",
                           tuple(row[k] for k in INSERT_COLUMNS))
-        # the mail queue entry commits with the device row (S4 T-09). Only with mail on: turning mail on later must
-        # not mail every older device. No new-device mail for a private MAC, merged or not (owner answer Q1): it
+        # the mail queue entry commits with the device row. Only with mail on: turning mail on later must
+        # not mail every older device. No new-device mail for a private MAC, merged or not: it
         # rotates, so it would mail again and again; it is still listed and marked new
         if self.cfg.mail_enabled:
             c.executemany("UPDATE devices SET mail_queued=? WHERE mac=?",
@@ -582,7 +582,7 @@ class Collector:
     def _notify(self) -> None:
         """Mail the queued new devices (devices.mail_queued), up to MAIL_BATCH per mail, oldest first.
 
-        The batch goes to every channel; the queue is cleared when at least one delivered (owner answer S5 Q3: a
+        The batch goes to every channel; the queue is cleared when at least one delivered (a
         channel that failed or waits out its backoff misses that batch, logged by notify), and kept when all failed
         or wait. A channel in backoff is not called, so a dead server does not delay the poll.
         Delivery is at-least-once: if the mail goes out and the UPDATE that clears the queue fails (or the process
@@ -591,7 +591,7 @@ class Collector:
             return
         try:
             with self.db.tx() as c:
-                # acked or archived devices leave the queue. No age limit (owner decision S4R01): mail_queued is wall
+                # acked or archived devices leave the queue. No age limit: mail_queued is wall
                 # clock, so a clock step would drop devices that were never mailed
                 c.execute("UPDATE devices SET mail_queued=NULL WHERE mail_queued IS NOT NULL "
                           "AND (acked=1 OR archived_ts IS NOT NULL)")
@@ -672,7 +672,7 @@ class Collector:
         # S05x: a baseline taken without a producer that has never answered would mail all of its devices as new once
         # it does. Until every enabled producer has answered, merge still runs as the first run (devices are recorded
         # as baseline, no "new" event, no mail) but the baseline is not stored as taken. A producer that never answers
-        # holds it back for good (owner decision 2026-11-06). Not persisted: a restart before the baseline waits again
+        # holds it back for good. Not persisted: a restart before the baseline waits again
         # this poll's answers count here, but are kept only once the write below has committed (see after the tx)
         waiting = [n for n in producers if not self._runs[n].disabled and not self._runs[n].answered and n not in ok] if first_run else []
         if waiting and not self._baseline_wait_logged:
@@ -690,7 +690,7 @@ class Collector:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             # read with prev in one transaction, so the alias map and the rows it points to agree
             state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
-            if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS (S4R07); only read when it runs
+            if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS; only read when it runs
                 state.restored = {r["mac"]: r["ts"] for r in c.execute(
                     "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
             state.prune_now = self._prune_reference(c, now)

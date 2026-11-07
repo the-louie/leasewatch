@@ -290,7 +290,7 @@ class Config:
     connectors_listed: bool = field(default=False, init=False, repr=False)  # LW_CONNECTORS was set (not empty)
 
     def __post_init__(self) -> None:
-        # B-08.1: load the third-party types first, so parse_instances() -> secret_keys() knows a plugin type's
+        # load the third-party types first, so parse_instances() -> secret_keys() knows a plugin type's
         # secret keys and reads its <KEY>_FILE instead of calling it an unknown setting
         registry()
         if self.smtp_port == -1:
