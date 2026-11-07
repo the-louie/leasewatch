@@ -117,7 +117,7 @@ class CollectorRegressionTests(unittest.TestCase):
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 0)
 
 
-class FixRegressionTests(unittest.TestCase):
+class WiredWifiAndConfigTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
@@ -214,7 +214,7 @@ class FixRegressionTests(unittest.TestCase):
         self.assertFalse([p for p in Config().validate() if "DHCP_BACKEND" in p])
 
 
-class ReviewFixTests(unittest.TestCase):
+class MergeEventAndMailTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
@@ -356,7 +356,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertFalse(any("dropped" in m for m in logs.output), logs.output)  # a failure drops nothing
 
 
-class DatabaseFixTests(unittest.TestCase):
+class DbTextAndTransactionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Database(os.path.join(self.tmp.name, "t.db"))

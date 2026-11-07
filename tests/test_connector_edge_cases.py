@@ -1,4 +1,4 @@
-"""Regression tests for the QA 1.1 connector findings (redaction, URL checks, settings, SNMP and OPNsense wrappers)."""
+"""Edge cases of the connector helpers (redaction, URL checks, settings, SNMP and OPNsense wrappers)."""
 from __future__ import annotations
 
 import io
@@ -256,7 +256,7 @@ def _mask(host: str, text: str) -> str:
     return text
 
 
-class Round2Tests(unittest.TestCase):
+class RedactionAndUrlEdgeTests(unittest.TestCase):
     def test_host_right_after_angle_bracket_is_masked(self) -> None:  # V06
         self.assertEqual(_mask("10.0.0.2", "no route to <10.0.0.2>"), "no route to <<host>>")
         self.assertEqual(_mask("fe80::2", "no route to <fe80::2>"), "no route to <<host>>")
@@ -336,7 +336,7 @@ class Round2Tests(unittest.TestCase):
 
     def test_at_in_path_or_query_is_not_credentials(self) -> None:  # W06: the same rule as Config.validate()
         for u in ("https://fw1.example.lan/api@x", "https://fw1.example.lan/?x=a@b"):
-            self.assertEqual(url_problems("url", u, "hint"), [], u)  # test_qa11_config asserts the Config side
+            self.assertEqual(url_problems("url", u, "hint"), [], u)  # test_config_edge_cases asserts the Config side
         # a ":" before the "@" is still taken for a password, as in Config.validate()
         self.assertEqual(url_problems("url", "https://fw1.example.lan:8443/a@b", "hint"),
                          ["url must not contain credentials"])

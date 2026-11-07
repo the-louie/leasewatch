@@ -1,4 +1,4 @@
-"""Regression tests for the QA 1.1 store/notify/UniFi parser fixes (db.py, notify.py, unifi.py)."""
+"""Edge cases of the store, notify and UniFi parser (db.py, notify.py, unifi.py)."""
 from __future__ import annotations
 
 import inspect

@@ -13,7 +13,7 @@ from unittest import mock
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_qa11_web as QW  # noqa: E402
+import test_web_edge_cases as QW  # noqa: E402
 from leasewatch import web  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.fw1 import Sighting  # noqa: E402

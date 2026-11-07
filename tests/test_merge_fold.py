@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
 from test_merge import NOW, arp, row  # noqa: E402
-from test_s4_merge import CID, DEV, NEWP, NEWP2, UA_NEW, lease  # noqa: E402
+from test_merge_private_mac import CID, DEV, NEWP, NEWP2, UA_NEW, lease  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import Batch  # noqa: E402
 from leasewatch.connectors.merge import (FOLD_OVERLAP_SECONDS, MERGE_FOLD_DAYS, ConnectorFailure, MergeState,  # noqa: E402

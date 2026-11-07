@@ -1,4 +1,4 @@
-"""S4 T-05: the API marks private (locally administered) MACs and lists the MACs merged into a device. Synthetic data
+"""The API marks private (locally administered) MACs and lists the MACs merged into a device. Synthetic data
 only: the universally administered MAC is from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
 import csv
 import io

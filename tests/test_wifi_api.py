@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_qa11_web as QW  # noqa: E402
+import test_web_edge_cases as QW  # noqa: E402
 
 A, B, C = "02:00:00:00:20:01", "02:00:00:00:20:02", "02:00:00:00:20:03"
 

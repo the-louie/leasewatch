@@ -1,4 +1,4 @@
-"""S5 T-02: optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH), the hash format, the request check with its
+"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH), the hash format, the request check with its
 success cache and CPU cap, `python -m leasewatch hash-password`, and the Docker healthcheck that accepts 401."""
 import base64
 import hashlib
@@ -169,8 +169,8 @@ class VerifierTests(unittest.TestCase):
                 self.v.check(None, "10.0.0.5")  # no credentials sent: the browser's first request, not an attempt
 
 
-class ReviewS5Tests(unittest.TestCase):
-    """S5 review: non-ASCII blanks in the header, a burst that ends inside the log window."""
+class HeaderBlankAndBurstTests(unittest.TestCase):
+    """Non-ASCII blanks in the header, a burst that ends inside the log window."""
 
     def setUp(self):
         self.v = auth.Verifier(USER, FAST)

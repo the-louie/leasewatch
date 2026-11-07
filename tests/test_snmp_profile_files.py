@@ -205,7 +205,7 @@ class ProfileFileTest(unittest.TestCase):
 
 
 
-class Round3Test(unittest.TestCase):
+class SocketFileAndCommentKeyTest(unittest.TestCase):
     # the helpers only: subclassing would run every ProfileFileTest test twice
     setUp, write, error = ProfileFileTest.setUp, ProfileFileTest.write, ProfileFileTest.error
 

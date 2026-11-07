@@ -1,4 +1,4 @@
-"""Sprint 2 review fixes for the CLI helpers in leasewatch/__main__.py (check, collect, snmp-detect).
+"""The CLI helpers in leasewatch/__main__.py (check, collect, snmp-detect).
 
 Synthetic data only: the fake connector of test_cli_check_collect, made-up hosts and keys, no network.
 """

@@ -1,4 +1,4 @@
-"""S4 T-06: archive and restore. The device POST sets devices.archived_ts, the list API keeps archived devices (the
+"""Archive and restore. The device POST sets devices.archived_ts, the list API keeps archived devices (the
 page hides them), stats skip them, the CSV has an `archived` column, a device that comes online again leaves the
 archive with one `back` event, and PRUNE_DAYS archives long-offline devices without a name or ack. Synthetic data
 only: private MACs and the RFC 7042 documentation range 00:00:5e:00:53:xx."""

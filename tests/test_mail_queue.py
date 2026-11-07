@@ -1,4 +1,4 @@
-"""S4 T-09: the durable mail queue (devices.mail_queued). A new device is queued in the poll's write transaction, the
+"""The durable mail queue (devices.mail_queued). A new device is queued in the poll's write transaction, the
 queue survives a restart, a failed mail keeps it however old it is, acked or archived devices leave
 it, one mail holds at most 50 devices, and a private MAC is never queued. Synthetic data only: hardware MACs are from
 the documentation range 00:00:5e:00:53:xx (RFC 7042). Fake connectors; Mailgun is stubbed."""

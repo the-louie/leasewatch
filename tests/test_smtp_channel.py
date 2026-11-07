@@ -1,4 +1,4 @@
-"""S5 T-05: the notification channel interface, the SMTP channel and the queue with several channels. A fake SMTP
+"""The notification channel interface, the SMTP channel and the queue with several channels. A fake SMTP
 server on port 0 (tests/_smtpfake.py); TLS with a certificate made at test time. Synthetic data only."""
 from __future__ import annotations
 
@@ -386,8 +386,8 @@ class NewDevicesTests(SmtpBase):
             self.assertEqual(m.subject, "New device: evil X (10.0.0.9, HomeNet)")
 
 
-class S5FixSmtpTests(SmtpBase):
-    """Review fixes: a setting that passes validation works when sent; a partial refusal is logged."""
+class SmtpSettingEdgeTests(SmtpBase):
+    """A setting that passes validation works when sent; a partial refusal is logged."""
 
     def problems(self, **env: str) -> list[str]:
         return [p for p in self.cfg(SMTP_HOST="mail.example.com", **env).validate() if "SMTP" in p or "MAIL_TO" in p]

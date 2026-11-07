@@ -1,4 +1,4 @@
-"""S4 T-02: the DHCP client-id per source (ISC uid, Kea and dnsmasq client_id), its normal form, the merge and the
+"""The DHCP client-id per source (ISC uid, Kea and dnsmasq client_id), its normal form, the merge and the
 devices.client_id column. Synthetic ids only."""
 import os
 import sys

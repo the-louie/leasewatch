@@ -1,4 +1,4 @@
-"""Regression tests for config.py: host normalisation, LW_CONNECTOR__ parsing, URL checks and env helpers."""
+"""Edge cases of config.py: host normalisation, LW_CONNECTOR__ parsing, URL checks and env helpers."""
 from __future__ import annotations
 
 import os
@@ -16,7 +16,7 @@ FW = {"LW_CONNECTORS": "fw1", "LW_CONNECTOR__FW1__TYPE": "opnsense", "LW_CONNECT
 BASE = FW
 
 
-class QaConfigTests(unittest.TestCase):
+class ConfigValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = clean_env(BASE)
 

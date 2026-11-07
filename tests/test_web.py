@@ -775,7 +775,7 @@ class BugRegressionTests(unittest.TestCase):
             tmp.cleanup()
 
 
-class ReleaseReviewTests(WebTestCase):
+class RequestRejectionTests(WebTestCase):
     def test_text_plain_with_json_suffix_is_rejected(self):
         st, body, _ = self.post(MAC2, {"note": "x"}, ctype="text/plain;application/json")
         self.assertEqual(st, 415, body)
@@ -805,7 +805,7 @@ class ReleaseReviewTests(WebTestCase):
 
 
 
-class QaFixTests(WebTestCase):
+class ServerEdgeCaseTests(WebTestCase):
     def test_deeply_nested_json_is_400(self):
         status, data, _ = self.post(MAC1, None, raw=b"[" * 16000)
         self.assertEqual(status, 400); self.assertEqual(data["error"], "bad json")

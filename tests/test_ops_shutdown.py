@@ -11,8 +11,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from test_instances import FW1, Base  # noqa: E402
-from test_s5_auth import FW1_ENV, clean_env, restore  # noqa: E402
-from test_s5_unifi import USER, PASSWORD, Controller  # noqa: E402
+from test_basic_auth import FW1_ENV, clean_env, restore  # noqa: E402
+from test_unifi_session import USER, PASSWORD, Controller  # noqa: E402
 from leasewatch import __main__ as cli  # noqa: E402
 from leasewatch import collector as collector_mod  # noqa: E402
 

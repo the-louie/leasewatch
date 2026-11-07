@@ -1,4 +1,4 @@
-"""Sprint 2 review fixes in the connector loader: one failing test per finding (S2R16..S2R62).
+"""Edge cases of the connector loader: malformed plugin info, pyproject failures, entry points, conflicts and shadows.
 
 Every plugin is synthetic, written into a temporary directory by the test; the helpers come from test_loader.
 """
@@ -273,8 +273,8 @@ class TestConflictsAndShadows(LoaderBase):
 
 
 
-class TestSecondReview(LoaderBase):
-    """Second review round (S2S10..S2S30)."""
+class TestWalkShadowsAndDistributions(LoaderBase):
+    """Drops during the walk, shadowed types, broken settings and distribution names."""
 
     def test_drop_survives_a_module_import_during_the_walk(self):
         # S2S10: _drop walked the live sys.modules; another thread's first import raised RuntimeError

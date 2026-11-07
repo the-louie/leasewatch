@@ -1,4 +1,4 @@
-"""S5 T-06: the webhook channel (formats json, ntfy and discord), its signature, redirects, timeouts and the secret
+"""The webhook channel (formats json, ntfy and discord), its signature, redirects, timeouts and the secret
 URL. A local HTTP server on port 0 records the requests. Synthetic data only."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""S4 T-04: a new private (locally administered) MAC merged into the device it matches (client-id, then hostname),
+"""A new private (locally administered) MAC merged into the device it matches (client-id, then hostname),
 the alias rewrite of its records, the `merged` event, and no new-device mail for private MACs. Synthetic data only:
 the universally administered MACs are from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
 import os

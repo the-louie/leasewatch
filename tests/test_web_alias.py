@@ -1,4 +1,4 @@
-"""Review-fix regression tests for the web/db layer (synthetic data only)."""
+"""Alias MAC resolution in the web/db layer (synthetic data only)."""
 import os
 import sys
 import unittest
@@ -10,7 +10,7 @@ ALIAS = "02:00:00:00:30:99"  # synthetic private MAC merged into MAC2
 
 
 class AliasResolutionTest(WebTestCase):
-    """S4R10: design-s4.md section 1 says an alias MAC resolves to its device for GET and POST."""
+    """design-s4.md section 1 says an alias MAC resolves to its device for GET and POST."""
 
     def setUp(self):
         super().setUp()

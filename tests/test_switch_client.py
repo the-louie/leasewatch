@@ -1,4 +1,4 @@
-"""Regression tests for the switch client and build_snapshot (QA 1.1, switch.py).
+"""Edge cases of the switch client and build_snapshot (switch.py).
 
 Synthetic data only; the switch is a FakeWalker behind the fake pysnmp module of test_switch_profiles.
 """
@@ -292,7 +292,7 @@ class DetectReportTests(EnvTest):
         self.assertEqual(r["walks"][-1], ("(remaining walks)", "snmp: timeout after 120 s"))
 
 
-class Round2Tests(EnvTest):
+class DetectAndBaseportTests(EnvTest):
     def _detect(self, rows, prof=None):
         prof = prof or snmp_profiles.load("standard")
         w = add_rows(FakeWalker("standard"), rows)
@@ -352,7 +352,7 @@ class Round2Tests(EnvTest):
         self.assertEqual(len([r for r in logs.output if "dot1dBasePortIfIndex" in r]), 1)
 
 
-class Round3Tests(EnvTest):
+class DecoderAndNoBulkTests(EnvTest):
     def test_w25_decoder_set_on_the_instance_passes_the_probe(self):
         c = SwitchClient(CFG, snmp_profiles.load("edgeswitch"))
         c.fdb_decoder = lambda rows: []
@@ -379,7 +379,7 @@ class Round3Tests(EnvTest):
         self.assertIn("sw-office: ", lines[1])
 
 
-class Round4Tests(EnvTest):
+class NoBulkCommentKeyTests(EnvTest):
     def test_x04_no_bulk_naming_a_comment_key_with_a_list_still_walks(self):
         prof = snmp_profiles.load("standard")
         prof["oids"]["_tables"] = ["if_x is 1.3.6.1.2.1.31.1.1.1"]

@@ -1,4 +1,4 @@
-"""Sprint 2 review fixes in the collector and the merge: the check() fallback while the baseline waits, SystemExit from
+"""Collector setup and the merge during the baseline wait: the check() fallback while the baseline waits, SystemExit from
 a connector's constructor, device_names() while connectors are built, the 'changed' count during the wait. Fake
 connectors only; no network."""
 import logging
@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_instances import FW1, MAC, Base, Fake, arp  # noqa: E402
-import test_qa11_collector as qa11  # noqa: E402
+import test_collector_edge_cases as cedge  # noqa: E402
 from leasewatch import collector as collector_mod  # noqa: E402
 from leasewatch.collector import MAX_BACKOFF  # noqa: E402
 from leasewatch.connectors import Batch, HostContext, InstanceSpec, Sighting, registry  # noqa: E402
@@ -39,12 +39,12 @@ class _Eager(Fake):
 
 
 class CheckFallbackWhileWaitingTests(Base):
-    # the S05x setup of test_qa11_collector, not inherited: its tests would run twice
-    ENV = qa11.BaselineWaitTests.ENV
-    FX_MACS = qa11.BaselineWaitTests.FX_MACS
-    fx_batch = qa11.BaselineWaitTests.fx_batch
-    down = staticmethod(qa11.BaselineWaitTests.down)  # class access unwraps the staticmethod; re-wrap it
-    poll = qa11.BaselineWaitTests.poll
+    # the S05x setup of test_collector_edge_cases, not inherited: its tests would run twice
+    ENV = cedge.BaselineWaitTests.ENV
+    FX_MACS = cedge.BaselineWaitTests.FX_MACS
+    fx_batch = cedge.BaselineWaitTests.fx_batch
+    down = staticmethod(cedge.BaselineWaitTests.down)  # class access unwraps the staticmethod; re-wrap it
+    poll = cedge.BaselineWaitTests.poll
 
     # S2R01/S2R15: a check() that keeps failing while collect() works must still reach the MAX_BACKOFF fallback
     # (collect() every poll) while the baseline waits, or the baseline is never taken

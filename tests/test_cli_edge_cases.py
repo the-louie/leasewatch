@@ -1,4 +1,4 @@
-"""QA 1.1 regression tests for the command line (`python -m leasewatch ...`, leasewatch/__main__.py)."""
+"""Edge cases of the command line (`python -m leasewatch ...`, leasewatch/__main__.py)."""
 import contextlib, io, logging, os, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -188,7 +188,7 @@ class PysnmpProbeTests(unittest.TestCase):
         self.assertIn("cannot be imported (AttributeError)", logs.output[0])
 
 
-class Round2CliTests(unittest.TestCase):
+class InstanceProblemAndPipeTests(unittest.TestCase):
     def setUp(self):
         self._env = clean_env(KEYS)
         self.addCleanup(restore, self._env)
@@ -333,7 +333,7 @@ class Round2CliTests(unittest.TestCase):
         self.assertIn("differ only in case", out)
 
 
-class Round2PysnmpProbeTests(unittest.TestCase):
+class PysnmpImportErrorTests(unittest.TestCase):
     def setUp(self):
         saved = clean_env()
         self.addCleanup(restore, saved)
@@ -381,7 +381,7 @@ class Round2PysnmpProbeTests(unittest.TestCase):
         self.assertNotIn("not installed", first)
         self.assertNotIn("pip install", first)
 
-class Round4PysnmpProbeTests(unittest.TestCase):
+class DamagedPysnmpPackageTests(unittest.TestCase):
     # X12: an installed pysnmp whose __init__ imports a missing submodule of its own is not "not installed"
     def test_a_damaged_pysnmp_package_is_not_called_not_installed(self):
         with tempfile.TemporaryDirectory() as d:

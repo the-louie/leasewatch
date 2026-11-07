@@ -1,4 +1,4 @@
-"""Regression tests for the QA 1.1 merge findings: normalise_batch coercion, lease and location fallbacks, attachments."""
+"""Edge cases of the merge: normalise_batch coercion, lease and location fallbacks, attachments."""
 import logging, os, sqlite3, sys, unittest
 from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -236,8 +236,8 @@ class Attachments(Base):
             logging.disable(logging.NOTSET)
 
 
-class Round2(Base):
-    """QA 1.1 round 2 (V-rows): merge findings left after the round-1 fixes."""
+class LeaseIpAndCoercion(Base):
+    """Lease type clearing, empty-IP leases, field coercion and dropped-row stats."""
 
     def _mode(self, mode):
         env = clean_env({**FW1_ENV, "LEASE_TYPE_MODE": mode})
@@ -330,7 +330,7 @@ class Round2(Base):
             logging.disable(logging.NOTSET)
 
 
-class Round3(Base):
+class IpFallbackAndWifiClear(Base):
     @staticmethod
     def _mk(ip, vlan, iface, src, lt="", online=True):
         return Fw1Sighting(mac=A, ip=ip, hostname="r" if src == "dhcp" else "", vendor="", vlan=vlan, iface=iface,
@@ -474,8 +474,8 @@ class WifiEvents(Base):
         self.assertEqual(res.events, [])
 
 
-class S4Rekey(Base):
-    """S4R05/S4R06: an alias and its device in one batch, and two leases that differ only in client-id."""
+class AliasAndClientIdOrder(Base):
+    """An alias and its device in one batch, and two leases that differ only in client-id."""
     D = "00:00:5e:00:53:01"   # the device (documentation range)
     AL = "02:aa:00:00:00:01"  # its known private alias
 

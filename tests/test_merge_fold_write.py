@@ -9,15 +9,15 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_instances import FW1  # noqa: E402
-import test_s4_merge  # noqa: E402
-from test_s4_merge import DEV, MAIL, NEWP  # noqa: E402
+import test_merge_private_mac  # noqa: E402
+from test_merge_private_mac import DEV, MAIL, NEWP  # noqa: E402
 from leasewatch.collector import HISTORY_PER_MAC  # noqa: E402
 
 HOST = "alex-laptop"  # "laptop" alone is a generic name and never merges
 T0 = 1_800_000_000
 
 
-class FoldWriteTests(test_s4_merge.CollectorTests):
+class FoldWriteTests(test_merge_private_mac.CollectorTests):
     # the parent's own tests are not run again here
     test_alias_sightings_land_on_the_device_and_no_mail = None
     test_private_new_device_without_merge_gets_no_mail = None

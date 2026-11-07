@@ -1,4 +1,4 @@
-"""Schema v3 (S4): device columns client_id, archived_ts, mail_queued and the aliases table, migrated one-way."""
+"""Schema v3: device columns client_id, archived_ts, mail_queued and the aliases table, migrated one-way."""
 from __future__ import annotations
 
 import os

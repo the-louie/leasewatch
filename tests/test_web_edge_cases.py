@@ -1,4 +1,4 @@
-"""Regression tests for the QA 1.1 web findings: client aborts, absolute-form targets, CSV guard, meta fields."""
+"""Edge cases of the web server: client aborts, absolute-form targets, CSV guard, meta fields."""
 from __future__ import annotations
 
 import ast
@@ -272,7 +272,7 @@ class DrawerConsistencyTests(Base):
         self.assertEqual(self.db.device(MAC)["ip"], "10.0.0.6")
 
 
-class Round2Tests(Base):
+class CsvEscapeAndHeaderTests(Base):
     def _csv_body(self) -> str:
         h = self.handler(path="/api/devices.csv")
         h._csv()
@@ -348,7 +348,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class Round3Tests(Base):
+class ContentTypeAndIndexPathTests(Base):
     def test_W15_multipart_content_type_is_not_a_malformed_header(self) -> None:
         # the email parser records body defects for a well-formed multipart type; only header-line defects mean 400
         ct = b"Host: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=x\r\n"

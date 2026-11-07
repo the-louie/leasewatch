@@ -1,4 +1,4 @@
-"""Collector regressions from the 1.1 QA round: startup prune, log-on-change, thread start, history trim, event prune,
+"""Edge cases of the collector: startup prune, log-on-change, thread start, history trim, event prune,
 loop error logging, unknown types, status meta, mail retries, producer stats. Fake connectors only; no network."""
 import ast
 import logging
@@ -209,8 +209,8 @@ class MailRetryTests(Base):
                          [("02:00:00:00:00:02", "10.0.0.13"), ("02:00:00:00:00:03", "10.0.0.9")])
 
 
-class Round2Tests(Base):
-    """Fix round 2 (V01, V02, V27, V47, V48, V72, V73)."""
+class FailureLoggingAndPruneTests(Base):
+    """Failure tracebacks, mail queue read errors, disabled status at start, event prune and strategy clearing."""
     MAIL = {"LW_CONNECTORS": "fw1", **FW1, "MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com",
             "MAIL_TO": "a@example.com"}
 
@@ -311,8 +311,8 @@ class Round2Tests(Base):
         # a failed sighting producer may hold the lease: kept until it answers again
         self.assertEqual(poll("fx"), "static")
 
-class Round3Tests(Base):
-    """Fix round 3 (W01, W02, W03, W04, W29, W39)."""
+class DisabledErrorAndPruneReferenceTests(Base):
+    """A fixed instance clears its disabled error, one traceback per failure kind, and the prune reference fallbacks."""
     RES = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[], wifi=[])
 
     def test_fixed_switch_clears_its_disabled_error_at_start(self):  # W01

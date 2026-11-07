@@ -21,7 +21,7 @@ def _read(*parts: str) -> str:
         return f.read()
 
 
-class QaUiDocTests(unittest.TestCase):
+class ReadmeStatusDotTests(unittest.TestCase):
     # S29x: a failing instance gets class "dot bad" (red, var(--danger)), not a grey dot
     def test_readme_failed_dot_is_red_not_grey(self) -> None:
         readme = _read("README.md")
@@ -193,7 +193,7 @@ def _run(names: list[str], script: str) -> dict:
 
 
 @unittest.skipUnless(NODE, "node is not installed")
-class QaUiAppJsTests(unittest.TestCase):
+class AppJsTests(unittest.TestCase):
     def test_extractor_finds_every_helper(self) -> None:
         src = _read("leasewatch", "static", "app.js")
         for n in BASE + ["renderStatus", "renderTable", "refreshDrawer", "setFields", "seenHtml", "syncUrl", "filtered"]:
