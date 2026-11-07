@@ -153,6 +153,9 @@
   function renderCards() {
     const s = state.stats; if (!s) return;
     $("#cTotal").textContent = s.total; $("#cOnline").textContent = s.online; $("#cNew").textContent = s.new; $("#cUnacked").textContent = s.unacked;
+    // the baseline card shows only while there is something to check (or its filter is on, so the click can be undone)
+    const nb = s.baseline_unchecked || 0, showB = nb > 0 || state.status === "baseline";
+    $("#cBaseline").textContent = nb; $("#cardBaseline").classList.toggle("hidden", !showB); $("#cards").classList.toggle("five", showB);
     $$(".card[data-filter]").forEach(c => { const on = c.dataset.filter === state.status && state.status !== "all"; c.classList.toggle("active", on); c.setAttribute("aria-pressed", on); });
     const bars = $("#bars"); bars.innerHTML = "";
     const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -192,6 +195,7 @@
       switch (state.status) {
         case "new": if (!isNew(d)) return false; break;
         case "unacked": if (d.acked || d.baseline) return false; break;
+        case "baseline": if (!d.baseline || d.acked) return false; break;
         case "online": if (!d.online) return false; break;
         case "offline": if (d.online) return false; break;
         case "dynamic": if (d.lease_type !== "dynamic") return false; break;
@@ -201,7 +205,7 @@
         case "wired": if (onWifi(d) || (d.link !== "wired" && !d.sw_port)) return false; break;
       }
       if (q) {
-        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias}`.toLowerCase();
+        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${(d.aliases || []).join(" ")}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -275,7 +279,7 @@
     const total = state.devices.filter(d => (d.archived_ts != null) === (state.status === "archived")).length;
     $("#count").textContent = `${list.length} of ${total}`;
     $("#empty").classList.toggle("hidden", list.length > 0);
-    $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
+    $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
     $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.status !== "all"));
   }
 

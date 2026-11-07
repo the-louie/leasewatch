@@ -31,6 +31,7 @@
     <button class="card" data-filter="online" aria-pressed="false"><span class="num" id="cOnline">–</span><span class="lbl">online now</span></button>
     <button class="card accent" data-filter="new" aria-pressed="false"><span class="num" id="cNew">–</span><span class="lbl">new (<span id="newDays">7</span> d)</span></button>
     <button class="card warn" data-filter="unacked" aria-pressed="false"><span class="num" id="cUnacked">–</span><span class="lbl">not yet known</span></button>
+    <button class="card warn hidden" id="cardBaseline" data-filter="baseline" aria-pressed="false"><span class="num" id="cBaseline">–</span><span class="lbl">baseline to check</span></button>
     <div class="card chart" role="img" aria-label="New devices per day, last 30 days">
       <div class="chart-title"><span>new devices · 30 days</span><span class="chart-sum" id="barsSum"></span></div>
       <div class="bars" id="bars"></div>
@@ -50,6 +51,7 @@
       <option value="all">All devices</option>
       <option value="new">New</option>
       <option value="unacked">Not yet known</option>
+      <option value="baseline">Baseline, not checked</option>
       <option value="online">Online</option>
       <option value="offline">Offline</option>
       <option value="dynamic">DHCP dynamic</option>

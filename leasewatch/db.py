@@ -234,7 +234,16 @@ class Database:
 
     # --- devices ------------------------------------------------------------
     def devices(self) -> list[dict]:
-        return [dict(r) for r in self.q("SELECT * FROM devices ORDER BY first_seen DESC, mac")]
+        """Every device row, each with `aliases`: the merged MACs, newest merge first, [] without any."""
+        with self._lock:  # one hold: the two reads must not straddle a collector write
+            c = self._c()
+            rows = [dict(r) for r in c.execute("SELECT * FROM devices ORDER BY first_seen DESC, mac")]
+            by_dev: dict[str, list[str]] = {}
+            for r in c.execute("SELECT device, mac FROM aliases ORDER BY merged_ts DESC, mac"):  # one query, not one per device
+                by_dev.setdefault(r["device"], []).append(r["mac"])
+        for d in rows:
+            d["aliases"] = by_dev.get(d["mac"], [])
+        return rows
 
     def device(self, mac: str) -> dict | None:
         r = self.q("SELECT * FROM devices WHERE mac=?", (mac,))
@@ -309,9 +318,9 @@ class Database:
             # archived devices are not in the list, so not in its counts; the arrivals chart below keeps them
             rows = self._c().execute("SELECT vlan, COUNT(*) n, SUM(online) online FROM devices WHERE archived_ts IS NULL GROUP BY vlan ORDER BY n DESC").fetchall()
             recent = self._c().execute("SELECT first_seen FROM devices WHERE baseline=0 AND first_seen>=? ORDER BY first_seen", (now - 30 * 86400,)).fetchall()
-            tot = self._c().execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
+            tot = self._c().execute("SELECT COUNT(*) n, SUM(online) online, SUM(CASE WHEN acked=0 AND baseline=0 THEN 1 ELSE 0 END) unacked, SUM(CASE WHEN baseline=1 AND acked=0 THEN 1 ELSE 0 END) baseline_unchecked, SUM(CASE WHEN baseline=0 AND first_seen>=? THEN 1 ELSE 0 END) new FROM devices WHERE archived_ts IS NULL", (now - new_days * 86400,)).fetchone()
         return {
-            "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "new": tot["new"] or 0,
+            "total": tot["n"], "online": tot["online"] or 0, "unacked": tot["unacked"] or 0, "baseline_unchecked": tot["baseline_unchecked"] or 0, "new": tot["new"] or 0,
             "vlans": [{"vlan": r["vlan"], "n": r["n"], "online": r["online"] or 0} for r in rows],
             "new_recent": [r["first_seen"] for r in recent],  # epochs; the browser buckets them by its own local day
         }

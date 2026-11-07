@@ -51,6 +51,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
 main { max-width: 1280px; margin: 0 auto; padding: 8px 24px 40px; }
 
 .cards { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(240px, 2fr); gap: 12px; margin: 10px 0 12px; }
+.cards.five { grid-template-columns: repeat(5, minmax(110px, 1fr)) minmax(240px, 2fr); }
 .card { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; text-align: left; box-shadow: var(--shadow); cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
 .card.chart { cursor: default; }
 .card:hover:not(.chart) { border-color: var(--accent); }
@@ -182,7 +183,7 @@ footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--m
 @media (max-width: 1279px) { .c-type { display: none; } } /* the table is capped at 1232 px (main): Type fits from 1280 px */
 @media (max-width: 1400px) { .c-where .sig { display: none; } }
 @media (max-width: 900px) {
-  .cards { grid-template-columns: repeat(2, 1fr); }
+  .cards, .cards.five { grid-template-columns: repeat(2, 1fr); }
   .card.chart { grid-column: 1 / -1; }
   .top { padding: 14px 16px 6px; } main { padding: 6px 16px 30px; }
   .sub { display: none; }

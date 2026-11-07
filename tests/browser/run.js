@@ -322,6 +322,13 @@ const scenarios = {
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
     return { rows, drawer, plain, merged_event };
   },
+  // a merged MAC typed into the search finds the device it was merged into, and no other row
+  async aliassearch(page) {
+    await page.click('#q', { clickCount: 3 });
+    await page.type('#q', '06:00:00:00:10:02');
+    await page.waitForFunction(v => new URLSearchParams(location.search).get('q') === v, {}, '06:00:00:00:10:02');
+    return { rows: await visibleRows(page) };
+  },
   // MAC and IP text copy on click, Enter and Space; hovering or copying does not change any column width
   async copy(page) {
     await page.evaluate(() => {
@@ -418,6 +425,31 @@ const scenarios = {
              line: await page.$eval('#fReadOnly', e => e.textContent),
              buttons: await page.$$eval('#dBody .actions button', bs => bs.map(b => b.id)),
              name_readonly: await page.$eval('#fName', e => e.readOnly), note_readonly: await page.$eval('#fNote', e => e.readOnly) };
+  },
+  // the "Baseline, not checked" filter and its card: the option, the card's number and visibility, ?filter=baseline,
+  // and the page width at 1280 px with the fifth card shown
+  async baseline(page, base) {
+    const card = () => page.evaluate(() => {
+      const c = document.querySelector('#cardBaseline');
+      return { hidden: getComputedStyle(c).display === 'none', num: c.querySelector('.num').textContent,
+               five: document.querySelector('#cards').classList.contains('five'),
+               pressed: c.getAttribute('aria-pressed') };
+    });
+    const res = { option: await page.$$eval('#fStatus option', os => os.map(o => [o.value, o.textContent])) };
+    res.card = await card();
+    await page.setViewport({ width: 1280, height: 900 });
+    res.scroll_1280 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    res.card_box = await page.evaluate(() => { const r = document.querySelector('#cardBaseline').getBoundingClientRect(); return { w: r.width, right: r.right }; });
+    await page.goto(`${base}?filter=baseline`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelector('#cTotal').textContent !== '–');
+    res.restored = await page.$eval('#fStatus', e => e.value);
+    res.names = await rowNames(page);
+    res.card_filtered = await card();
+    res.empty = await page.$eval('#empty', e => e.classList.contains('hidden') ? '' : document.querySelector('#emptyText').textContent);
+    res.scroll_filtered = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    await page.click('#cardBaseline:not(.hidden)').catch(() => {});
+    res.after_click_filter = await page.$eval('#fStatus', e => e.value);
+    return res;
   },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {

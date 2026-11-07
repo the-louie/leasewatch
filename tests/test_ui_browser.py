@@ -49,7 +49,7 @@ NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
+SCENARIOS = ("load", "rows", "status", "chips", "search", "csv", "trap", "columns", "baseline", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
 def mac(n: int) -> str:
@@ -309,6 +309,58 @@ class BrowserUITest(_BrowserCase):
         self.assertEqual(d["rowack"]["unacked_card"], str(len(NEW) - 2))
 
 
+class BrowserBaselineTest(_BrowserCase):
+    """The seed's 10 baseline devices are all unchecked: the fifth card shows 10 and ?filter=baseline lists them."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        base, _ = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                        [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new])
+        cls.run_scenarios(base, ("baseline",))
+
+    def test_filter_and_card(self) -> None:
+        d = self.result("baseline")
+        want = {h for _, h, _, _, new in DEVICES if not new}
+        self.assertIn(["baseline", "Baseline, not checked"], d["option"])
+        self.assertEqual(d["card"], {"hidden": False, "num": str(len(want)), "five": True, "pressed": "false"})
+        self.assertEqual(d["restored"], "baseline")
+        self.assertEqual(set(d["names"]), want)
+        self.assertEqual(len(d["names"]), len(want))
+        self.assertEqual(d["card_filtered"]["num"], str(len(d["names"])))
+        self.assertEqual(d["card_filtered"]["pressed"], "true")
+        self.assertEqual(d["after_click_filter"], "all")  # the card toggles its filter off
+
+    def test_no_horizontal_scroll_at_1280(self) -> None:
+        d = self.result("baseline")
+        self.assertLessEqual(d["scroll_1280"], 0)
+        self.assertLessEqual(d["scroll_filtered"], 0)
+        self.assertGreaterEqual(d["card_box"]["w"], 110)
+
+
+class BrowserBaselineDoneTest(_BrowserCase):
+    """Every baseline device is marked known: the card is hidden and the filter, if opened by URL, is empty."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                         [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new])
+        db.q("UPDATE devices SET acked=1 WHERE baseline=1")
+        cls.run_scenarios(base, ("baseline",))
+
+    def test_card_hidden_at_zero(self) -> None:
+        d = self.result("baseline")
+        self.assertTrue(d["card"]["hidden"])
+        self.assertFalse(d["card"]["five"])
+        self.assertEqual(d["names"], [])
+        self.assertEqual(d["empty"], "Every baseline device is checked.")
+        self.assertFalse(d["card_filtered"]["hidden"])  # shown while its filter is on, so the click can be undone
+        self.assertEqual(d["card_filtered"]["num"], "0")
+
+
 class BrowserPrivateTest(_BrowserCase):
     """Private (locally administered) MACs, the merged-MAC list and click-to-copy. A hardware MAC from the RFC 7042
     documentation range, a private device that sends a client-id, and a new private MAC merged into it by that id."""
@@ -325,7 +377,7 @@ class BrowserPrivateTest(_BrowserCase):
         first = [s(cls.UA, 20, "printer"), s(cls.DEV, 21, "tablet", cls.CID), s(cls.OTHER, 23, "laptop")]
         base, db = start(cls, first, [s(cls.NEWP, 22, "tablet", cls.CID)])
         assert [r["mac"] for r in db.q("SELECT mac FROM aliases")] == [cls.NEWP], "the seed did not merge"
-        cls.run_scenarios(base, ("private", "copy", "archive"))  # archive changes server state: last
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "archive"))  # archive changes server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -359,6 +411,10 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(seen, "just now")
         self.assertFalse(d["plain"]["table"])
         self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_search_by_merged_mac_lists_only_its_device(self) -> None:
+        rows = self.result("aliassearch")["rows"]
+        self.assertEqual([r["mac"] for r in rows], [self.DEV])
 
     def test_merged_event_has_a_label(self) -> None:
         d = self.result("private")
