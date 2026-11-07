@@ -11,6 +11,24 @@ from contextlib import contextmanager
 
 log = logging.getLogger("leasewatch.db")
 
+_DB_ERROR_TEXT = {
+    13: "database full (disk or size limit)",
+    5: "database locked by another process",
+    6: "database locked by another process",
+    10: "database I/O error",
+    8: "database is read-only (check DATA_DIR permissions)",
+    11: "database file is damaged (restore a backup)",
+    26: "database file is damaged (restore a backup)",
+}
+
+
+def db_error_text(e: sqlite3.Error) -> str:
+    """The text for last_error, by the primary SQLite result code (not the message, which may change)."""
+    code = getattr(e, "sqlite_errorcode", None)
+    if code is not None and (code & 0xFF) in _DB_ERROR_TEXT:
+        return _DB_ERROR_TEXT[code & 0xFF]
+    return f"database error ({getattr(e, 'sqlite_errorname', None) or type(e).__name__})"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
     mac         TEXT PRIMARY KEY,

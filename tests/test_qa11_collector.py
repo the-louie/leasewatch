@@ -151,9 +151,9 @@ class LoopTests(Base):
         def fail(msg, status=None):
             raise sqlite3.OperationalError("disk I/O error")
         col.run_once, col._fail = run_once, fail
-        with self.assertLogs("leasewatch.collector", "ERROR") as cm:
+        with self.assertLogs("leasewatch.collector", "WARNING") as cm:
             col.loop(stop)
-        self.assertIn("disk I/O error", "\n".join(cm.output))
+        self.assertIn("cannot record the failed poll", "\n".join(cm.output))
 
 
 class StatusTests(Base):

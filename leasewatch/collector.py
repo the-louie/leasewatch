@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .config import Config
-from .db import Database
+from .db import Database, db_error_text
 from .connectors import (Batch, ConnectorError, HostContext, InstanceSpec, build_instance, instance_problems,
                          instances_context, registry)
 from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState,
@@ -122,6 +122,9 @@ class Collector:
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._connectors: dict = {}
         self._closed = False
+        self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
+        self._poll_fails = 0  # failed polls in the current spell
+        self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
             self._add(spec, client if spec.name == "fw1" else None)
@@ -537,9 +540,33 @@ class Collector:
                 if stop_event.is_set() and isinstance(e, sqlite3.ProgrammingError):
                     log.debug("poll cut off by shutdown")  # the database was closed under a poll that outlived the join
                     break
-                log.exception("collector crashed in run_once; continuing")
-                try:
-                    self._fail("internal error in collector (see logs)")
-                except Exception:  # usually the same database error: the status stays stale until the stale check
-                    log.exception("cannot record the failed poll")
+                self._poll_crashed(e)
+            else:
+                if self._poll_spell is not None:
+                    log.info("polls work again after %d failed poll(s)", self._poll_fails)
+                    self._poll_spell, self._poll_fails, self._fail_unrecorded = None, 0, False
             stop_event.wait(self.cfg.poll_seconds)
+
+    def _poll_crashed(self, e: Exception) -> None:
+        """Log a failed poll (traceback once per spell and cause) and record it as last_error."""
+        if isinstance(e, sqlite3.DatabaseError):
+            msg = db_error_text(e)
+            key: tuple = ("db", (getattr(e, "sqlite_errorcode", None) or 0) & 0xFF)
+        else:
+            msg = "internal error in collector (see logs)"
+            last = traceback.extract_tb(e.__traceback__)[-1:]
+            key = (type(e).__name__, *((last[0].filename, last[0].lineno) if last else ()))
+        if self._poll_spell is None:
+            self._poll_fails = 0
+        self._poll_fails += 1
+        if key != self._poll_spell:
+            log.error("poll failed: %s", msg, exc_info=True)
+        else:
+            log.debug("poll failed again: %s", msg)
+        self._poll_spell = key
+        try:
+            self._fail(msg)
+        except Exception:  # usually the same database error: the status stays stale until the stale check
+            if not self._fail_unrecorded:
+                log.warning("cannot record the failed poll: %s", msg)
+                self._fail_unrecorded = True
