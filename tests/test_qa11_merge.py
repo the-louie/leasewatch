@@ -437,6 +437,27 @@ class WifiEvents(Base):
         self.assertEqual(back.events, [])
         self.assertEqual((back.rows[A]["wifi_ssid"], back.rows[A]["link"]), ("HomeNet", "wifi"))
 
+    def test_walk_out_with_an_ap_uplink_fdb_entry_writes_no_events(self):
+        # the FDB still holds the phone on the AP's uplink: that is no cable, so leaving and returning are silent,
+        # also when the walk-out lasts more than one poll
+        up = {"sw1": Batch(attachments=[swp(A, "GE1/0/24", "sw1", uplink=True, via="ap-hall")])}
+        out = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(), **up},
+                         controllers=CTRL)
+        self.assertEqual(out.events, [])
+        self.assertEqual((out.rows[A]["wifi_ssid"], out.rows[A]["link"]), ("", ""))
+        out = self.merge([out.rows[A]], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(), **up}, controllers=CTRL)
+        self.assertEqual(out.events, [])
+        back = self.merge([out.rows[A]], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()]), **up},
+                          controllers=CTRL)
+        self.assertEqual(back.events, [])
+        self.assertEqual((back.rows[A]["wifi_ssid"], back.rows[A]["link"]), ("HomeNet", "wifi"))
+
+    def test_leaving_wifi_to_an_edge_port_writes_the_event(self):
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(),
+                                               "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")])}, controllers=CTRL)
+        self.assertEqual(res.events, [(A, "wifi", "HomeNet -> off Wi-Fi")])
+        self.assertEqual(res.rows[A]["link"], "wired")
+
     def test_S4R08_first_ssid_of_a_client_already_on_wifi_writes_no_event(self):
         res = self.merge([row(A, link="wifi", wifi_ssid="", wifi_ap="ap-hall", loc_source="unifi")],
                          {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])}, controllers=CTRL)
@@ -488,6 +509,14 @@ class S4Rekey(Base):
         self.assertEqual(merge_sightings([without, with_cid])[A].client_id, "01aabbccddee01")
         self.assertEqual(merge_sightings([with_cid, other])[A].client_id, merge_sightings([other, with_cid])[A].client_id)
 
+
+    def test_lease_type_ranks_static_dynamic_empty_in_any_order(self):
+        mk = lambda t: Fw1Sighting(mac=A, ip="10.0.0.5", hostname="h", vendor="v", vlan="lan", iface="igb0", source="dhcp",
+                                   lease_type=t, online=False, client_id="")
+        for rows, want in (([mk("dynamic"), mk("")], "dynamic"), ([mk("static"), mk("dynamic"), mk("")], "static")):
+            for order in (rows, rows[::-1]):
+                with self.subTest([s.lease_type for s in order]):
+                    self.assertEqual(merge_sightings(list(order))[A].lease_type, want)
 
 if __name__ == "__main__":
     unittest.main()

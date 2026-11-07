@@ -257,7 +257,9 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     # an empty IP or network sorts last (it cannot be where the device is), a static lease before a dynamic one
     # vendor and iface too: every field the merge takes from a sighting is a key, so ties never depend on row order
     # client_id too (S4R06): two leases that differ only in it would otherwise give the client-id of the first row
-    pick = lambda s: (s.ip == "", s.vlan == "", s.vlan, s.ip, s.lease_type != "static", s.hostname, s.vendor, s.iface,
+    # lease type: static, then dynamic, then none, so a "" lease never ties with a dynamic one
+    pick = lambda s: (s.ip == "", s.vlan == "", s.vlan, s.ip, _rank(("static", "dynamic", ""), s.lease_type), s.lease_type,
+                      s.hostname, s.vendor, s.iface,
                       s.client_id == "", s.client_id)
     for mac, ss in by_mac.items():
         ss = sorted(ss, key=lambda s: (s.source,) + pick(s))
@@ -613,6 +615,8 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         # a controller that answered and lists the device (wired or Wi-Fi) is first-hand evidence, so not blind
         blind = ctrl_failed and cur["link"] == "wifi" and w is None
         sw = wired.get(mac)
+        # a cable shown: an edge port this poll. An uplink entry (a Wi-Fi client on its AP's uplink) is no cable
+        edge = bool(sw and sw.port and not sw.uplink)
         # the switch that placed this wired device failed this poll: another switch can only offer a worse view (an
         # uplink towards it, an aged FDB entry), so the port stays as it is, as a Wi-Fi device does while blind
         held = (cur["link"] == "wired" and cur["loc_source"] in batches
@@ -641,7 +645,9 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                     res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> {w.ssid}"))
                 # joined from a cable only (S4R08/S4R09): on Wi-Fi without an SSID, or placed nowhere (a walk-out
                 # cleared silently below), it never left Wi-Fi as far as the record shows
-                elif mac not in new and cur["link"] == "wired":
+                # a row wired through an uplink (sw_via names what is behind it: the AP a walked-out phone was
+                # last learned on) showed no cable either
+                elif mac not in new and cur["link"] == "wired" and not cur["sw_via"]:
                     res.events.append((mac, "wifi", f"- -> {w.ssid}"))
             # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next change is logged
             upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
@@ -662,9 +668,9 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
             # branch above already recorded its port, so a cable is shown in this same poll.
             # an event only with a cable shown (S4R09): ARP alone keeps a walked-out phone ~20 min after the
             # controller dropped it, so without a switch port this cannot be told from a walk-out
-            if cur["wifi_ssid"] and sw:
+            if cur["wifi_ssid"] and edge:
                 res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> off Wi-Fi"))
-            upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if sw else "")
+            upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if edge else "")
             upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
         # on the wire, as for the port above: a device only in grace would be called wired on a stale FDB entry
         if on_wire and sw and not on_wifi and cur["link"] != "wifi":

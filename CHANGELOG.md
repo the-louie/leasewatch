@@ -78,7 +78,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - A device and its merged MAC on one switch: the edge port wins over a stale uplink entry whatever the walk order; a controller listing both places the device at its active client.
 - The merged DHCP client-id no longer depends on the order of otherwise equal lease rows.
 - PRUNE_DAYS no longer re-archives a device restored by hand until it has been online again.
-- Wi-Fi events: no 'joined' event for the first SSID of a client already on Wi-Fi, and no 'off Wi-Fi' or 'joined' events for a phone that walks out while the firewall's ARP still lists it; leaving to a shown cable is still an event.
+- Wi-Fi events: no 'joined' event for the first SSID of a client already on Wi-Fi, and no 'off Wi-Fi' or 'joined' events for a phone that walks out while the firewall's ARP still lists it; leaving to a shown cable is still an event. A switch that still holds the phone on an uplink (the access point's port) is no cable: the walk-out and the return write no `wifi` events.
 - GET and POST /api/devices/<mac> with a merged private (alias) MAC now act on the device it was merged into, instead of returning 404.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
