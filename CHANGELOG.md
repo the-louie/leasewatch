@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-11-07)
 
 ### Added
 - **`python -m leasewatch backup [--to PATH] [--keep N]`:** a consistent copy of the database with the SQLite backup API, safe while the service runs, written to `DATA_DIR/backups/leasewatch-<date>-<time>.sqlite3` (one self-contained file, mode 0600, integrity-checked); the newest `BACKUP_KEEP` (default 7) copies are kept. README: a cron line and the restore steps.
