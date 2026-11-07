@@ -11,6 +11,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
 - **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
 - **OPNsense dnsmasq:** `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` reads the DHCPv4 leases of the dnsmasq DHCP server (`/api/dnsmasq/leases/search`, OPNsense 25.1.6+). IPv6 leases are skipped; reservations without an active lease are not listed. The privilege *Services: Dnsmasq DNS/DHCP: Settings* also grants write access: OPNsense has no read-only one.
+- **Private MACs:** a new locally administered (private) MAC that matches exactly one known device, by DHCP client-id or else by a distinctive DHCP hostname of a device seen in the last 30 days, is merged into it: its IP, hostname, port, Wi-Fi and *Seen by* rows land on that device, the alias is stored in the `aliases` table, and a `merged` event is written. Never at the first poll, never between two hardware MACs, never into a device on the wire in the same poll. A new private MAC, merged or not, sends no new-device mail.
 
 ### Changed
 

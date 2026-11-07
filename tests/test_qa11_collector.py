@@ -104,7 +104,7 @@ class OutcomeTests(Base):
 
 class WriteTests(Base):
     def res(self, history=(), events=()):
-        return SimpleNamespace(rows={}, history=list(history), events=list(events), seen=[])
+        return SimpleNamespace(rows={}, history=list(history), events=list(events), seen=[], aliases=[], alias_seen=[])
 
     def test_history_trim_keeps_the_row_just_written_after_a_clock_step_back(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
@@ -273,7 +273,7 @@ class Round2Tests(Base):
             for i in range(5):
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now - i * DAY, f"02:00:00:00:00:0{i}", "new", ""))
         jump = now + 10 * 365 * DAY
-        res = SimpleNamespace(rows={}, history=[], events=[], seen=[])
+        res = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[])
         for k in range(3):  # as run_once: last_poll_ts follows the wrong clock
             with db.tx() as c:
                 col._write(c, {}, res, jump + k * 120)
@@ -315,7 +315,7 @@ class Round2Tests(Base):
 
 class Round3Tests(Base):
     """Fix round 3 (W01, W02, W03, W04, W29, W39)."""
-    RES = SimpleNamespace(rows={}, history=[], events=[], seen=[])
+    RES = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[])
 
     def test_fixed_switch_clears_its_disabled_error_at_start(self):  # W01
         env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST
@@ -447,10 +447,10 @@ class BaselineWaitTests(Base):
         res = self.poll(col, sent)
         self.assertTrue(res["first_run"])
         self.assertEqual(db.get_meta("first_run_done", ""), "1")
-        self.client.rows = [arp(MAC, "10.0.0.5"), arp("02:00:00:00:00:09", "10.0.0.9")]
+        self.client.rows = [arp(MAC, "10.0.0.5"), arp("00:00:5e:00:53:09", "10.0.0.9")]
         self.poll(col, sent)
-        self.assertEqual(sent, [["02:00:00:00:00:09"]])
-        self.assertEqual(self.baselines(db), {MAC: 1, "02:00:00:00:00:09": 0})
+        self.assertEqual(sent, [["00:00:5e:00:53:09"]])
+        self.assertEqual(self.baselines(db), {MAC: 1, "00:00:5e:00:53:09": 0})
 
     def test_permanently_failing_producer_blocks_and_warns_once(self):
         col, db = self.collector(self.ENV)
@@ -476,10 +476,10 @@ class BaselineWaitTests(Base):
         # a new process whose fx fails at its first poll: the stored baseline stands, fw1's newcomer is mailed
         col2 = Collector(col.cfg, db, self.client)
         col2._connectors["fx"].on_collect = self.down
-        self.client.rows = [arp(MAC, "10.0.0.5"), arp("02:00:00:00:00:09", "10.0.0.9")]
+        self.client.rows = [arp(MAC, "10.0.0.5"), arp("00:00:5e:00:53:09", "10.0.0.9")]
         self.poll(col2, sent)
-        self.assertEqual(sent, [["02:00:00:00:00:09"]])
-        self.assertEqual(self.baselines(db)["02:00:00:00:00:09"], 0)
+        self.assertEqual(sent, [["00:00:5e:00:53:09"]])
+        self.assertEqual(self.baselines(db)["00:00:5e:00:53:09"], 0)
 
     # B-08.4: while the baseline waits for fx, its failed check() is retried at the next poll, not backed off
     def test_failed_check_is_retried_every_poll_while_the_baseline_waits(self):

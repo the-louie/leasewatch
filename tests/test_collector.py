@@ -336,7 +336,7 @@ class ReviewFixTests(unittest.TestCase):
         os.environ.update({"MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example", "MAIL_TO": "a@example.lan"})
         c = FakeClient([S("02:00:00:00:00:09", "10.0.0.9")]); col = Collector(Config(), self.db, c); col.run_once()
         col._unmailed = [{"mac": f"02:00:00:00:01:{i:02x}"} for i in range(60)]
-        c.sightings_data.append(S("02:00:00:00:00:01", "10.0.0.5"))
+        c.sightings_data.append(S("00:00:5e:00:53:01", "10.0.0.5"))  # a hardware MAC: a private one is never mailed
         orig = notify.new_devices
         notify.new_devices = lambda cfg, devs: (_ for _ in ()).throw(RuntimeError("mailgun down"))
         try:

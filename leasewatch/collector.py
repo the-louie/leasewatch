@@ -22,7 +22,7 @@ from .db import Database
 from .connectors import (Batch, ConnectorError, HostContext, InstanceSpec, build_instance, instance_problems,
                          instances_context, registry)
 from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure, MergeResult, MergeState,
-                               normalise_batch, to_fw1, merge as merge_batches)
+                               is_private_mac, normalise_batch, to_fw1, merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
 from .fw1 import Fw1Client
 from . import notify
@@ -146,6 +146,9 @@ class Collector:
         out = dict(hosts)
         for r in self.db.q("SELECT mac, name, hostname FROM devices"):
             out[r["mac"]] = r["name"] or hosts.get(r["mac"]) or r["hostname"]
+        # a merged private MAC goes by its device's name: the switch names an uplink after it
+        for r in self.db.q("SELECT a.mac, a.device FROM aliases a JOIN devices d ON d.mac = a.device"):
+            out[r["mac"]] = out.get(r["device"]) or hosts.get(r["mac"], "")
         return out
 
     def _work(self, run: _Run, gen: int, conn: object, check: bool) -> None:
@@ -322,6 +325,9 @@ class Collector:
                           tuple(row[k] for k in INSERT_COLUMNS))
         for mac, h in res.history:
             c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)", (mac, now, h["ip"], h["hostname"], h["vlan"], h["lease_type"]))
+        c.executemany("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
+                      [(alias, dev, reason, detail, now, now) for alias, dev, reason, detail in res.aliases])
+        c.executemany("UPDATE aliases SET last_seen=? WHERE mac=?", [(now, mac) for mac in res.alias_seen])
         for mac, kind, detail in res.events:
             c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, kind, detail))
         # a listing without presence keeps the last time this source vouched for the device
@@ -426,6 +432,8 @@ class Collector:
                            producers=frozenset(producers), held_back=bool(waiting))
         with self.db.tx() as c:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
+            # read with prev in one transaction, so the alias map and the rows it points to agree
+            state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
             res = merge_batches(prev, batches, self.cfg, now, state)
             self._write(c, prev, res, now)
             for k, v in enrich_status.items():
@@ -445,7 +453,10 @@ class Collector:
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
             self._runs[n].answered = True
-        self._notify([{k: res.rows[mac][k] for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")} for mac in res.new])
+        # no new-device mail for a private MAC, merged or not (owner answer Q1): it rotates, so it would mail again
+        # and again; it is still listed and marked new
+        self._notify([{k: res.rows[mac][k] for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")}
+                      for mac in res.new if not is_private_mac(mac)])
         st = res.stats
         log.info("poll ok: %d devices, %d new, %d changed, %d ms", st["devices"], st["new"], st["changed"], int((time.time() - t0) * 1000))
         return {"ok": True, "devices": st["devices"], "new": st["new"], "changed": st["changed"], "first_run": first_run}

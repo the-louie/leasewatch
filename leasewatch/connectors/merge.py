@@ -33,6 +33,10 @@ one time, so it would flap. Wi-Fi from a controller still beats any switch port.
 attachment placed the device. A wired device whose loc_source switch failed this poll keeps its port (no event),
 whatever the other switches offer, as a Wi-Fi device is "blind" while its controller is down.
 
+Private MACs (decide_aliases): before all of the above, each MAC gets its device key: a known alias (MergeState.aliases)
+its device, a new private MAC the one device it matches (README Semantics), else itself. Every record is rewritten to
+that key, so the rules above run on devices, not MACs; new aliases come back in MergeResult.aliases.
+
 Per-source freshness (MergeResult.seen): one (mac, instance, now, now if present else None) per instance that listed
 a known MAC this poll, in a sighting or an attachment; present when a sighting has presence or an attachment has
 present (a controller's active client).
@@ -58,6 +62,101 @@ LINKS = ("wired", "wifi")
 # module globals, written by the merge: each warning below is logged once per process, not at every poll
 _mac_warned: set[str] = set()                # instance names that sent a malformed record (invalid MAC, wrong type)
 _link_warned: set[tuple[str, str]] = set()   # (instance name, link value) outside LINKS
+
+
+# a hostname merge needs a target seen within this many days (the private-MAC rotations found are 14 days or less)
+MERGE_RECENT_DAYS = 30
+# DHCP hostnames many devices send alike: never evidence of one particular device
+GENERIC_HOSTNAMES = frozenset(
+    "iphone ipad ipod mac macbook macbook-air macbook-pro imac apple-watch watch android localhost unknown none host "
+    "client device phone tablet laptop desktop pc galaxy pixel chromecast espressif esp32 esp8266 linux raspberrypi "
+    "ubuntu debian dhcp".split())
+_GENERIC_RE = re.compile(r"(android|galaxy|iphone|ipad|esp|wlan|eth)[-_ ]?[0-9a-f]*|[0-9a-f:_-]+")
+
+
+def is_private_mac(mac: str) -> bool:
+    """A locally administered unicast MAC (first octet: bit 0x02 set, bit 0x01 clear), e.g. a private Wi-Fi address."""
+    try:
+        b = int(mac[:2], 16)
+    except (TypeError, ValueError):
+        return False
+    return b & 0x03 == 0x02
+
+
+def norm_hostname(v: str) -> str:
+    """A hostname as the merge compares it: lower case, the trailing dot and the domain dropped, trimmed."""
+    return v.lower().rstrip(".").split(".", 1)[0].strip()
+
+
+def _merge_host(v: str) -> str:
+    """The normalised DHCP hostname if it may identify a device (3+ characters, not generic), else ""."""
+    h = norm_hostname(v)
+    return "" if len(h) < 3 or h in GENERIC_HOSTNAMES or _GENERIC_RE.fullmatch(h) else h
+
+
+def decide_aliases(raw: dict[str, Merged], present: set[str], prev: dict[str, dict], aliases: dict[str, str],
+                   first_run: bool, now: int) -> tuple[dict[str, str], list[tuple[str, str, str, str]]]:
+    """(raw MAC -> device key, new (alias, device, reason, detail)) for this poll's sighting MACs. A known alias maps to
+    its device, a MAC with a row to itself; a new private MAC to the one device it matches (design S4 §2.2), else to
+    itself. present: raw MACs with a sighting or attachment that asserts presence this poll. A hostname merge needs
+    the device off the wire this poll (else the new MAC is a second interface); a client-id merge does not, since two
+    devices cannot share a client-id and the old MAC often lingers in the firewall's ARP table after a rotation."""
+    keys: dict[str, str] = {}
+    fresh: list[str] = []
+    for mac in raw:
+        if mac in aliases:
+            keys[mac] = aliases[mac]
+        else:
+            keys[mac] = mac
+            if mac not in prev:
+                fresh.append(mac)
+    if first_run:  # the baseline (and its wait) never merges
+        return keys, []
+    # devices on the wire this poll, under their own MAC or an alias: a second MAC with the same hostname is then a
+    # second interface (a client-id match is the same device even while the old MAC still shows)
+    busy = {keys.get(m, aliases.get(m, m)) for m in present}
+    cids, hosts = {}, {}  # signal value -> how many new MACs carry it (two new MACs with one value do not merge)
+    for mac in fresh:
+        for counts, v in ((cids, raw[mac].client_id), (hosts, _merge_host(raw[mac].lease_hostname))):
+            if v:
+                counts[v] = counts.get(v, 0) + 1
+    picks: dict[str, tuple[str, str, str]] = {}  # new MAC -> (device, reason, detail)
+    for mac in fresh:
+        if not is_private_mac(mac):
+            continue
+        m = raw[mac]
+        cid, host = m.client_id, _merge_host(m.lease_hostname)
+        # the first signal with exactly one candidate decides; archived devices count as candidates
+        by_cid = [d for d, r in prev.items() if cid and r.get("client_id") == cid]
+        by_host = [d for d, r in prev.items() if host and norm_hostname(r.get("hostname") or "") == host]
+        if len(by_cid) == 1:
+            dev, reason, value, counts = by_cid[0], "client-id", cid, cids
+        elif len(by_host) == 1:
+            dev, reason, value, counts = by_host[0], "hostname", host, hosts
+            r = prev[dev]
+            if (r.get("last_online") or r.get("last_seen") or 0) < now - MERGE_RECENT_DAYS * 86400:
+                continue
+        else:
+            continue
+        if counts[value] == 1 and (reason == "client-id" or dev not in busy):
+            picks[mac] = (dev, reason, value)
+    # two new MACs that pick one device in one poll are two interfaces, as above: neither merges
+    taken: dict[str, int] = {}
+    for dev, _, _ in picks.values():
+        taken[dev] = taken.get(dev, 0) + 1
+    out = []
+    for mac, (dev, reason, value) in picks.items():
+        if taken[dev] == 1:
+            keys[mac] = dev
+            out.append((mac, dev, reason, value))
+    return keys, out
+
+
+def _rekey(b: Batch, keys: dict[str, str]) -> Batch:
+    """The batch with every record's MAC replaced by its device key (records of other MACs unchanged)."""
+    return Batch(sightings=[replace(s, mac=keys[s.mac]) if keys.get(s.mac, s.mac) != s.mac else s for s in b.sightings],
+                 attachments=[replace(a, mac=keys[a.mac]) if keys.get(a.mac, a.mac) != a.mac else a
+                              for a in b.attachments], stats=b.stats)
 
 
 def _rank(order: tuple[str, ...], kind: str) -> int:
@@ -86,6 +185,7 @@ class Merged:
     sources: set = field(default_factory=set)
     online: bool = False
     client_id: str = ""  # from the chosen lease only
+    lease_hostname: str = ""  # the chosen lease's own hostname (option 12), not a fallback from another kind
 
 
 @dataclass(frozen=True)
@@ -109,6 +209,7 @@ class MergeState:
     controllers: frozenset[str] = frozenset()
     producers: frozenset[str] | None = None
     held_back: bool = False  # first_run, and the baseline is not taken this poll (a producer has not answered yet)
+    aliases: dict[str, str] = field(default_factory=dict)  # alias MAC -> device key (devices.mac), from the aliases table
 
 
 @dataclass
@@ -122,6 +223,8 @@ class MergeResult:
     # one of its sightings asserted presence or one of its attachments is present (the writer keeps the stored
     # last_present on None)
     seen: list[tuple[str, str, int, int | None]] = field(default_factory=list)
+    aliases: list[tuple[str, str, str, str]] = field(default_factory=list)  # new (alias, device, reason, detail)
+    alias_seen: list[str] = field(default_factory=list)       # alias MACs (known or new) listed this poll
 
 
 def to_fw1(s: Sighting) -> Fw1Sighting:
@@ -159,6 +262,7 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
                    sources={s.source for s in ss}, online=any(s.online for s in ss))
         if lease:
             m.hostname, m.lease_type, m.client_id = lease.hostname, lease.lease_type, lease.client_id
+            m.lease_hostname = lease.hostname
         named = sorted(ss, key=lambda s: (_rank(NAME_KINDS, s.source), s.source) + pick(s))
         m.hostname = m.hostname or next((s.hostname for s in named if s.hostname), "")
         vendors = sorted(ss, key=lambda s: (_rank(VENDOR_KINDS, s.source), s.source) + pick(s))
@@ -301,10 +405,23 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
           state: MergeState) -> MergeResult:
     """prev: every device row (mac -> column dict). batches: this poll's result per connector instance."""
     ok = {n: normalise_batch(n, b) for n, b in batches.items() if isinstance(b, Batch)}
+    # S4 private MACs: decide each raw MAC's device key, then rewrite every record to it, so an alias's history,
+    # events, seen rows and port land on its device and the ranking below chooses between both MACs' records
+    raw = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
+    present = {s.mac for b in ok.values() for s in b.sightings if s.presence}
+    present |= {a.mac for b in ok.values() for a in b.attachments if a.present is True}
+    keys, new_aliases = decide_aliases(raw, present, prev, state.aliases, state.first_run, now)
+    for b in ok.values():  # an attachment-only MAC (a switch FDB) follows a known alias too
+        for a in b.attachments:
+            keys.setdefault(a.mac, state.aliases.get(a.mac, a.mac))
+    ok = {n: _rekey(b, keys) for n, b in ok.items()}
     merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
-    res = MergeResult()
+    res = MergeResult(aliases=new_aliases, alias_seen=sorted(m for m, k in keys.items() if k != m))
+    # a merge is no new device: no `new` event and no mail, only this event on the device (owner answer Q2)
+    res.events += [(dev, "merged", f"{alias} (client-id)" if reason == "client-id" else f"{alias} (hostname {value})")
+                   for alias, dev, reason, value in new_aliases]
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}
     changes = 0
