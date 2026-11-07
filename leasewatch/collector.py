@@ -31,7 +31,6 @@ log = logging.getLogger("leasewatch.collector")
 HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
-MAIL_MAX_AGE = 86400  # a queued device not mailed within this many seconds is dropped with a warning
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
 
@@ -124,6 +123,7 @@ class Collector:
             log.info("removed %d seen rows and %d location sources of instances that are no longer configured",
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
+        self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
 
@@ -376,14 +376,12 @@ class Collector:
         dies in between), the same devices are mailed again at the next poll."""
         if not self.cfg.mail_enabled:
             return
-        now = int(time.time())
         try:
             with self.db.tx() as c:
-                # acked or archived devices leave the queue; entries older than MAIL_MAX_AGE are dropped unmailed
+                # acked or archived devices leave the queue. No age limit (owner decision S4R01): mail_queued is wall
+                # clock, so a clock step would drop devices that were never mailed
                 c.execute("UPDATE devices SET mail_queued=NULL WHERE mail_queued IS NOT NULL "
                           "AND (acked=1 OR archived_ts IS NOT NULL)")
-                dropped = c.execute("UPDATE devices SET mail_queued=NULL WHERE mail_queued<?",
-                                    (now - MAIL_MAX_AGE,)).rowcount
                 # current rows: a device that changed IP or hostname since it was queued is mailed as it is now
                 rows = [dict(r) for r in c.execute(
                     "SELECT mac, ip, hostname, vendor, vlan, lease_type FROM devices WHERE mail_queued IS NOT NULL "
@@ -391,8 +389,6 @@ class Collector:
         except sqlite3.Error as e:  # the queue stays in the database: retried at the next poll
             log.warning("cannot read the mail queue: %s", e)
             return
-        if dropped:
-            log.warning("%d device(s) dropped without a mail after 24 h", dropped)
         if not rows:
             return
         try:
@@ -450,11 +446,15 @@ class Collector:
         state = MergeState(self._no_lease_since, first_run, prev_ok,
                            frozenset(n for n, conn in self._connectors.items()
                                      if "controller" in getattr(conn.describe(), "roles", frozenset())),
-                           producers=frozenset(producers), held_back=bool(waiting))
+                           producers=frozenset(producers), held_back=bool(waiting),
+                           undecided_since=self._undecided_since)
         with self.db.tx() as c:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             # read with prev in one transaction, so the alias map and the rows it points to agree
             state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
+            if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS (S4R07); only read when it runs
+                state.restored = {r["mac"]: r["ts"] for r in c.execute(
+                    "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
             res = merge_batches(prev, batches, self.cfg, now, state)
             self._write(c, prev, res, now)
             for k, v in enrich_status.items():

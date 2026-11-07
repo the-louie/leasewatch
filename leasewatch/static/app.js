@@ -208,9 +208,10 @@
   function renderTable() {
     const list = filtered();
     const tb = $("#rows");
-    // rebuilding the rows drops keyboard focus: note the focused row (or its button) to focus its replacement
+    // rebuilding the rows drops keyboard focus: note the focused row (or its button or copy target) to focus its replacement
     const fa = tb.contains(document.activeElement) ? document.activeElement : null;
     const fmac = fa?.closest("tr")?.dataset.mac, fack = !!fa?.classList.contains("ack");
+    const fcp = fmac ? [".c-ip .cp", ".c-mac .cp"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
     tb.innerHTML = "";
     const tpl = $("#rowTpl").content;
     const frag = document.createDocumentFragment();
@@ -253,8 +254,10 @@
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
-    if (fmac) { const tr = $$("#rows tr").find(t => t.dataset.mac === fmac); ((fack && tr && $(".ack", tr)) || tr)?.focus({ preventScroll: true }); } // the reader may have scrolled away from it
-    $("#count").textContent = `${list.length} of ${state.devices.length}`;
+    if (fmac) { const tr = $$("#rows tr").find(t => t.dataset.mac === fmac); ((fack && tr && $(".ack", tr)) || (fcp && tr && $(fcp, tr)) || tr)?.focus({ preventScroll: true }); } // the reader may have scrolled away from it
+    // the total is the devices this filter could show: archived ones only under "Archived", as the cards leave them out
+    const total = state.devices.filter(d => (d.archived_ts != null) === (state.status === "archived")).length;
+    $("#count").textContent = `${list.length} of ${total}`;
     $("#empty").classList.toggle("hidden", list.length > 0);
     $("#emptyText").textContent = state.q || state.vlan !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
     $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.status !== "all"));
@@ -264,14 +267,16 @@
   // its column widths
   function copyable(el, text) {
     el.textContent = text;
-    const done = () => { el.classList.add("copied"); el.title = "Copied"; setTimeout(() => { el.classList.remove("copied"); el.title = "Click to copy"; }, 900); };
+    let t = 0; // a second copy restarts the "Copied" time: an earlier copy's timer would end it early
+    const done = () => { clearTimeout(t); el.classList.add("copied"); el.title = "Copied"; t = setTimeout(() => { el.classList.remove("copied"); el.title = "Click to copy"; }, 900); };
     // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
     // select the text so Ctrl+C copies it, and try the old copy command
     const fallback = () => {
       const sel = getSelection(), r = document.createRange(); r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
       let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
       if (ok) done();
-      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = () => { el.title = "Click to copy"; el.onmouseleave = null; }; } // the hint is for this click
+      // the hint is for this click or key: it goes when the pointer or the keyboard focus leaves
+      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = el.onblur = () => { el.title = "Click to copy"; el.onmouseleave = el.onblur = null; }; }
     };
     const copy = ev => { ev.stopPropagation(); /* not the row's drawer */ if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fallback); else fallback(); };
     el.onclick = copy;
@@ -432,10 +437,11 @@
     ack.textContent = d.acked ? "Mark unknown" : d.baseline ? "Save & mark checked" : "Save & mark known";
     save.onclick = () => setFields(d.mac, { name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
     ack.onclick = () => setFields(d.mac, { acked: !d.acked, name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
-    // posts only the archive state: typed Name/Note stay an unsaved edit (the drawer stays open on the device)
+    // posts only the archive state: typed Name/Note stay an unsaved edit (the drawer stays open on the device). No form:
+    // nothing typed was saved, so no "saved" flash; the load() after the POST refreshes the drawer
     const arch = $("#fArch"), archived = d.archived_ts != null;
     arch.textContent = archived ? "Restore to list" : "Archive";
-    arch.onclick = () => setFields(d.mac, { archived: !archived }, $("#fName"));
+    arch.onclick = () => setFields(d.mac, { archived: !archived });
   }
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)

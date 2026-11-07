@@ -164,9 +164,15 @@ class Database:
     def device_detail(self, mac: str) -> dict | None:
         """The drawer's device, history, events, seen rows and merged MACs, or None for an unknown MAC."""
         with self._lock:  # one hold, as stats(): the five reads must not straddle a collector write
-            d = self.device(mac)
+            d = self.device(mac) or self.device(self._alias_owner(self._conn, mac))  # design-s4 §1: an alias MAC opens its device
             return {"device": d, "history": self.history(d["mac"]), "events": self.events(d["mac"]),
                     "seen": self.seen(d["mac"]), "aliases": self.aliases(d["mac"])} if d else None
+
+    @staticmethod
+    def _alias_owner(c: sqlite3.Connection, mac: str) -> str:
+        """The device key a merged private MAC points to, or "" if mac is no alias."""
+        r = c.execute("SELECT device FROM aliases WHERE mac=?", (mac,)).fetchone()
+        return r["device"] if r else ""
 
     def aliases(self, mac: str) -> list[dict]:
         """The private MACs merged into the device mac, newest merge first."""
@@ -189,6 +195,9 @@ class Database:
                            archived: bool | None = None) -> dict | None:
         with self.tx() as c:
             cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
+            if not cur:  # design-s4 §1: an alias MAC (copied from the drawer) updates the device it was merged into
+                mac = self._alias_owner(c, mac)
+                cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
             if not cur:
                 return None
             sets, params = [], []

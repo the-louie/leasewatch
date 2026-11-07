@@ -683,5 +683,79 @@ out.save = await Promise.race([p2, hung()]);
         self.assertEqual(out["load"], "rejected: TimeoutError")  # "hung" before the fix
         self.assertEqual(out["save"], "rejected: TimeoutError")
 
+    # S4R11/S4R12: a re-render while a MAC or IP copy target has keyboard focus keeps focus on that target
+    def test_refresh_keeps_focus_on_copy_target(self) -> None:
+        for sel in (".c-mac .cp", ".c-ip .cp"):
+            with self.subTest(sel=sel):
+                out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
+//--
+state.meta = { now: 2000000000, new_days: 7, baseline_ts: 1 };
+state.devices = [1, 2].map(i => ({ mac: `02:00:00:00:00:0${i}`, ip: `10.0.0.${i}`, vlan: "LAN", baseline: 1, acked: 0, first_seen: 1, last_seen: 1 }));
+renderTable();
+const tr = rows.list.find(t => t.dataset.mac === "02:00:00:00:00:02"); document.activeElement = tr.kids[SEL];
+renderTable();
+const nt = rows.list.find(t => t.dataset.mac === "02:00:00:00:00:02");
+out.same = document.activeElement === nt.kids[SEL]; out.tag = document.activeElement.tagName;
+""".replace("SEL", json.dumps(sel)))
+                self.assertTrue(out["same"], out["tag"])  # "TR" before the fix
+
+    # S4R13: the row count leaves archived devices out of the total, as the cards do
+    def test_count_total_leaves_archived_out(self) -> None:
+        out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
+//--
+state.meta = { now: 2000000000, new_days: 7, baseline_ts: 1 };
+state.devices = [1, 2, 3].map(i => ({ mac: `02:00:00:00:00:0${i}`, ip: `10.0.0.${i}`, vlan: "LAN", baseline: 1, acked: 0, first_seen: 1, last_seen: 1, archived_ts: i === 3 ? 123 : null }));
+renderTable(); out.all = $("#count").textContent;
+state.status = "archived"; renderTable(); out.archived = $("#count").textContent;
+""")
+        self.assertEqual(out["all"], "2 of 2")  # "2 of 3" before the fix
+        self.assertEqual(out["archived"], "1 of 1")
+
+    # S4R14: the "press Ctrl+C" hint of a keyboard copy goes when focus leaves, as a mouse leave clears it
+    def test_copy_hint_reset_after_blur(self) -> None:
+        out = _run(["renderTable", "filtered"], "const navigator = {};\n" + self.COPY + r"""
+mac.onkeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} }); out.hint = mac.title;
+mac.onblur?.(); out.after = mac.title;
+""")
+        self.assertEqual(out["hint"], "selected: press Ctrl+C to copy")
+        self.assertEqual(out["after"], "Click to copy")
+
+    # S4R16: a second copy keeps its own "Copied" time; the first copy's timer does not end it early
+    def test_second_copy_feedback_not_cut_short(self) -> None:
+        out = _run(["renderTable", "filtered"], r"""const navigator = { clipboard: { writeText: () => Promise.resolve() } };
+const timers = []; const setTimeout = f => timers.push(f); const clearTimeout = id => { if (id) timers[id - 1] = null; };
+""" + self.COPY + r"""
+mac.onclick({ stopPropagation() {} }); await null; await null;
+mac.onclick({ stopPropagation() {} }); await null; await null;
+if (timers[0]) timers[0](); // the first copy's 900 ms are up
+out.copied = mac.classList.contains("copied"); out.title = mac.title;
+""")
+        self.assertTrue(out["copied"])  # false before the fix
+        self.assertEqual(out["title"], "Copied")
+
+    # S4R15: Archive posts only the archive state, so it does not flash "saved" over a typed, unsaved Name
+    def test_archive_does_not_say_saved(self) -> None:
+        pre = self.DRAWER.replace("server.acked = server.acked ? 1 : 0;",
+                                  "server.acked = server.acked ? 1 : 0; if ('archived' in server) server.archived_ts = server.archived ? 123 : null;")
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], pre + r"""
+state.open = server.mac; await refreshDrawer(server.mac, true);
+byId.fName.value = "typed name";
+await byId.fArch.onclick();
+out.post = posts[posts.length - 1]; out.saved = byId.fSaved?.textContent ?? null; out.label = byId.fArch.textContent;
+out.name = byId.fName.value; out.server = server.name; out.edited = formEdited(server.mac);
+""")
+        self.assertEqual(out["post"], {"archived": True})
+        self.assertEqual(out["label"], "Restore to list")
+        self.assertEqual(out["saved"], "")  # "saved" before the fix
+        self.assertEqual(out["name"], "typed name")
+        self.assertEqual(out["server"], "")
+        self.assertTrue(out["edited"])
+
+    # S4R17: every event kind the server writes has a colour rule, like the older kinds
+    def test_new_event_kinds_have_a_colour(self) -> None:
+        css = _read("leasewatch", "static", "style.css")
+        for kind in ("archived", "restored", "merged"):
+            self.assertTrue(re.search(rf"\.k\.{kind}\b[^{{]*\{{[^}}]*color:", css), kind)
+
 if __name__ == "__main__":
     unittest.main()

@@ -58,6 +58,11 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - docs/connectors.md: `make_host_mask()` and the contract test's host check skip a host shorter than 3 characters; this is now stated.
 - check and collect mask a URL or HOST host anywhere in an error or problem text, including before the first ": "; only the instance's own "connector <name> (<type>): " head stays readable.
 - check and collect mask a config: line that belongs to one instance with that instance's host only; a line that belongs to no instance is masked with every instance's host.
+- Device list: a refresh while a MAC or IP has keyboard focus keeps focus on it (it moved to the row, so Enter opened the drawer instead of copying).
+- Device list: the row count leaves archived devices out of its total ("15 of 15", was "15 of 16"); under "Archived" it counts only archived devices.
+- Copy MAC and IP: the "press Ctrl+C" hint of a keyboard copy goes when focus leaves the MAC or IP, not only when the pointer leaves; a second copy within 0.9 s shows "Copied" for its full 0.9 s.
+- Device drawer: Archive and Restore to list no longer show "saved" next to Save; typed Name or Note text is not saved by them and stays an unsaved edit.
+- Events: `archived`, `restored` and `merged` have a colour, like the other kinds.
 - check and collect no longer disable an instance because of a global load problem whose path contains LW_CONNECTOR__<NAME>__.
 - check and collect no longer crash with OverflowError on a disabled instance with a huge TIMEOUT.
 - collect: an int stat with more than 4300 digits, or an int or str subclass with a raising __str__ or __format__, no longer gives a traceback; keys that turn into the same text are all kept, as "1" and "1#2".
@@ -67,6 +72,14 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Connector loader: describe() produces/roles may be a tuple or list of str, as the contract test accepts; a Setting key that is not a str makes the type broken instead of crashing Config().
 - Connector loader: a distribution name or LW_CONNECTORS_DIR entry with a newline can no longer forge a log line; two distributions without a Name are no longer merged into one.
 - Connector loader: unloading plugins no longer fails when another thread imports a module at the same time.
+- The new-device mail queue no longer drops a device after 24 h: it is kept until mailed, acknowledged or archived, so a clock step can no longer lose a mail.
+- A DHCP hostname that starts with a brand or model stem (galaxy, pixel, chromecast, iphone, ipad, android, ...) is generic and never merges a private MAC, e.g. `Galaxy-S21` or `Pixel-7`.
+- While a sighting producer has failed, no private-MAC merge is decided: a new private MAC is held back for up to 30 minutes and merges once its lease is back.
+- A device and its merged MAC on one switch: the edge port wins over a stale uplink entry whatever the walk order; a controller listing both places the device at its active client.
+- The merged DHCP client-id no longer depends on the order of otherwise equal lease rows.
+- PRUNE_DAYS no longer re-archives a device restored by hand until it has been online again.
+- Wi-Fi events: no 'joined' event for the first SSID of a client already on Wi-Fi, and no 'off Wi-Fi' or 'joined' events for a phone that walks out while the firewall's ARP still lists it; leaving to a shown cable is still an event.
+- GET and POST /api/devices/<mac> with a merged private (alias) MAC now act on the device it was merged into, instead of returning 404.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

@@ -86,6 +86,16 @@ class MergeTests(unittest.TestCase):
         res = self.run_merge([row(UA, online=1, last_online=NOW - 31 * DAY)], [S(UA, "10.0.0.5")], prune_days=30)
         self.assertIsNone(res.rows[UA]["archived_ts"])
 
+    def test_prune_spares_a_device_restored_since_it_was_last_online(self):
+        # S4R07: "Restore to list" must hold until the device has been online again and then offline PRUNE_DAYS
+        prev = [row(UA, online=0, last_online=NOW - 40 * DAY)]
+        res = self.run_merge(prev, [], prune_days=30, restored={UA: NOW - 60})
+        self.assertEqual(res.rows, {})
+        self.assertFalse([e for e in res.events if e[1] == "archived"])
+        # restored before its last time online: that restore is used up
+        res = self.run_merge(prev, [], prune_days=30, restored={UA: NOW - 41 * DAY})
+        self.assertEqual(res.rows[UA]["archived_ts"], NOW)
+
     def test_prune_off_by_default_and_never_on_the_first_run(self):
         prev = [row(UA, online=0, last_online=NOW - 400 * DAY)]
         self.assertEqual(self.run_merge(prev, []).rows, {})
@@ -199,6 +209,20 @@ class CollectorTests(Base):
         self.assertNotIn("new", kinds)
         mail.assert_not_called()
         self.assertIsNone(db.device(DEV)["mail_queued"])
+
+    def test_restore_by_hand_is_not_undone_by_prune(self):
+        # S4R07: the collector passes the restore events to the merge
+        col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1, "PRUNE_DAYS": "30"}, rows=[arp(DEV, "10.0.0.5")])
+        db.q("INSERT INTO devices(mac, first_seen, last_seen, last_online, baseline) VALUES(?,?,?,?,1)",
+             (UA, NOW - 90 * DAY, NOW - 40 * DAY, NOW - 40 * DAY))
+        col.run_once()  # baseline
+        col.run_once()  # prune archives it
+        self.assertIsNotNone(db.device(UA)["archived_ts"])
+        db.update_user_fields(UA, None, None, None, archived=False)
+        col.run_once()
+        self.assertIsNone(db.device(UA)["archived_ts"])
+        kinds = [r["kind"] for r in db.q("SELECT kind FROM events WHERE mac=? ORDER BY id", (UA,))]
+        self.assertEqual(kinds, ["archived", "restored"])
 
     def test_prune_not_on_the_first_poll(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1, "PRUNE_DAYS": "1"}, rows=[arp(DEV, "10.0.0.5")])

@@ -1,5 +1,5 @@
 """S4 T-09: the durable mail queue (devices.mail_queued). A new device is queued in the poll's write transaction, the
-queue survives a restart, a failed mail keeps it, entries older than 24 h are dropped, acked or archived devices leave
+queue survives a restart, a failed mail keeps it however old it is, acked or archived devices leave
 it, one mail holds at most 50 devices, and a private MAC is never queued. Synthetic data only: hardware MACs are from
 the documentation range 00:00:5e:00:53:xx (RFC 7042). Fake connectors; Mailgun is stubbed."""
 import os
@@ -82,17 +82,17 @@ class MailQueueTests(Base):
             col.run_once()
         self.assertEqual(self.sent, [[UA1]])
 
-    def test_entries_older_than_24h_are_dropped_with_a_warning(self):
+    def test_old_entries_stay_until_mailed(self):
+        # S4R01 (owner decision): no age limit. A device queued while the clock ran days behind (or one jumped ahead)
+        # must not be dropped unmailed once the clock is right; the queue keeps it until mailed, acked or archived
         col, db = self.baseline()
         now = int(time.time())
-        db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)", (UA1, now, now, now - 86401))
+        db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)", (UA1, now, now, now - 2 * 86400))
         db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)", (UA2, now, now, now - 3600))
-        with mock.patch.object(notify, "new_devices", self.ok), \
-                self.assertLogs("leasewatch.collector", "WARNING") as logs:
+        with mock.patch.object(notify, "new_devices", self.ok):
             col._notify()
-        self.assertEqual(self.sent, [[UA2]])
+        self.assertEqual(self.sent, [[UA1, UA2]])
         self.assertIsNone(self.queued(db, UA1))
-        self.assertTrue(any("1 device(s) dropped without a mail after 24 h" in m for m in logs.output), logs.output)
 
     def test_acked_or_archived_devices_leave_the_queue(self):
         col, db = self.baseline()

@@ -15,7 +15,8 @@ from _env import FW1_ENV, clean_env, restore  # noqa: E402
 from test_merge import NOW, S, arp, row, port  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import MERGE_RECENT_DAYS, MergeState, is_private_mac, merge  # noqa: E402
+from leasewatch.connectors.merge import (MERGE_HOLD_SECONDS, MERGE_RECENT_DAYS, ConnectorFailure, MergeState,  # noqa: E402
+                                         _merge_host, is_private_mac, merge)
 from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
 
 DEV = "02:00:00:00:10:01"     # the known device (its key)
@@ -90,6 +91,8 @@ class RuleTests(unittest.TestCase):
         cases = {
             "generic": ([row(DEV, hostname="iPhone", online=0)], [lease(NEWP, host="iphone")]),
             "generic pattern": ([row(DEV, hostname="android-1a2b3c", online=0)], [lease(NEWP, host="android-1a2b3c")]),
+            # S4R02: a default model name (brand stem + model) is shared by every device of that model
+            "model name": ([row(DEV, hostname="Galaxy-S21", online=0)], [lease(NEWP, host="Galaxy-S21.lan")]),
             "mac-derived": ([row(DEV, hostname="0a-1b-2c", online=0)], [lease(NEWP, host="0a-1b-2c")]),
             "too short": ([row(DEV, hostname="tv", online=0)], [lease(NEWP, host="tv")]),
             "not unique": ([row(DEV, hostname="alex-laptop", online=0),
@@ -106,6 +109,46 @@ class RuleTests(unittest.TestCase):
         for name, (prev, sightings) in cases.items():
             with self.subTest(name):
                 self.assertNotMerged(self.run_merge(prev, sightings), NEWP)
+
+    def test_generic_brand_prefix(self):
+        # S4R02 (owner rule): a hostname that starts with a generic brand/model stem is generic, whatever follows
+        for h in ("Galaxy-S21", "galaxy-a52", "Pixel-7", "Chromecast-Ultra", "iPhone-15", "iPad-Pro", "android-tv",
+                  "pixel7"):
+            with self.subTest(h):
+                self.assertEqual(_merge_host(h), "")
+        for h in ("alex-laptop", "alexs-iphone", "kitchen-tv"):  # the stem must be the start
+            with self.subTest(h):
+                self.assertEqual(_merge_host(h), h)
+
+    def test_no_decision_while_a_lease_producer_failed(self):
+        # S4R03: the failed DHCP instance may hold the new MAC's lease (its client-id); deciding now would give the
+        # MAC its own row for good. It waits (no row, not new) and merges once the lease is back
+        prev = {DEV: row(DEV, client_id=CID, hostname="phone-x", online=0)}
+        st = MergeState(producers=frozenset({"fw1", "dhcp"}))
+        res = merge(prev, {"fw1": Batch(sightings=[arp(NEWP, "10.0.0.7")]),
+                           "dhcp": ConnectorFailure("dhcp", "down", NOW)}, Config(), NOW, st)
+        self.assertEqual((res.aliases, res.new), ([], []))
+        self.assertNotIn(NEWP, res.rows)
+        self.assertNotIn(NEWP, {m for m, *_ in res.seen})
+        res = merge(prev, {"fw1": Batch(sightings=[arp(NEWP, "10.0.0.7")]),
+                           "dhcp": Batch(sightings=[lease(NEWP, cid=CID)])}, Config(), NOW + 60, st)
+        self.assertMerged(res, NEWP, DEV, "client-id", CID)
+        # a hardware MAC never merges, so it is not held back: it is new at once
+        res = merge(prev, {"fw1": Batch(sightings=[arp(UA_NEW, "10.0.0.8")]),
+                           "dhcp": ConnectorFailure("dhcp", "down", NOW)}, Config(), NOW, st)
+        self.assertEqual(res.new, [UA_NEW])
+
+    def test_held_back_at_most_merge_hold_seconds(self):
+        # a producer that stays down must not hide a new private MAC for ever: after MERGE_HOLD_SECONDS it gets its
+        # own row (no decision is made in a lease-blind poll)
+        prev = {DEV: row(DEV, client_id=CID, online=0)}
+        st = MergeState(producers=frozenset({"fw1", "dhcp"}))
+        batches = {"fw1": Batch(sightings=[arp(NEWP, "10.0.0.7")]), "dhcp": ConnectorFailure("dhcp", "down", NOW)}
+        self.assertNotIn(NEWP, merge(prev, batches, Config(), NOW, st).rows)
+        self.assertNotIn(NEWP, merge(prev, batches, Config(), NOW + MERGE_HOLD_SECONDS - 1, st).rows)
+        res = merge(prev, batches, Config(), NOW + MERGE_HOLD_SECONDS, st)
+        self.assertEqual((res.aliases, res.new), ([], [NEWP]))
+        self.assertEqual(st.undecided_since, {})
 
     def test_client_id_denied(self):
         cases = {

@@ -422,8 +422,26 @@ class WifiEvents(Base):
         self.assertEqual(res.events, [(A, "wifi", "HomeNet -> wired")])
 
     def test_T07f_stop_through_left_wifi_writes_an_event(self):
-        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch()}, controllers=CTRL)
+        res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(),
+                                               "sw1": Batch(attachments=[swp(A, "GE1/0/3", "sw1")])}, controllers=CTRL)
         self.assertEqual(res.events, [(A, "wifi", "HomeNet -> off Wi-Fi")])
+
+    def test_S4R09_walk_out_with_a_lingering_arp_entry_writes_no_events(self):
+        # the controller drops the phone at once, the firewall's ARP entry stays ~20 min: without a cable shown this
+        # cannot be told from a walk-out, so the stale Wi-Fi details are cleared silently, and the return is silent too
+        out = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight()]), "unifi": Batch()}, controllers=CTRL)
+        self.assertEqual(out.events, [])
+        self.assertEqual((out.rows[A]["wifi_ssid"], out.rows[A]["link"]), ("", ""))
+        back = self.merge([out.rows[A]], {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])},
+                          controllers=CTRL)
+        self.assertEqual(back.events, [])
+        self.assertEqual((back.rows[A]["wifi_ssid"], back.rows[A]["link"]), ("HomeNet", "wifi"))
+
+    def test_S4R08_first_ssid_of_a_client_already_on_wifi_writes_no_event(self):
+        res = self.merge([row(A, link="wifi", wifi_ssid="", wifi_ap="ap-hall", loc_source="unifi")],
+                         {"fw1": Batch(sightings=[sight()]), "unifi": Batch(attachments=[wifi()])}, controllers=CTRL)
+        self.assertEqual(res.events, [])
+        self.assertEqual(res.rows[A]["wifi_ssid"], "HomeNet")
 
     def test_T07g_walk_out_and_return_to_the_same_ssid_writes_no_event(self):
         res = self.merge([row(A, **self.ON)], {"fw1": Batch(sightings=[sight(mac="02:00:00:00:00:09", ip="10.0.0.9")]),
@@ -433,6 +451,42 @@ class WifiEvents(Base):
                                                                 "unifi": Batch(attachments=[wifi(ap="ap-attic")])},
                          controllers=CTRL)
         self.assertEqual(res.events, [])
+
+
+class S4Rekey(Base):
+    """S4R05/S4R06: an alias and its device in one batch, and two leases that differ only in client-id."""
+    D = "00:00:5e:00:53:01"   # the device (documentation range)
+    AL = "02:aa:00:00:00:01"  # its known private alias
+
+    def test_S4R05_alias_and_device_on_one_switch_edge_port_wins_in_either_order(self):
+        stale = swp(self.D, "GE1/0/24", "sw1", uplink=True, via="sw2")
+        edge = swp(self.AL, "GE1/0/9", "sw1")
+        for order in ([stale, edge], [edge, stale]):
+            with self.subTest([a.port for a in order]):
+                res = self.merge([row(self.D, sw_port="GE1/0/7", link="wired", loc_source="sw1")],
+                                 {"fw1": Batch(sightings=[sight(self.AL)]), "sw1": Batch(attachments=list(order))},
+                                 aliases={self.AL: self.D})
+                self.assertEqual(res.rows[self.D]["sw_port"], "GE1/0/9")
+                self.assertEqual(res.events, [(self.D, "port", "GE1/0/7 -> GE1/0/9")])
+
+    def test_S4R05_controller_lists_alias_and_device_the_active_client_wins(self):
+        idle = wifi(self.D, ssid="OldNet", present=False)
+        active = wifi(self.AL, ssid="HomeNet", present=True)
+        for order in ([idle, active], [active, idle]):
+            with self.subTest([a.ssid for a in order]):
+                res = self.merge([row(self.D, link="wifi", wifi_ssid="HomeNet", loc_source="unifi")],
+                                 {"fw1": Batch(sightings=[sight(self.AL)]), "unifi": Batch(attachments=list(order))},
+                                 controllers=CTRL, aliases={self.AL: self.D})
+                self.assertEqual(res.rows[self.D]["wifi_ssid"], "HomeNet")
+                self.assertEqual(res.events, [])
+
+    def test_S4R06_client_id_does_not_depend_on_row_order(self):
+        mk = lambda c: Fw1Sighting(mac=A, ip="10.0.0.5", hostname="h", vendor="", vlan="lan", iface="igb0", source="dhcp",
+                                   lease_type="dynamic", online=False, client_id=c)
+        with_cid, without, other = mk("01aabbccddee01"), mk(""), mk("01ff")
+        self.assertEqual(merge_sightings([with_cid, without])[A].client_id, "01aabbccddee01")
+        self.assertEqual(merge_sightings([without, with_cid])[A].client_id, "01aabbccddee01")
+        self.assertEqual(merge_sightings([with_cid, other])[A].client_id, merge_sightings([other, with_cid])[A].client_id)
 
 
 if __name__ == "__main__":
