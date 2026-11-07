@@ -28,6 +28,7 @@ from .fw1 import Fw1Client
 from . import notify
 
 log = logging.getLogger("leasewatch.collector")
+CLOSE_SECONDS = 10  # all connectors together, well inside the 30 s the container gets to stop
 HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
@@ -53,6 +54,34 @@ def error_text(exc: BaseException, redact: Callable[[str], str]) -> str:
     characters; a bare one has none: its type name); any other exception is shown as its type name, its text goes to
     the redacted log line only."""
     return redact(str(exc) or type(exc).__name__)[:200] if isinstance(exc, ConnectorError) else type(exc).__name__
+
+
+def close_connector(conn: object, name: str, timeout: float, log: logging.Logger | None = None) -> bool:
+    """conn.close(), in a daemon thread joined for `timeout` seconds: a check() or collect() abandoned at its
+    deadline may still run and hold what close() waits for, and the caller must still end. `name` is the
+    instance's, given by the caller: conn.name is the connector's own attribute and may raise. Errors are logged by
+    exception type, never with their text. True when close() returned in time."""
+    log = log or logging.getLogger("leasewatch")
+
+    def work() -> None:
+        try:
+            conn.close()
+        except Exception as e:  # a failing close() is named in the log, never its text
+            log.warning("connector %s: close() failed (%s)", name, type(e).__name__)
+
+    t = threading.Thread(target=work, name=f"close-{name}", daemon=True)
+    try:
+        t.start()
+    except RuntimeError:  # out of threads: closing inline is the only way left
+        work()
+        return True
+    # a disabled instance may have TIMEOUT out of range (14 digits): join() would raise OverflowError, so the
+    # setting's own maximum caps it
+    t.join(max(0.0, min(timeout, 3600)))
+    if t.is_alive():
+        log.warning("connector %s: close() did not return within %d s", name, timeout)
+        return False
+    return True
 
 
 @dataclass
@@ -92,6 +121,7 @@ class Collector:
         # before the instances are built: a connector may call device_names() in __init__
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._connectors: dict = {}
+        self._closed = False
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
             self._add(spec, client if spec.name == "fw1" else None)
@@ -126,6 +156,23 @@ class Collector:
         self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
+
+    def close(self) -> None:
+        """Close every built connector (a UniFi session logs out), each for at most its instance's TIMEOUT and all
+        for at most CLOSE_SECONDS. A close() still running is left in its daemon thread. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        deadline = time.monotonic() + CLOSE_SECONDS
+        late: list[str] = []
+        for name, conn in self._connectors.items():
+            wait = min(self._runs[name].timeout, max(0.0, deadline - time.monotonic()))
+            if not close_connector(conn, name, wait):
+                late.append(name)
+        if late:
+            log.warning("connectors still closing at shutdown: %s", ", ".join(late))
+        else:
+            log.info("connectors closed")
 
     def _add(self, spec: InstanceSpec, client: object | None) -> None:
         """Build one instance; run validate() and disable the instance on problems."""

@@ -1,0 +1,131 @@
+"""Collector.close(): every connector closed once at shutdown, bounded by the instance TIMEOUT and a total cap."""
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from test_instances import FW1, Base  # noqa: E402
+from test_s5_auth import FW1_ENV, clean_env, restore  # noqa: E402
+from test_s5_unifi import USER, PASSWORD, Controller  # noqa: E402
+from leasewatch import __main__ as cli  # noqa: E402
+from leasewatch import collector as collector_mod  # noqa: E402
+
+TWO = {"LW_CONNECTORS": "fw1,second", **FW1, "LW_CONNECTOR__SECOND__TYPE": "opnsense",
+       "LW_CONNECTOR__SECOND__URL": "https://fw2.example.lan", "LW_CONNECTOR__SECOND__KEY": "k2",
+       "LW_CONNECTOR__SECOND__SECRET": "s2"}
+
+
+class Closer:
+    def __init__(self, block: float = 0.0):
+        self.calls = 0
+        self.block = block
+        self.release = threading.Event()
+
+    def close(self) -> None:
+        self.calls += 1
+        if self.block:
+            self.release.wait(self.block)
+
+
+class CloseTests(Base):
+    def test_closes_each_instance_once_and_twice_is_harmless(self):
+        col, _ = self.collector(TWO)
+        a, b = Closer(), Closer()
+        col._connectors = {"fw1": a, "second": b}
+        with self.assertLogs("leasewatch.collector", "INFO") as cm:
+            col.close()
+            col.close()
+        self.assertEqual((a.calls, b.calls), (1, 1))
+        self.assertEqual([r for r in cm.output if "connectors closed" in r].__len__(), 1, cm.output)
+
+    def test_no_connector_built(self):
+        col, _ = self.collector(TWO)
+        col._connectors = {}
+        col.close()
+        col.close()
+
+    def test_blocking_close_is_capped_by_the_instance_timeout(self):
+        col, _ = self.collector(TWO)
+        slow, fast = Closer(block=5), Closer()
+        self.addCleanup(slow.release.set)
+        col._connectors = {"fw1": slow, "second": fast}
+        col._runs["fw1"].timeout = 0.2
+        t0 = time.monotonic()
+        with self.assertLogs("leasewatch", "WARNING") as cm:
+            col.close()
+        self.assertLess(time.monotonic() - t0, 2)
+        self.assertEqual(fast.calls, 1)
+        text = "\n".join(cm.output)
+        self.assertIn("connectors still closing at shutdown: fw1", text)
+        self.assertNotIn("second", text)
+
+    def test_total_cap(self):
+        col, _ = self.collector(TWO)
+        a, b = Closer(block=5), Closer(block=5)
+        self.addCleanup(a.release.set)
+        self.addCleanup(b.release.set)
+        col._connectors = {"fw1": a, "second": b}
+        for r in col._runs.values():
+            r.timeout = 30
+        t0 = time.monotonic()
+        with mock.patch.object(collector_mod, "CLOSE_SECONDS", 0.3), self.assertLogs("leasewatch", "WARNING") as cm:
+            col.close()
+        self.assertLess(time.monotonic() - t0, 2)
+        self.assertEqual((a.calls, b.calls), (1, 1))  # the second is still asked to close
+        self.assertIn("fw1, second", "\n".join(cm.output))
+
+
+class UnifiCollectorClose(Base):
+    def test_collector_close_logs_out_of_the_controller(self):
+        ctl = Controller("os")
+        self.addCleanup(ctl.close)
+        env = {"LW_CONNECTORS": "unifi", "LW_CONNECTOR__UNIFI__TYPE": "unifi", "LW_CONNECTOR__UNIFI__URL": ctl.url,
+               "LW_CONNECTOR__UNIFI__USER": USER, "LW_CONNECTOR__UNIFI__PASSWORD": PASSWORD,
+               "LW_CONNECTOR__UNIFI__VERIFY_TLS": "0"}
+        col, _ = self.collector(env)
+        conn = col._connectors["unifi"]
+        conn.check()
+        conn.collect()
+        self.assertEqual(ctl.count("POST", "/api/auth/login"), 1)
+        self.assertEqual(ctl.count("POST", "/api/auth/logout"), 0)
+        col.close()
+        self.assertEqual(ctl.count("POST", "/api/auth/logout"), 1)
+
+
+class MainOrder(unittest.TestCase):
+    def test_main_closes_connectors_after_the_poller_join(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = clean_env({**FW1_ENV, "DATA_DIR": tmp.name})
+        self.addCleanup(restore, saved)
+        order: list[str] = []
+        srv = mock.Mock()
+        srv.RequestHandlerClass.verifier.flush.side_effect = lambda: order.append("flush")
+        col = mock.Mock()
+        col.close.side_effect = lambda: order.append("close")
+        thread = mock.Mock()
+        thread.join.side_effect = lambda *_: order.append("join")
+        real = cli.Database
+
+        def database(path: str) -> object:
+            db = real(path)
+            self.addCleanup(db._conn.close)
+            return db
+        with mock.patch.object(cli, "Database", database), mock.patch.object(cli, "serve", return_value=srv), \
+                mock.patch.object(cli, "Collector", return_value=col), \
+                mock.patch.object(cli.threading, "Thread", return_value=thread), \
+                mock.patch.object(cli.signal, "signal"), mock.patch.object(cli, "startup_line", return_value=""), \
+                mock.patch.object(cli, "types_line", return_value=""), self.assertLogs("leasewatch", "INFO"):
+            self.assertEqual(cli.main([]), 0)
+        self.assertEqual(order, ["flush", "join", "close"])
+
+
+if __name__ == "__main__":
+    unittest.main()

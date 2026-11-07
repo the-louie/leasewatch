@@ -32,12 +32,10 @@ class IndexTests(unittest.TestCase):
 
     def test_restored_query_uses_partial_index(self):
         p = self.plan(self.open(), RESTORED_SQL)
-        print(p)
         self.assertIn("events_restored", p)
 
     def test_aliases_query_uses_index(self):
         p = self.plan(self.open(), ALIASES_SQL, ("02:00:00:00:00:01",))
-        print(p)
         self.assertIn("aliases_device", p)
 
     def test_reopen_current_schema_has_indexes(self):

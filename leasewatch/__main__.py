@@ -22,7 +22,7 @@ import time
 from typing import Callable
 
 from . import __version__
-from .collector import Collector, error_text, setup_instance
+from .collector import Collector, close_connector, error_text, setup_instance
 from .config import ENV_PREFIX, Config, removed_problems
 from .db import Database
 from .web import serve
@@ -328,31 +328,6 @@ def _probe_error(phase: str, out: object, timed_out: bool, timeout: int, redact:
     return ""
 
 
-def _close(conn: object, name: str, timeout: int) -> None:
-    """conn.close(), in a daemon thread joined for `timeout` seconds: the check() or collect() abandoned at its
-    deadline may still run and hold what close() waits for, and the command must still end. `name` is the
-    instance's, given by the caller: conn.name is the connector's own attribute and may raise."""
-    log = logging.getLogger("leasewatch")
-
-    def work() -> None:
-        try:
-            conn.close()
-        except Exception as e:  # the report is made; a failing close() is named on stderr, never its text
-            log.warning("connector %s: close() failed (%s)", name, type(e).__name__)
-
-    t = threading.Thread(target=work, name=f"close-{name}", daemon=True)
-    try:
-        t.start()
-    except RuntimeError:  # out of threads: closing inline is the only way left
-        work()
-        return
-    # a disabled instance may have TIMEOUT out of range (14 digits): join() would raise OverflowError, so the
-    # setting's own maximum caps it
-    t.join(min(timeout, 3600))
-    if t.is_alive():
-        log.warning("connector %s: close() did not return within %d s", name, timeout)
-
-
 def check_cmd(argv: list[str]) -> int:
     import argparse
     from .connectors import broken_types, instances_context
@@ -396,12 +371,12 @@ def check_cmd(argv: list[str]) -> int:
         if own or conn is None:
             _out(head + "disabled: " + "; ".join(mask(p) for p in own))
             if conn is not None:
-                _close(conn, name, spec.timeout)
+                close_connector(conn, name, spec.timeout)
             continue
         try:
             phase, out, ms, timed_out = _probe(conn, ("check",), spec.timeout)
         finally:
-            _close(conn, name, spec.timeout)
+            close_connector(conn, name, spec.timeout)
         error = _probe_error(phase, out, timed_out, spec.timeout, mask)
         failed = failed or bool(error)
         _out(head + (f"check failed: {error}" if error else f"ok ({ms} ms)"))
@@ -494,12 +469,12 @@ def collect_cmd(argv: list[str]) -> int:
                                                        for p in dict.fromkeys(problems))
             rc = 2
             if conn is not None:
-                _close(conn, name, spec.timeout)
+                close_connector(conn, name, spec.timeout)
         else:
             try:
                 phase, out, ms, timed_out = _probe(conn, ("check", "collect"), spec.timeout)
             finally:
-                _close(conn, name, spec.timeout)
+                close_connector(conn, name, spec.timeout)
             error = _probe_error(phase, out, timed_out, spec.timeout, mask)
             report.update(phase=phase, ms=ms, error=error, ok=not error)
             rc = 1 if error else 0
@@ -663,6 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     if verifier is not None:  # failed logins still held back for the next log line
         verifier.flush()
     t.join(10)  # let a poll in flight commit before the interpreter goes away
+    collector.close()  # last: a connector may be logging out of its device, which the poll in flight could still use
     return 0
 
 

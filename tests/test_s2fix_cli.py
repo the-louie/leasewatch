@@ -180,7 +180,7 @@ class TestOwnRedact(unittest.TestCase):
 
 
 class TestClose(unittest.TestCase):
-    """S2R08, S2R48: close() is bounded and never raises out of _close."""
+    """S2R08, S2R48: close() is bounded and never raises out of close_connector."""
 
     def test_hanging_close_is_abandoned(self):
         release = threading.Event()
@@ -191,7 +191,7 @@ class TestClose(unittest.TestCase):
                 release.wait(10)
         t0 = time.monotonic()
         with self.assertLogs("leasewatch", "WARNING"):
-            m._close(C(), "dhcp1", 1)
+            m.close_connector(C(), "dhcp1", 1)
         self.assertLess(time.monotonic() - t0, 5)
 
     def test_out_of_range_timeout(self):
@@ -199,7 +199,7 @@ class TestClose(unittest.TestCase):
         class C:
             def close(self) -> None:
                 pass
-        m._close(C(), "dhcp1", 99999999999999)
+        m.close_connector(C(), "dhcp1", 99999999999999)
 
     def test_raising_name_and_close(self):
         class C:
@@ -210,7 +210,7 @@ class TestClose(unittest.TestCase):
             def close(self) -> None:
                 raise ValueError("close")
         with self.assertLogs("leasewatch", "WARNING") as cm:
-            m._close(C(), "dhcp1", 1)
+            m.close_connector(C(), "dhcp1", 1)
         self.assertIn("connector dhcp1: close() failed (ValueError)", cm.output[0])
 
 
