@@ -493,7 +493,7 @@
     } catch (err) { showBanner(`Cannot load more events: ${err.message}`); }
     finally { btn.disabled = false; }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
@@ -545,11 +545,13 @@
   // the private MACs merged into the device, and why (an older server sends no aliases list: no section)
   function aliasesHtml(aliases) {
     if (!aliases || !aliases.length) return "";
+    // the server refuses this client's changes: no Split buttons, no column for them
+    const canWrite = state.meta?.can_write !== false;
     const why = a => a.reason === "client-id" ? `client-id ${a.detail}` : a.reason === "hostname" ? `hostname ${a.detail}` : `${a.reason} ${a.detail}`;
     return `<h3>Merged addresses</h3>
-      <p class="muted note">The device used these private addresses too. Each one was merged into it because it sent the same DHCP client-id or hostname as this device.</p>
-      <table class="aliases"><thead><tr><th scope="col">MAC</th><th scope="col">Matched by</th><th scope="col">Merged</th><th scope="col">Last seen</th></tr></thead>
-      <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td></tr>`).join("")}</tbody></table>`;
+      <p class="muted note">The device used these private addresses too. Each one was merged into it because it sent the same DHCP client-id or hostname as this device. Split one if it is not this device.</p>
+      <table class="aliases"><thead><tr><th scope="col">MAC</th><th scope="col">Matched by</th><th scope="col">Merged</th><th scope="col">Last seen</th>${canWrite ? '<th scope="col">Action</th>' : ""}</tr></thead>
+      <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td>${canWrite ? `<td><button class="btn small" data-split="${esc(a.mac)}">Split</button></td>` : ""}</tr>`).join("")}</tbody></table>`;
   }
 
   // the SSIDs the device was seen on, newest first (an older server sends no list: no section). "now" marks the row of
@@ -592,11 +594,13 @@
     $("#dTitle").textContent = label(d);
     const b = $("#dBody");
     const kv = `
-        <dt>Status</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${d.online ? "online" : (d.last_online ? `offline · last online ${esc(rel(d.last_online))}` : "offline · not seen online since leasewatch started")}</dd>
+        <dt>Status</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${d.online ? "online" : (d.last_online ? `offline · last online ${esc(rel(d.last_online))}` : (d.sources === "" ? "offline · split off; waiting for its first poll" : "offline · not seen online since leasewatch started"))}</dd>
         <dt>IP</dt><dd class="mono">${esc(d.ip || "–")}</dd>
         <dt>MAC</dt><dd class="mono">${esc(d.mac)}</dd>
         ${d.private ? '<dt>Address</dt><dd><span class="priv" title="private address"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> private (locally administered): the device may change it</dd>' : ""}
+        ${d.split_from ? `<dt>Split from</dt><dd><button class="who" id="fSplitFrom" data-mac="${esc(d.split_from)}">${esc(splitFromLabel(d.split_from))}</button></dd>` : ""}
         <dt>Hostname</dt><dd>${esc(d.hostname || "–")}</dd>
+        ${d.label ? `<dt>Label</dt><dd>${esc(d.label)}</dd>` : ""}
         <dt>Vendor</dt><dd>${esc(d.vendor || "unknown")}</dd>
         <dt>Network</dt><dd><span class="badge vlan" data-vc="${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="fw1 interface">${esc(d.iface)}</span></dd>
         <dt>Type</dt><dd>${esc(typeText(d))} <span class="muted">· seen in ${esc(sourcesText(d.sources))}</span></dd>
@@ -642,6 +646,11 @@
 
   // the drawer's buttons follow the device's ack state; a baseline device is known already, so Save is the main one
   function drawerActions(d) {
+    const from = $("#fSplitFrom"); if (from) from.onclick = () => openDrawer(from.dataset.mac);
+    $$("[data-split]", $("#dBody")).forEach(btn => btn.onclick = () => {
+      const alias = btn.dataset.split;
+      if (confirm(`Split ${alias} off ${label(d)}? It becomes its own device. What it recorded here stays here, and it is never merged back into this device automatically.`)) splitOff(d.mac, alias);
+    });
     const save = $("#fSave"), ack = $("#fAck"), main = !d.acked && !d.baseline;
     if (!save) return; // read-only drawer: no buttons
     save.className = main ? "btn" : "btn primary"; ack.className = main ? "btn primary" : "btn";
@@ -654,6 +663,24 @@
     const arch = $("#fArch"), archived = d.archived_ts != null;
     arch.textContent = archived ? "Restore to list" : "Archive";
     arch.onclick = () => setFields(d.mac, { archived: !archived });
+  }
+
+  // the device a split row came from, by its name when the list has it
+  const splitFromLabel = mac => { const o = state.devices.find(x => x.mac === mac); return o ? label(o) : mac; };
+
+  // splits a merged address off a device; like setFields, a drawer GET still running is stale and is dropped. The
+  // drawer stays on the device, which no longer lists the address
+  async function splitOff(mac, alias) {
+    try {
+      await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ split: alias }) });
+      const g = state.drawerGet?.mac === mac ? state.drawerGet : null;
+      if (g) { g.ctl.abort(); state.drawerGet = null; }
+      await load();
+      if (state.open === mac) {
+        await refreshDrawer(mac, true);
+        const s = $("#fSaved"); if (s) { s.textContent = "split"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); }
+      }
+    } catch (e) { showBanner(`Save failed: ${e.message}`); }
   }
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)

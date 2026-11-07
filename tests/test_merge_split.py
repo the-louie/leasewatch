@@ -1,6 +1,7 @@
 """devices.split_from: added by the column migration on a fresh DB, an older DB and a newer-schema DB."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -19,6 +20,7 @@ from leasewatch.connectors import Batch  # noqa: E402
 from leasewatch.connectors.merge import MergeState, merge  # noqa: E402
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
 from test_merge import NOW, S, row  # noqa: E402
+import test_ops_write as OW  # noqa: E402  (module import: its TestCase classes are not collected twice)
 
 A, B = "02:00:00:00:00:01", "00:00:5e:00:53:02"
 WITHOUT = [m for m in dbmod.MIGRATIONS if m[1] != "split_from"]
@@ -203,6 +205,101 @@ class FirstListingTest(unittest.TestCase):
     def test_listed_row_still_writes_events(self) -> None:
         res = self.run_merge({DEV: row(DEV)}, [S(DEV, "10.0.0.9")])
         self.assertIn((DEV, "ip", "10.0.0.5 -> 10.0.0.9"), res.events)
+
+
+class SplitWebBase(OW._Base):
+    """POST /api/devices/<mac> with {"split": alias}."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.dev, self.al, self.other = "02:00:00:00:30:01", "06:00:00:00:30:02", "0a:00:00:00:30:03"
+        for m in (self.dev, self.other):
+            self.db.q("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,1,1)", (m,))
+        self.db.q("INSERT INTO aliases VALUES (?, ?, 'hostname', 'alex', 500, 600)", (self.al, self.dev))
+        self.path = f"/api/devices/{self.dev}"
+
+    def split(self, alias: object, path: str | None = None, **more: object) -> tuple[int, dict]:
+        st, _, body = self.post(path=path or self.path, body={"split": alias, **more})
+        return st, json.loads(body)
+
+    def kinds(self, mac: str) -> list[str]:
+        return [r["kind"] for r in self.db.q("SELECT kind FROM events WHERE mac=? AND kind='split'", (mac,))]
+
+
+class SplitWebTest(SplitWebBase):
+    def test_happy_path(self) -> None:
+        st, out = self.split(self.al)
+        self.assertEqual(st, 200)
+        self.assertEqual(set(out), {"device", "split"})
+        self.assertEqual(out["device"]["mac"], self.dev)
+        self.assertEqual(out["split"]["mac"], self.al)
+        self.assertEqual(out["split"]["split_from"], self.dev)
+        self.assertEqual(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,)), [])
+        self.assertEqual(self.db.q("SELECT split_from FROM devices WHERE mac=?", (self.al,))[0]["split_from"], self.dev)
+        self.assertEqual(self.kinds(self.dev), ["split"])
+        self.assertEqual(self.kinds(self.al), ["split"])
+
+    def test_path_may_be_the_alias(self) -> None:
+        st, out = self.split(self.al.upper(), path=f"/api/devices/{self.al}")
+        self.assertEqual((st, out["device"]["mac"], out["split"]["mac"]), (200, self.dev, self.al))
+
+    def test_bad_values(self) -> None:
+        for v in (None, 5, ["x"], "nope", self.al + "\n", ""):
+            with self.subTest(v=v):
+                st, out = self.split(v)
+                self.assertEqual((st, out), (400, {"error": "split must be a MAC"}))
+        self.assertEqual(self.kinds(self.dev), [])
+
+    def test_combined_with_other_keys(self) -> None:
+        for extra in ({"name": "x"}, {"acked": True}, {"bogus": 1}):
+            with self.subTest(extra=extra):
+                st, out = self.split(self.al, **extra)
+                self.assertEqual((st, out), (400, {"error": "split cannot be combined with other fields"}))
+        self.assertEqual(len(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,))), 1)
+
+    def test_not_an_alias_of_this_device(self) -> None:
+        self.assertEqual(self.split(self.al, path=f"/api/devices/{self.other}"), (404, {"error": "not an alias of this device"}))
+        self.assertEqual(self.split("06:00:00:00:30:99"), (404, {"error": "not an alias of this device"}))
+        self.assertEqual(self.split(self.al)[0], 200)
+        self.assertEqual(self.split(self.al), (404, {"error": "not an alias of this device"}))
+
+    def test_already_a_device(self) -> None:
+        self.db.q("INSERT INTO devices(mac,first_seen,last_seen) VALUES(?,1,1)", (self.al,))
+        self.assertEqual(self.split(self.al), (409, {"error": "MAC already has a device row"}))
+        self.assertEqual(len(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,))), 1)
+        self.assertEqual(self.kinds(self.dev), [])
+
+    def test_etag_changes(self) -> None:
+        before = self.get()[1]["etag"]
+        self.assertEqual(self.split(self.al)[0], 200)
+        self.assertNotEqual(self.get()[1]["etag"], before)
+
+    def test_cross_site_refused(self) -> None:
+        st, _, _ = self.post(path=self.path, body={"split": self.al}, extra=b"Sec-Fetch-Site: cross-site\r\n")
+        self.assertEqual(st, 403)
+        self.assertEqual(len(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,))), 1)
+
+
+class SplitWebReadOnlyTest(SplitWebBase):
+    env = {"READ_ONLY": "1"}
+
+    def test_refused_before_anything_happens(self) -> None:
+        st, out = self.split(self.al)
+        self.assertEqual((st, out), (403, {"error": "read-only"}))
+        self.assertEqual(self.split("nope"), (403, {"error": "read-only"}))  # not even the body is judged
+        self.assertEqual(len(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,))), 1)
+        self.assertEqual(self.kinds(self.dev), [])
+
+
+class SplitWebLoginTest(SplitWebBase):
+    env = {"AUTH_USER": "alex", "AUTH_PASSWORD_HASH": OW.HASH}
+
+    def test_login_required(self) -> None:
+        st, _, body = self.post(path=self.path, body={"split": self.al})
+        self.assertEqual((st, json.loads(body)), (401, {"error": "authentication required"}))
+        self.assertEqual(len(self.db.q("SELECT 1 FROM aliases WHERE mac=?", (self.al,))), 1)
+        st, _, _ = self.post(path=self.path, body={"split": self.al}, extra=f"Authorization: {OW.CREDS}\r\n".encode())
+        self.assertEqual(st, 200)
 
 
 if __name__ == "__main__":

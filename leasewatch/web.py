@@ -23,7 +23,7 @@ from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec
 from .connectors.merge import is_private_mac
-from .db import Database, UnknownDevices
+from .db import AlreadyADevice, Database, UnknownDevices
 from .fw1 import MAC_RE
 
 log = logging.getLogger("leasewatch.web")
@@ -639,6 +639,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             return
+        if "split" in body:
+            return self._api_device_split(mac, body, p)
         fields = self._user_fields(body)
         if fields is None:
             return
@@ -650,6 +652,25 @@ class Handler(BaseHTTPRequestHandler):
         if not d:
             return self._error(404, "unknown device")
         self._json({"device": _dev(d)})
+
+    def _api_device_split(self, mac: str, body: dict, p: str) -> None:
+        """Turn a merged alias MAC back into a device of its own. The key stands alone: with other fields it would be
+        unclear whether they apply before or after the split."""
+        alias = body["split"]
+        if not isinstance(alias, str) or not MAC_RE.fullmatch(alias.lower()):  # fullmatch: "$" lets a trailing "\n" in
+            return self._error(400, "split must be a MAC")
+        if len(body) > 1:
+            return self._error(400, "split cannot be combined with other fields")
+        try:
+            res = self.db.split_alias(mac, alias.lower())
+        except AlreadyADevice:
+            return self._error(409, "MAC already has a device row")
+        except Exception:
+            log.exception("POST %s failed", p)
+            return self._error(500, "internal error")
+        if res is None:
+            return self._error(404, "not an alias of this device")
+        self._json({"device": _dev(res[0]), "split": _dev(res[1])})
 
     def _api_devices_post(self) -> None:
         """Mark known or archive/restore up to BULK_MAX devices at once: all or nothing, the same events as the same

@@ -395,7 +395,7 @@ class BrowserPrivateTest(_BrowserCase):
         for ssid, first, last, secs, polls, ap in (("Home", now - 7200, now, 5400, 45, "ap-<b>1"), ("Guest <i>x</i>", now - 86400, now - 80000, 600, 5, "ap-2")):
             db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
                  (cls.DEV, ssid, first, last, secs, polls, ap))
-        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "wifihistory", "archive", "vlancolor"))  # archive changes server state: last
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "wifihistory", "archive", "vlancolor", "split"))  # archive and split change server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -457,15 +457,42 @@ class BrowserPrivateTest(_BrowserCase):
         d = self.result("private")
         self.assertIn("Merged addresses", d["drawer"]["heading"])
         self.assertIn("client-id", d["drawer"]["why"])
-        self.assertEqual(d["drawer"]["head"], ["MAC", "Matched by", "Merged", "Last seen"])
+        self.assertEqual(d["drawer"]["head"], ["MAC", "Matched by", "Merged", "Last seen", "Action"])
         self.assertEqual(len(d["drawer"]["rows"]), 1)
-        mac_cell, why, merged, seen = d["drawer"]["rows"][0]
+        mac_cell, why, merged, seen, action = d["drawer"]["rows"][0]
+        self.assertEqual(action, "Split")
         self.assertEqual(mac_cell, self.NEWP)
         self.assertEqual(why, f"client-id {self.CID}")
         self.assertRegex(merged, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
         self.assertEqual(seen, "just now")
         self.assertFalse(d["plain"]["table"])
         self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_split_off_a_merged_address(self) -> None:
+        d = self.result("split")
+        b = d["before"]
+        self.assertEqual(b["aliases"], [self.NEWP])
+        self.assertEqual(b["buttons"], [[self.NEWP, "Split"]])
+        self.assertEqual(b["head"][-1], "Action")
+        self.assertTrue(b["note"].endswith("Split one if it is not this device."))
+        self.assertTrue(b["visible"])  # no hover reveal
+        c = d["cancelled"]  # the first dialog was dismissed
+        self.assertEqual((c["dialogs"], c["aliases"], c["server"], c["open"], c["new_row"]), (1, [self.NEWP], [self.NEWP], True, False))
+        done = d["done"]
+        self.assertEqual(done["dialogs"][0], f"Split {self.NEWP} off tablet? It becomes its own device. What it recorded here stays here, "
+                                             "and it is never merged back into this device automatically.")
+        self.assertEqual(len(done["dialogs"]), 2)
+        self.assertEqual((done["aliases"], done["server"], done["open"], done["title"]), ([], [], True, "tablet"))
+        self.assertNotIn("Merged addresses", done["headings"])
+        self.assertIn(self.DEV, done["mac"])
+        self.assertEqual(done["row_private"], "private address")
+        self.assertEqual(d["events"], ["split address", "split address"])
+        r = d["split_row"]
+        self.assertEqual(r["split_from"], ["tablet", self.DEV])
+        self.assertEqual(r["status"], "offline · split off; waiting for its first poll")
+        self.assertFalse(r["aliases_table"])
+        self.assertEqual(r["kinds"], ["split address"])
+        self.assertEqual(d["back"], {"title": "tablet", "open": True})
 
     def test_drawer_shows_wifi_history(self) -> None:
         d = self.result("wifihistory")
@@ -1016,12 +1043,17 @@ class BrowserReadOnlyTest(_BrowserCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        base, _ = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
-                        [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new], env={"READ_ONLY": "1"})
-        cls.run_scenarios(base, ("readonly", "bulkro"))
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                         [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new], env={"READ_ONLY": "1"})
+        db.q("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
+             ("06:00:00:00:00:99", mac(1), "hostname", "alex-laptop", int(time.time()), int(time.time())))
+        cls.run_scenarios(base, ("readonly", "bulkro", "splitro"))
 
     def test_no_select_mode(self) -> None:
         self.assertEqual(self.result("bulkro"), {"button": "none", "column": "none"})
+
+    def test_merged_addresses_have_no_split_button(self) -> None:
+        self.assertEqual(self.result("splitro"), {"table": True, "buttons": 0, "head": ["MAC", "Matched by", "Merged", "Last seen"]})
 
     def test_drawer_and_rows_are_read_only(self) -> None:
         d = self.result("readonly")

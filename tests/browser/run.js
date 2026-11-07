@@ -628,6 +628,55 @@ const scenarios = {
              status_after: await page.$eval('#statusText', e => e.textContent),
              banner_hidden: await page.$eval('#banner', b => b.classList.contains('hidden')) };
   },
+  // Split on a merged address: cancel changes nothing; ok makes the address a device of its own, the drawer stays on the
+  // device and loses the row, the new row is private and its drawer says where it came from (changes server state)
+  async split(page) {
+    const DEV = '02:00:00:00:10:01', ALIAS = '06:00:00:00:10:02';
+    let answer = false; const dialogs = [];
+    page.on('dialog', async d => { dialogs.push(d.message()); await (answer ? d.accept() : d.dismiss()); });
+    const aliases = () => page.$$eval('#dBody table.aliases tbody tr', trs => trs.map(t => t.querySelector('td').textContent));
+    const serverAliases = () => page.evaluate(async m => (await (await fetch(`/api/devices/${m}`)).json()).aliases.map(a => a.mac), DEV);
+    const res = {};
+    await page.click(`${row(DEV)} .c-dev`); await waitOpen(page, DEV);
+    res.before = { aliases: await aliases(), buttons: await page.$$eval('#dBody [data-split]', bs => bs.map(b => [b.dataset.split, b.textContent])),
+                   head: await page.$$eval('#dBody table.aliases thead th', ths => ths.map(t => t.textContent)),
+                   note: await page.$eval('#dBody table.aliases', t => t.previousElementSibling.textContent),
+                   visible: await page.$eval('#dBody [data-split]', b => b.offsetWidth > 0 && getComputedStyle(b).visibility !== 'hidden' && getComputedStyle(b).opacity === '1') };
+    await page.click('#dBody [data-split]');
+    await new Promise(r => setTimeout(r, 400));
+    res.cancelled = { dialogs: dialogs.length, aliases: await aliases(), server: await serverAliases(), open: await drawerOpen(page),
+                      new_row: !!(await page.$(row(ALIAS))) };
+    answer = true;
+    await page.click('#dBody [data-split]');
+    await page.waitForFunction(() => document.querySelector('#fSaved') && document.querySelector('#fSaved').textContent === 'split');
+    await page.waitForSelector(row(ALIAS));
+    res.done = { dialogs, aliases: await aliases(), headings: await page.$$eval('#dBody h3', hs => hs.map(h => h.textContent)),
+                 server: await serverAliases(), open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent),
+                 mac: await page.$$eval('#dBody dd.mono', ds => ds.map(d => d.textContent)),
+                 row_private: await page.$eval(`${row(ALIAS)} .c-mac .priv`, e => e.title) };
+    await page.waitForSelector('#events .k.split');
+    res.events = await page.$$eval('#events .k.split', ks => ks.map(k => k.textContent));
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await page.click(`${row(ALIAS)} .c-dev`); await waitOpen(page, ALIAS);
+    res.split_row = await page.evaluate(() => {
+      const dt = [...document.querySelectorAll('#dBody dt')].find(x => x.textContent === 'Split from');
+      const status = [...document.querySelectorAll('#dBody dt')].find(x => x.textContent === 'Status');
+      const b = dt && dt.nextElementSibling.querySelector('button.who');
+      return { split_from: b ? [b.textContent, b.dataset.mac] : null, status: status.nextElementSibling.textContent.trim(),
+               aliases_table: !!document.querySelector('#dBody table.aliases'),
+               kinds: [...document.querySelectorAll('#dBody ul.tl .k')].map(k => k.textContent) };
+    });
+    await page.click('#dBody button.who'); await waitOpen(page, DEV);
+    res.back = { title: await page.$eval('#dTitle', e => e.textContent), open: await drawerOpen(page) };
+    return res;
+  },
+  // READ_ONLY server: a merged address is listed without a Split button or its column
+  async splitro(page) {
+    const DEV = '02:00:00:00:00:01';
+    await page.click(`${row(DEV)} .c-dev`); await waitOpen(page, DEV);
+    return { table: !!(await page.$('#dBody table.aliases')), buttons: (await page.$$('#dBody [data-split]')).length,
+             head: await page.$$eval('#dBody table.aliases thead th', ths => ths.map(t => t.textContent)) };
+  },
   // server with READ_ONLY=1: no edit controls in the rows or the drawer, one line that says why
   async readonly(page) {
     const MAC = '02:00:00:00:00:06'; // new and not yet known: it would have a "Mark known" button
