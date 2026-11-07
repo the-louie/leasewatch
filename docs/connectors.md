@@ -398,6 +398,10 @@ services:
   - new optional connector methods (the host looks for them and works without them);
   - new `HostContext` members.
 
+  Added so far inside API 1: 1.3 added `Sighting.label` (optional, default `""`). A connector that sets it needs a 1.3
+  host: on a 1.2 host the `Sighting(...)` call fails with an unexpected keyword. Guard it with `"label" in
+  Sighting.__dataclass_fields__` or require host 1.3 in your package metadata.
+
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional
   required, needs API 2 and the group `leasewatch.connectors.v2`. A connector written for API 1 then keeps loading

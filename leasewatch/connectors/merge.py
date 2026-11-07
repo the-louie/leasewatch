@@ -171,7 +171,8 @@ def decide_aliases(raw: dict[str, Merged], present: set[str], prev: dict[str, di
 
 
 def decide_folds(raw: dict[str, Merged], present: set[str], prev: dict[str, dict], aliases: dict[str, str],
-                 fresh_hosts: dict[str, int], keys: dict[str, str], now: int) -> list[tuple[str, str, str, str]]:
+                 fresh_hosts: dict[str, int], keys: dict[str, str], now: int,
+                 fresh_targets: frozenset[str] = frozenset()) -> list[tuple[str, str, str, str]]:
     """(candidate, device, "hostname", hostname) for each existing private row that becomes an alias of an older
     device (deferred hostname merge): rule 4 kept the new MAC apart while the old one was still listed, and the old
     one stopped soon after. The candidate is a row nobody touched (no name or note, not acked, archived or baseline),
@@ -180,10 +181,11 @@ def decide_folds(raw: dict[str, Merged], present: set[str], prev: dict[str, dict
     one other device with that hostname: recent, older than the candidate, not the row it was split from, off the wire
     this poll, and last online no later than FOLD_OVERLAP_SECONDS after the candidate first appeared (a longer
     overlap is a second interface, e.g. a docked laptop on cable and Wi-Fi). A hostname a new MAC also carries, two
-    candidates with one hostname and two candidates for one device decide nothing. The caller applies the gate (first
+    candidates with one hostname, two candidates for one device and a candidate a new MAC merges into this poll
+    (fresh_targets) decide nothing. The caller applies the gate (first
     run, lease-blind hold) and the limit shared with fresh merges."""
     busy = {keys.get(m, aliases.get(m, m)) for m in present}
-    owners = set(aliases.values())
+    owners = set(aliases.values()) | fresh_targets
     picks: dict[str, tuple[str, str]] = {}  # candidate -> (device, hostname)
     for mac, m in raw.items():
         r = prev.get(mac)
@@ -503,7 +505,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     hold = lease_blind and state.producers is not None
     limits: dict = {}
     keys, new_aliases = decide_aliases(raw, present, prev, state.aliases, state.first_run or hold, now, limits)
-    folds = [] if state.first_run or hold else decide_folds(raw, present, prev, state.aliases, limits["hosts"], keys, now)
+    folds = [] if state.first_run or hold else decide_folds(raw, present, prev, state.aliases, limits["hosts"], keys, now,
+                                                            frozenset(d for _, d, _, _ in new_aliases))
     # one device takes at most one new alias per poll: a fresh merge and a fold into one device are two interfaces,
     # so neither happens
     clash = {dev for _, dev, _, _ in folds} & set(limits.get("taken", ()))
@@ -585,10 +588,11 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                 lease_type = ""
                 state.no_lease_since.pop(mac, None)
                 ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
-        # a row made by a split has sources '' until a poll lists it: its first listing fills the empty fields and
-        # writes the history row, but the fill is no change worth an event
+        # a row made by a split has sources '' and split_from set until a poll lists it: its first listing fills the
+        # empty fields and writes the history row, but the fill is no change worth an event. Sources '' alone is no
+        # marker: a connector that emits kind "" is stored that way for good
         fields_changed = bool(ev)
-        if not cur["sources"]:
+        if not cur["sources"] and cur.get("split_from"):
             ev = []
         # S4 archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
         # archived device back to the list; this `back` replaces the ordinary one. One archived while still online

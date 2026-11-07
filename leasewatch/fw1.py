@@ -319,10 +319,15 @@ class Fw1Client:
         else:
             lease_rows = {"kea": kea_leases}.get(self.dhcp_backend, isc_leases)(leases)
         if reservations:
-            # an active lease already carries what its reservation says; only lease-less reservations are added
+            # an active lease already carries what its reservation says, except the description (label);
+            # only lease-less reservations are added as rows
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
-            lease_rows = lease_rows + [r for r in kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
-                                       if norm_mac(_s(r.get("mac"))) not in leased]
+            res_rows = kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
+            res_label = {norm_mac(_s(r.get("mac"))): r["label"] for r in res_rows
+                         if r.get("label") and norm_mac(_s(r.get("mac"))) in leased}
+            lease_rows = [{**l, "label": res_label[m]} if not l.get("label") and (m := norm_mac(_s(l.get("mac")))) in res_label
+                          else l for l in lease_rows]
+            lease_rows = lease_rows + [r for r in res_rows if norm_mac(_s(r.get("mac"))) not in leased]
         for l in lease_rows:
             mac = norm_mac(_s(l.get("mac")))
             if not mac or skip(l.get("if"), l.get("if_dev"), l.get("if_descr")):

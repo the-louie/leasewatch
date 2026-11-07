@@ -429,7 +429,7 @@
   }
   // ---------- events list: filters, paging ----------
   const EV_PAGE = 60;
-  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged"]], ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
+  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged", "split"]], ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
     ["Review", ["acked", "unacked"]], ["Sources", ["source_down", "source_up"]]];
   // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
   const isDay = v => {
@@ -611,7 +611,18 @@
         <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : d.baseline ? "yes, present at the start" : "not yet"}</dd>
         ${d.archived_ts != null ? `<dt>Archived</dt><dd>${esc(abs(d.archived_ts))} <span class="muted">· not in the list until it is online again</span></dd>` : ""}`;
     // don't clobber an edit in progress, but show what a save changed outside the form (Known and the ack button)
-    if (edited()) { $("dl.kv", b).innerHTML = kv; paintVc(b); drawerActions(d); return; } // the user is typing: focus stays put
+    // the merged addresses too, so a split address leaves the table; a Split button that had focus hands it on (to the
+    // same button, else to Name)
+    if (edited()) {
+      $("dl.kv", b).innerHTML = kv;
+      const al = $("#dAliases", b);
+      if (al) {
+        const fs = al.contains(document.activeElement) ? document.activeElement.dataset.split : null;
+        al.innerHTML = aliasesHtml(r.aliases);
+        if (fs != null) (al.querySelector(`[data-split="${CSS.escape(fs)}"]`) || $("#fName", b)).focus({ preventScroll: true });
+      }
+      paintVc(b); drawerActions(d); return; // the user is typing: focus stays put
+    }
     // rebuilding the body drops keyboard focus: note the focused control (and caret) to focus its replacement
     const fe = b.contains(document.activeElement) ? document.activeElement : null;
     const fid = fe?.id || "", caret = fe && "selectionStart" in fe ? [fe.selectionStart, fe.selectionEnd] : null;
@@ -631,7 +642,7 @@
           <span class="saved" id="fSaved"></span>`}
         </div>
       </div>
-      ${aliasesHtml(r.aliases)}
+      <div id="dAliases">${aliasesHtml(r.aliases)}</div>
       ${wifiHtml(r.wifi_presence, state.meta, d)}
       <h3>History</h3>
       <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
@@ -680,7 +691,7 @@
         await refreshDrawer(mac, true);
         const s = $("#fSaved"); if (s) { s.textContent = "split"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); }
       }
-    } catch (e) { showBanner(`Save failed: ${e.message}`); }
+    } catch (e) { showBanner(`Split failed: ${e.message}`); }
   }
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)

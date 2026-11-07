@@ -202,6 +202,12 @@ class FirstListingTest(unittest.TestCase):
         res2 = self.run_merge(res.rows, [S(AL, "10.0.0.8", "alex-pc"), S(DEV, "10.0.0.5")])
         self.assertIn((AL, "ip", "10.0.0.7 -> 10.0.0.8"), res2.events)
 
+    def test_empty_sources_without_split_from_still_writes_events(self) -> None:
+        # a connector that emits kind "" is stored with sources '' for good: it is no split row
+        plain = row(AL, sources="", split_from=None, ip="10.0.0.7", hostname="alex-pc")
+        res = self.run_merge({AL: plain, DEV: row(DEV)}, [S(AL, "10.0.0.8", "alex-pc"), S(DEV, "10.0.0.5")])
+        self.assertIn((AL, "ip", "10.0.0.7 -> 10.0.0.8"), res.events)
+
     def test_listed_row_still_writes_events(self) -> None:
         res = self.run_merge({DEV: row(DEV)}, [S(DEV, "10.0.0.9")])
         self.assertIn((DEV, "ip", "10.0.0.5 -> 10.0.0.9"), res.events)

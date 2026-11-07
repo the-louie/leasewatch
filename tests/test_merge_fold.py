@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
 from test_merge import NOW, arp, row  # noqa: E402
-from test_s4_merge import DEV, NEWP, NEWP2, UA_NEW, lease  # noqa: E402
+from test_s4_merge import CID, DEV, NEWP, NEWP2, UA_NEW, lease  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import Batch  # noqa: E402
 from leasewatch.connectors.merge import (FOLD_OVERLAP_SECONDS, MERGE_FOLD_DAYS, ConnectorFailure, MergeState,  # noqa: E402
@@ -186,6 +186,15 @@ class FoldTests(unittest.TestCase):
         res = self.run_merge(prev, [lease(NEWP2, "10.0.0.8", host="bob-pc", presence=False),
                                     lease(NEWP, host="newp2-host")])
         self.assertEqual(res.folds, [(NEWP2, dev3, "hostname", "bob-pc")])
+
+    def test_candidate_a_new_mac_merges_into_is_not_folded(self):
+        # NEWP2 carries NEWP's client-id this poll and merges into it: NEWP must not be folded away
+        res = self.run_merge([target(), cand(client_id=CID)],
+                             [lease(NEWP, "10.0.0.9", host=HOST, cid=CID), lease(NEWP2, "10.0.0.10", cid=CID)])
+        self.assertEqual(res.folds, [])
+        self.assertEqual([a[:3] for a in res.aliases], [(NEWP2, NEWP, "client-id")])
+        self.assertIn(NEWP, res.rows)
+        self.assertNotIn(NEWP, res.new)
 
 
 if __name__ == "__main__":

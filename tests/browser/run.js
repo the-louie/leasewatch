@@ -630,7 +630,7 @@ const scenarios = {
   },
   // Split on a merged address: cancel changes nothing; ok makes the address a device of its own, the drawer stays on the
   // device and loses the row, the new row is private and its drawer says where it came from (changes server state)
-  async split(page) {
+  async split(page, base) {
     const DEV = '02:00:00:00:10:01', ALIAS = '06:00:00:00:10:02';
     let answer = false; const dialogs = [];
     page.on('dialog', async d => { dialogs.push(d.message()); await (answer ? d.accept() : d.dismiss()); });
@@ -647,16 +647,30 @@ const scenarios = {
     res.cancelled = { dialogs: dialogs.length, aliases: await aliases(), server: await serverAliases(), open: await drawerOpen(page),
                       new_row: !!(await page.$(row(ALIAS))) };
     answer = true;
-    await page.click('#dBody [data-split]');
+    // unsaved text in Name, which keeps focus: the split is clicked from script, so focus does not move to the button
+    await page.focus('#fName'); await page.keyboard.type(' typed');
+    await page.evaluate(() => { window.__oldSplit = document.querySelector('#dBody [data-split]'); setTimeout(() => window.__oldSplit.click()); });
     await page.waitForFunction(() => document.querySelector('#fSaved') && document.querySelector('#fSaved').textContent === 'split');
     await page.waitForSelector(row(ALIAS));
-    res.done = { dialogs, aliases: await aliases(), headings: await page.$$eval('#dBody h3', hs => hs.map(h => h.textContent)),
+    res.done = { dialogs: [...dialogs], aliases: await aliases(), headings: await page.$$eval('#dBody h3', hs => hs.map(h => h.textContent)),
                  server: await serverAliases(), open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent),
                  mac: await page.$$eval('#dBody dd.mono', ds => ds.map(d => d.textContent)),
-                 row_private: await page.$eval(`${row(ALIAS)} .c-mac .priv`, e => e.title) };
+                 row_private: await page.$eval(`${row(ALIAS)} .c-mac .priv`, e => e.title),
+                 buttons: (await page.$$('#dBody [data-split]')).length, name: await page.$eval('#fName', e => e.value),
+                 focus: await page.evaluate(() => document.activeElement && document.activeElement.id) };
+    // the old button, kept from before the split: a second split of the same address fails and says so
+    page.__allow = [404]; // the server no longer has the address as an alias
+    await page.evaluate(() => setTimeout(() => window.__oldSplit.click()));
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    res.again = { banner: await page.$eval('#banner', b => b.textContent), dialogs: dialogs.length, name: await page.$eval('#fName', e => e.value) };
+    page.__allow = null;
     await page.waitForSelector('#events .k.split');
     res.events = await page.$$eval('#events .k.split', ks => ks.map(k => k.textContent));
-    await page.keyboard.press('Escape'); await waitClosed(page);
+    // the events kind filter offers split
+    await page.select('#evKind', 'split');
+    await page.waitForFunction(() => { const ks = [...document.querySelectorAll('#events li .k')]; return ks.length && ks.every(k => k.classList.contains('split')); });
+    res.ev_filter = { kinds: await page.$$eval('#events li .k', ks => ks.map(k => k.textContent)), url: await page.evaluate(() => location.search) };
+    await page.keyboard.press('Escape'); await waitClosed(page); // accepts "Discard unsaved changes?"
     await page.click(`${row(ALIAS)} .c-dev`); await waitOpen(page, ALIAS);
     res.split_row = await page.evaluate(() => {
       const dt = [...document.querySelectorAll('#dBody dt')].find(x => x.textContent === 'Split from');
@@ -668,6 +682,11 @@ const scenarios = {
     });
     await page.click('#dBody button.who'); await waitOpen(page, DEV);
     res.back = { title: await page.$eval('#dTitle', e => e.textContent), open: await drawerOpen(page) };
+    // ?ek=split in the address survives readUrl: the list offers the kind
+    await page.goto(`${base}?ek=split`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('#events li .k').length > 0);
+    res.ek_url = { select: await page.$eval('#evKind', s => s.value), url: await page.evaluate(() => location.search),
+                   kinds: await page.$$eval('#events li .k', ks => ks.map(k => k.textContent)) };
     return res;
   },
   // READ_ONLY server: a merged address is listed without a Split button or its column

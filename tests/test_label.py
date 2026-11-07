@@ -37,6 +37,35 @@ class Fw1Label(unittest.TestCase):
         self.assertEqual(to_sighting(out[0], "fw", 5).label, "Den")
 
 
+class LeasedReservationLabel(unittest.TestCase):
+    LEASE = {"hwaddr": A, "address": "10.0.0.5", "hostname": "pr1.example.lan.", "state": 0,
+             "if_name": "opt3", "if": "vlan0110"}
+
+    def run_sightings(self, leases, reservations):
+        c = fw1.Fw1Client.__new__(fw1.Fw1Client)
+        c.dhcp_backend = "kea"
+        out, _ = c._sightings(leases, [], lambda *a: False, reservations)
+        return out
+
+    def test_leased_and_reserved_gets_label(self):
+        out = self.run_sightings([self.LEASE], [{**RES, "description": "Den printer"}])
+        self.assertEqual([(s.mac, s.source, s.label) for s in out], [(A, "dhcp", "Den printer")])
+
+    def test_leased_without_reservation_has_no_label(self):
+        out = self.run_sightings([self.LEASE], [{**RES, "hw_address": "02:00:00:00:00:02", "description": "Other"}])
+        self.assertEqual([s.label for s in out if s.mac == A], [""])
+        self.assertEqual([s.label for s in out if s.mac != A], ["Other"])  # its own lease-less row, untouched
+
+    def test_leaseless_reservation_keeps_label(self):
+        out = self.run_sightings([], [{**RES, "description": "Den printer"}])
+        self.assertEqual([(s.mac, s.label) for s in out], [(A, "Den printer")])
+
+    def test_missing_or_null_description_is_empty(self):
+        for res in (RES, {**RES, "description": None}):
+            out = self.run_sightings([self.LEASE], [res])
+            self.assertEqual([s.label for s in out], [""])
+
+
 class Coercion(unittest.TestCase):
     def norm(self, **kw):
         return normalise_batch("n", Batch(sightings=[sight(**kw)])).sightings

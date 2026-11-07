@@ -486,7 +486,15 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertNotIn("Merged addresses", done["headings"])
         self.assertIn(self.DEV, done["mac"])
         self.assertEqual(done["row_private"], "private address")
+        # Name held unsaved text: the table still drops the address, the text and the focus stay
+        self.assertEqual((done["buttons"], done["name"], done["focus"]), (0, " typed", "fName"))
+        a = d["again"]  # the button from before the split, clicked again
+        self.assertTrue(a["banner"].startswith("Split failed: "), a["banner"])
+        self.assertEqual((a["dialogs"], a["name"]), (3, " typed"))
         self.assertEqual(d["events"], ["split address", "split address"])
+        self.assertEqual(d["ev_filter"]["kinds"], ["split address", "split address"])
+        self.assertIn("ek=split", d["ev_filter"]["url"])
+        self.assertEqual(d["ek_url"], {"select": "split", "url": "?ek=split", "kinds": ["split address", "split address"]})
         r = d["split_row"]
         self.assertEqual(r["split_from"], ["tablet", self.DEV])
         self.assertEqual(r["status"], "offline · split off; waiting for its first poll")
@@ -995,10 +1003,11 @@ class BrowserEventsViewTest(_BrowserCase):
         d = self.result("eventsview")
         values = [o["value"] for o in d["kind_options"]]
         self.assertEqual(values[0], "")
-        self.assertEqual(len(values), 16)  # "All" and the 15 kinds the server writes
-        for k in ("source_down", "source_up", "lease_type"):
+        self.assertEqual(len(values), 17)  # "All" and the 16 kinds the server writes
+        for k in ("source_down", "source_up", "lease_type", "merged", "split"):
             self.assertIn(k, values)
         self.assertIn({"value": "source_down", "text": "source down"}, d["kind_options"])
+        self.assertIn({"value": "split", "text": "split address"}, d["kind_options"])
 
     def test_kind_filter(self) -> None:
         d = self.result("eventsview")
