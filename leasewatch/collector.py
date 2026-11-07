@@ -488,12 +488,29 @@ class Collector:
         # a listing without presence keeps the last time this source vouched for the device
         c.executemany("INSERT INTO seen(mac,source,last_seen,last_present) VALUES(?,?,?,?) ON CONFLICT(mac,source) DO UPDATE "
                       "SET last_seen=excluded.last_seen, last_present=COALESCE(excluded.last_present, seen.last_present)", res.seen)
+        days = self.cfg.wifi_presence_days
+        if days > 0:
+            # the seconds are the real gap between two sightings; a gap of more than one missed poll, or a clock step, counts one poll
+            poll = self.cfg.poll_seconds
+            # one observation per device and SSID: two MACs of one device in a poll are one sighting
+            c.executemany(
+                "INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) "
+                "VALUES (:mac, :ssid, :now, :now, :poll, 1, :ap) "
+                "ON CONFLICT(mac, ssid) DO UPDATE SET "
+                "seconds_seen = seconds_seen + CASE WHEN excluded.last_seen - last_seen BETWEEN 1 AND :cap "
+                "THEN excluded.last_seen - last_seen ELSE :poll END, "
+                "polls_seen = polls_seen + 1, last_seen = excluded.last_seen, last_ap = excluded.last_ap",
+                [{"mac": mac, "ssid": ssid, "ap": ap, "now": now, "poll": poll, "cap": 2 * poll + 60} for (mac, ssid), ap in {(m, s_): a for m, s_, a in res.wifi}.items()])
+            # the start of the record, so a short history is not read as a short stay
+            c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('wifi_presence_since', ?)", (str(now),))
         # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
         for mac in dict.fromkeys(mac for mac, _ in res.history):
             c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
         if ref is None:
             ref = self._prune_reference(c, now)
         c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
+        # 0 = off: nothing is written above, and what is stored is deleted
+        c.execute("DELETE FROM wifi_presence WHERE last_seen<?", (ref - days * 86400,) if days > 0 else (2**62,))
 
     def _prune_reference(self, c: sqlite3.Connection, now: int) -> int:
         """The clock that prunes (events older than a year, devices offline for PRUNE_DAYS); stores it in meta."""

@@ -104,7 +104,7 @@ class OutcomeTests(Base):
 
 class WriteTests(Base):
     def res(self, history=(), events=()):
-        return SimpleNamespace(rows={}, history=list(history), events=list(events), seen=[], aliases=[], alias_seen=[])
+        return SimpleNamespace(rows={}, history=list(history), events=list(events), seen=[], aliases=[], alias_seen=[], wifi=[])
 
     def test_history_trim_keeps_the_row_just_written_after_a_clock_step_back(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
@@ -271,7 +271,7 @@ class Round2Tests(Base):
             for i in range(5):
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now - i * DAY, f"02:00:00:00:00:0{i}", "new", ""))
         jump = now + 10 * 365 * DAY
-        res = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[])
+        res = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[], wifi=[])
         for k in range(3):  # as run_once: last_poll_ts follows the wrong clock
             with db.tx() as c:
                 col._write(c, {}, res, jump + k * 120)
@@ -313,7 +313,7 @@ class Round2Tests(Base):
 
 class Round3Tests(Base):
     """Fix round 3 (W01, W02, W03, W04, W29, W39)."""
-    RES = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[])
+    RES = SimpleNamespace(rows={}, history=[], events=[], seen=[], aliases=[], alias_seen=[], wifi=[])
 
     def test_fixed_switch_clears_its_disabled_error_at_start(self):  # W01
         env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST

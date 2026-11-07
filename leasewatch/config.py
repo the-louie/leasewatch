@@ -249,6 +249,8 @@ class Config:
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))
     # archive devices not online for this many days that have no name and are not marked known; 0 = off
     prune_days: int = field(default_factory=lambda: _env_int("PRUNE_DAYS", 0))
+    # days a Wi-Fi presence row (per device and SSID) is kept after it was last seen; 0 = off (nothing stored, stored rows deleted)
+    wifi_presence_days: int = field(default_factory=lambda: _env_int("WIFI_PRESENCE_DAYS", 365))
     backup_keep: int = field(default_factory=lambda: _env_int("BACKUP_KEEP", 7))  # dated backups the backup command keeps
     # mail on new devices (Mailgun HTTP API); leave MAILGUN_KEY empty to disable
     mailgun_key: str = field(default_factory=lambda: _env("MAILGUN_KEY"), repr=False)
@@ -473,6 +475,13 @@ class Config:
             problems.append("PRUNE_DAYS must not be negative")
         if self.prune_days > 3650:
             problems.append("PRUNE_DAYS must be at most 3650")
+        raw_wifi = _env("WIFI_PRESENCE_DAYS")
+        if raw_wifi and not re.fullmatch(r"[+-]?\d+", raw_wifi):
+            problems.append("WIFI_PRESENCE_DAYS must be a whole number")
+        elif self.wifi_presence_days < 0:
+            problems.append("WIFI_PRESENCE_DAYS must not be negative")
+        elif self.wifi_presence_days > 3650:
+            problems.append("WIFI_PRESENCE_DAYS must be at most 3650")
         raw_keep = _env("BACKUP_KEEP")
         if raw_keep and not re.fullmatch(r"[+-]?\d+", raw_keep):
             problems.append("BACKUP_KEEP must be a whole number")
