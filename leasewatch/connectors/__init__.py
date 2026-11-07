@@ -80,7 +80,7 @@ class Sighting:
     observed_at: epoch seconds when the connector collected it; informational in API 1 (reserved as a tie-break
     for C6). network: human interface name (LAN, IOT), the "vlan" column today. iface: source-specific interface
     id (opt3). lease_type: "static" | "dynamic" | "", only kind "dhcp" sets it. client_id: DHCP client-id / DUID
-    when known (reserved, unused so far)."""
+    when known (the host stores it in its normal form, see merge.norm_client_id)."""
     mac: str
     source: str
     kind: str

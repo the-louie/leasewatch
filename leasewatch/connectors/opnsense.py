@@ -16,7 +16,8 @@ def to_sighting(s: Fw1Sighting, source: str, observed_at: int) -> Sighting:
     """fw1's record in the connector shape: its "source" (dhcp/arp) is the kind, "online" the presence claim,
     "vlan" the network name; source becomes the instance name."""
     return Sighting(mac=s.mac, source=source, kind=s.source, presence=s.online, observed_at=observed_at,
-                    ip=s.ip, hostname=s.hostname, vendor=s.vendor, network=s.vlan, iface=s.iface, lease_type=s.lease_type)
+                    ip=s.ip, hostname=s.hostname, vendor=s.vendor, network=s.vlan, iface=s.iface, lease_type=s.lease_type,
+                    client_id=s.client_id)
 
 
 class OpnsenseConnector(SettingsMixin):

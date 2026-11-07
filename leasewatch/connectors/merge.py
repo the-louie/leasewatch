@@ -40,6 +40,7 @@ present (a controller's active client).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field, replace
 
 from ..config import Config
@@ -65,11 +66,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # device columns the merge owns; user fields (name, note, acked, acked_at) and baseline/first_seen of an existing
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
-                  "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source")
+                  "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
+                  "client_id")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
-                "wifi_alias": "", "link": "", "loc_source": ""}
+                "wifi_alias": "", "link": "", "loc_source": "", "client_id": ""}
 
 
 @dataclass
@@ -83,6 +85,7 @@ class Merged:
     lease_type: str = ""
     sources: set = field(default_factory=set)
     online: bool = False
+    client_id: str = ""  # from the chosen lease only
 
 
 @dataclass(frozen=True)
@@ -124,7 +127,7 @@ class MergeResult:
 def to_fw1(s: Sighting) -> Fw1Sighting:
     """The connector record back in the shape merge_sightings sorts on (kind -> source, presence -> online)."""
     return Fw1Sighting(mac=s.mac, ip=s.ip, hostname=s.hostname, vendor=s.vendor, vlan=s.network, iface=s.iface,
-                       source=s.kind, lease_type=s.lease_type, online=s.presence)
+                       source=s.kind, lease_type=s.lease_type, online=s.presence, client_id=s.client_id)
 
 
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
@@ -155,13 +158,32 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
                    sources={s.source for s in ss}, online=any(s.online for s in ss))
         if lease:
-            m.hostname, m.lease_type = lease.hostname, lease.lease_type
+            m.hostname, m.lease_type, m.client_id = lease.hostname, lease.lease_type, lease.client_id
         named = sorted(ss, key=lambda s: (_rank(NAME_KINDS, s.source), s.source) + pick(s))
         m.hostname = m.hostname or next((s.hostname for s in named if s.hostname), "")
         vendors = sorted(ss, key=lambda s: (_rank(VENDOR_KINDS, s.source), s.source) + pick(s))
         m.vendor = next((s.vendor for s in vendors if s.vendor), "")
         out[mac] = m
     return out
+
+
+_HEX_RE = re.compile(r"[0-9a-f]*")
+_GROUP_RE = re.compile(r"[0-9a-f]{1,2}")
+
+
+def norm_client_id(v: object) -> str:
+    """A DHCP client-id in its normal form: lowercase hex, two digits per byte, no separators. Groups split by ":" or
+    "-" are padded to two digits (MikroTik writes 1:2:0); input without separators must be even-length hex. Anything
+    else, and a value shorter than 2 bytes, is "" (too short to tell devices apart)."""
+    t = ("" if v is None else str(v)).strip().lower()
+    if ":" in t or "-" in t:
+        groups = re.split(r"[:-]", t)
+        if not all(_GROUP_RE.fullmatch(g) for g in groups):
+            return ""
+        t = "".join(g.zfill(2) for g in groups)
+    elif not _HEX_RE.fullmatch(t) or len(t) % 2:
+        return ""
+    return t if len(t) >= 4 else ""
 
 
 _STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind"),
@@ -218,6 +240,7 @@ def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachm
     ch.update({f: _str(getattr(r, f), f not in _UNSTRIPPED) for f in _STR_FIELDS[t]})
     if t is Sighting:  # the merge compares kinds exactly: "DHCP" would silently lose its lease
         ch["kind"] = ch["kind"].lower()
+        ch["client_id"] = norm_client_id(ch["client_id"])
     ch.update({f: _flag(getattr(r, f)) for f in _BOOL_FIELDS[t]})
     ch.update({f: _int(getattr(r, f)) for f in _OPT_INT_FIELDS[t]})
     return r if all(getattr(r, f) == v and type(getattr(r, f)) is type(v) for f, v in ch.items()) else replace(r, **ch)
@@ -232,6 +255,7 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     bool() or str method raises). A record with a
     valid MAC but a wrong-typed field is kept with its fields coerced (str fields: None -> "", else str() with lone
     surrogates replaced, tab/line breaks as spaces and control/bidi characters removed, then .strip() except ssid/ap/alias; kind lower-cased;
+    client_id in its normal form (norm_client_id);
     flags -> bool, text by the config words; observed_at -> int or 0; vlan/signal -> int in int64 range or None).
     Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
     dropped = 0
@@ -294,7 +318,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         if cur is None:
             rows[mac] = {**ROW_DEFAULTS, "mac": mac, "first_seen": now, "baseline": int(state.first_run), "last_seen": now,
                          "last_online": now if m.online else None, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor,
-                         "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online)}
+                         "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online),
+                         "client_id": m.client_id}
             res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type}))
             if not state.first_run:
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
@@ -337,7 +362,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= grace)
         cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                    hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
-                   iface=iface, lease_type=lease_type, sources=sources, online=int(online))
+                   iface=iface, lease_type=lease_type, sources=sources, online=int(online),
+                   client_id=m.client_id or cur["client_id"])
     _apply_attachments(rows, merged, batches, ok, state, res)
     # only MACs with a device row: a switch FDB lists MACs no sighting ever named, which would leave orphan rows
     for n, b in ok.items():

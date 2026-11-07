@@ -51,6 +51,7 @@ class Sighting:
     source: str        # "dhcp" | "arp"
     lease_type: str    # "dynamic" | "static" | "" (arp only)
     online: bool
+    client_id: str = ""  # as the server sends it (ISC: already hex); connectors.merge.norm_client_id normalises it
 
 
 def _reserved(v: Any) -> bool:
@@ -66,14 +67,40 @@ def norm_mac(mac: str) -> str:
     return mac if MAC_RE.match(mac) else ""
 
 
+def isc_uid(text: str) -> str:
+    """dhcpd's lease-file uid (the text between the quotes, with C escapes: \\001 octal, \\" and \\\\) as lowercase hex;
+    "" when it is malformed or shorter than 2 bytes. OPNsense's parser splits on whitespace, so a uid with a space
+    or \\" may arrive cut short; it is taken as it comes."""
+    out = bytearray()
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            octal = re.match(r"[0-7]{3}", text[i + 1:i + 4])
+            if octal and int(octal.group(), 8) <= 0xFF:
+                out.append(int(octal.group(), 8))
+                i += 4
+                continue
+            if i + 1 >= len(text) or text[i + 1] not in "\\\"":
+                return ""
+            ch = text[i + 1]
+            i += 1
+        if ord(ch) > 0x7E or ord(ch) < 0x20:  # dhcpd escapes every non-printable byte
+            return ""
+        out.append(ord(ch))
+        i += 1
+    return out.hex() if len(out) >= 2 else ""
+
+
 def isc_leases(rows: list[dict]) -> list[dict]:
     """ISC DHCPv4 rows (/api/dhcpv4/leases/searchLease), active leases only, in the common shape:
-    mac, address, hostname, man, if, if_descr, type ("dynamic"/"static"), status ("online"/...)."""
+    mac, address, hostname, man, if, if_descr, type ("dynamic"/"static"), status ("online"/...), client_id (hex)."""
     out = []
     for l in rows:
         if not isinstance(l, dict) or l.get("state") not in (None, "", "active"):
             continue
-        out.append({**l, "hostname": _s(l.get("hostname")) or _s(l.get("client-hostname"))})
+        out.append({**l, "hostname": _s(l.get("hostname")) or _s(l.get("client-hostname")),
+                    "client_id": isc_uid(_s(l.get("uid")))})
     return out
 
 
@@ -95,16 +122,14 @@ def kea_leases(rows: list[dict]) -> list[dict]:
             "mac": _s(l.get("hwaddr")) or _s(l.get("mac")), "address": _s(l.get("address")),
             "hostname": _s(l.get("hostname")).rstrip("."), "man": _s(l.get("mac_info")) or _s(l.get("man")),
             "if": _s(l.get("if_name")) or _s(l.get("if")), "if_descr": _s(l.get("if_descr")), "if_dev": _s(l.get("if")),
-            "type": lease_type, "status": "",
+            "type": lease_type, "status": "", "client_id": _s(l.get("client_id")),
         })
     return out
 
 
 def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
     """dnsmasq rows (/api/dnsmasq/leases/search) in the common shape. They use the Kea key names but have no "state"
-    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname, and include IPv6 leases, which leasewatch does not track. Their client id
-    ("*" when empty too) is not read: kea_leases keeps no client id, as Sighting.client_id is not used by this
-    backend. As in the contrib dnsmasq_leases connector, skipped: a hardware address with a type prefix
+    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname and client id, and include IPv6 leases, which leasewatch does not track. As in the contrib dnsmasq_leases connector, skipped: a hardware address with a type prefix
     ("<type>-<bytes>": not Ethernet, or empty; norm_mac would turn a 5-byte one into a fake MAC) and a lease whose
     "expire" is not 0 (infinite) and not after `now` (dnsmasq prunes it only later)."""
     out = []
@@ -117,7 +142,7 @@ def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
             expire = 0
         if expire and expire <= now:
             continue
-        out.append({**l, "hostname": ""} if _s(l.get("hostname")) == "*" else l)
+        out.append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
     return kea_leases(out)
 
 
@@ -305,7 +330,7 @@ class Fw1Client:
                 vendor=_s(l.get("man")),
                 vlan=_s(l.get("if_descr")) or _s(l.get("if")), iface=_s(l.get("if")),
                 source="dhcp", lease_type=lease_type,
-                online=l.get("status") == "online",
+                online=l.get("status") == "online", client_id=_s(l.get("client_id")),
             ))
         for a in arp:
             if not isinstance(a, dict):
