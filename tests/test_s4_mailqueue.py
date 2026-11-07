@@ -21,7 +21,7 @@ UA2 = "00:00:5e:00:53:02"
 PRIV = "06:00:00:00:20:01"
 
 
-def down(cfg, devs):
+def down(cfg, devs, backoff=None):
     raise RuntimeError("mailgun down")
 
 
@@ -30,7 +30,7 @@ class MailQueueTests(Base):
         super().setUp()
         self.sent = []
 
-    def ok(self, cfg, devs):
+    def ok(self, cfg, devs, backoff=None):
         self.sent.append([d["mac"] for d in devs])
 
     def baseline(self, env=MAIL):
@@ -124,7 +124,7 @@ class MailQueueTests(Base):
             col.run_once()
         self.client.rows[-1] = arp(UA1, "10.0.0.7")
         got = []
-        with mock.patch.object(notify, "new_devices", lambda cfg, devs: got.extend(devs)):
+        with mock.patch.object(notify, "new_devices", lambda cfg, devs, backoff=None: got.extend(devs)):
             col.run_once()
         self.assertEqual([(d["mac"], d["ip"]) for d in got], [(UA1, "10.0.0.7")])
 

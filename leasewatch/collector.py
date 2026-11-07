@@ -124,6 +124,9 @@ class Collector:
         self._closed = False
         self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
         self._poll_fails = 0  # failed polls in the current spell
+        self._mail_backoff = notify.Backoff(cfg.poll_seconds)  # per channel wait after a failed send (this process only)
+        self._mail_error: str | None = None  # the last "mail failed" text logged as a warning, until a send works
+        self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         for spec in specs:
@@ -424,7 +427,8 @@ class Collector:
         """Mail the queued new devices (devices.mail_queued), up to MAIL_BATCH per mail, oldest first.
 
         The batch goes to every channel; the queue is cleared when at least one delivered (owner answer S5 Q3: a
-        channel that failed misses that batch, logged by notify), and kept when all failed.
+        channel that failed or waits out its backoff misses that batch, logged by notify), and kept when all failed
+        or wait. A channel in backoff is not called, so a dead server does not delay the poll.
         Delivery is at-least-once: if the mail goes out and the UPDATE that clears the queue fails (or the process
         dies in between), the same devices are mailed again at the next poll."""
         if not self.cfg.mail_enabled:
@@ -445,15 +449,38 @@ class Collector:
         if not rows:
             return
         try:
-            notify.new_devices(self.cfg, rows)
-        except Exception as e:  # never let mail break the collector; the queue is kept for the next poll
-            log.warning("mail failed (%d device(s) queued): %s", len(rows), e)
+            notify.new_devices(self.cfg, rows, backoff=self._mail_backoff)
+        except notify.NotifyDeferred:  # no channel was called: nothing new to say, the queue stays
+            log.debug("mail deferred (%d device(s) queued): every channel is in backoff", len(rows))
+            self._write_notify_state()
             return
+        except Exception as e:  # never let mail break the collector; the queue is kept for the next poll
+            # the same text again and again would fill the log: the channels' own spell warnings say the rest
+            text = str(e)
+            log.log(logging.WARNING if text != self._mail_error else logging.DEBUG,
+                    "mail failed (%d device(s) queued): %s", len(rows), text)
+            self._mail_error = text
+            self._write_notify_state()
+            return
+        self._mail_error = None
+        self._write_notify_state()
         macs = [r["mac"] for r in rows]
         try:
             self.db.q(f"UPDATE devices SET mail_queued=NULL WHERE mac IN ({','.join('?' * len(macs))})", tuple(macs))
         except sqlite3.Error as e:  # mailed again at the next poll (at-least-once)
             log.warning("mail sent but the queue was not cleared (%d device(s) will be mailed again): %s", len(macs), e)
+
+    def _write_notify_state(self) -> None:
+        """notify.<channel>.ok (1/0) in the meta table, written only when it changed."""
+        for name, ok in self._mail_backoff.states().items():
+            if self._notify_ok.get(name) == ok:
+                continue
+            try:
+                self.db.set_meta(f"notify.{name}.ok", "1" if ok else "0")
+            except sqlite3.Error as e:  # written again at the next change of state
+                log.debug("cannot record notify.%s.ok: %s", name, e)
+                continue
+            self._notify_ok[name] = ok
 
     def run_once(self) -> dict:
         t0 = time.time()

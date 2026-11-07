@@ -203,7 +203,7 @@ class MailRetryTests(Base):
         db.q("INSERT INTO devices(mac,first_seen,last_seen,ip,vlan,lease_type,mail_queued) VALUES(?,?,?,?,?,?,?)",
              ("02:00:00:00:00:03", now, now, "10.0.0.9", "LAN", "dynamic", now))
         sent = []
-        with mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append(devs)):
+        with mock.patch.object(notify, "new_devices", lambda cfg, devs, backoff=None: sent.append(devs)):
             col._notify()
         self.assertEqual([(d["mac"], d["ip"]) for d in sent[0]],
                          [("02:00:00:00:00:02", "10.0.0.13"), ("02:00:00:00:00:03", "10.0.0.9")])
@@ -236,7 +236,7 @@ class Round2Tests(Base):
         db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)",
              ("02:00:00:00:00:03", now, now, now))
         sent = []
-        with mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append([d["mac"] for d in devs])):
+        with mock.patch.object(notify, "new_devices", lambda cfg, devs, backoff=None: sent.append([d["mac"] for d in devs])):
             with mock.patch.object(db, "tx", side_effect=sqlite3.OperationalError("database is locked")), \
                     self.assertLogs("leasewatch.collector", "WARNING"):
                 col._notify()
@@ -400,7 +400,7 @@ class BaselineWaitTests(Base):
         raise ConnectorError("timeout")
 
     def poll(self, col: Collector, sent: list) -> dict:
-        with mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append([d["mac"] for d in devs])):
+        with mock.patch.object(notify, "new_devices", lambda cfg, devs, backoff=None: sent.append([d["mac"] for d in devs])):
             return col.run_once()
 
     def baselines(self, db) -> dict:

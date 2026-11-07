@@ -344,7 +344,7 @@ class ReviewFixTests(unittest.TestCase):
         c.sightings_data.append(S("00:00:5e:00:53:01", "10.0.0.5"))  # a hardware MAC: a private one is never mailed
         orig = notify.new_devices
         tried = []
-        notify.new_devices = lambda cfg, devs: (tried.append(len(devs)), (_ for _ in ()).throw(RuntimeError("mailgun down")))
+        notify.new_devices = lambda cfg, devs, backoff=None: (tried.append(len(devs)), (_ for _ in ()).throw(RuntimeError("mailgun down")))
         try:
             with self.assertLogs("leasewatch.collector", "WARNING") as logs:
                 col.run_once()

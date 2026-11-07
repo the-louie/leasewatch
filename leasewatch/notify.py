@@ -44,6 +44,10 @@ class NotifyError(Exception):
 MailError = NotifyError  # the 1.1 name
 
 
+class NotifyDeferred(NotifyError):
+    """Every channel is waiting out its backoff: nothing was called, the queue stays."""
+
+
 class MailgunError(NotifyError):
     pass
 
@@ -344,9 +348,66 @@ def channels(cfg: Config) -> list[Channel]:
     return [_CHANNELS[n](cfg) for n in cfg.mail_channels]
 
 
-def new_devices(cfg: Config, devices: list[dict]) -> list[str]:
+BACKOFF_CAP = 1800  # seconds: the longest wait between two attempts on a failing channel
+
+
+@dataclass
+class _ChannelState:
+    fails: int = 0  # consecutive failed attempts
+    retry_at: float = 0.0  # monotonic time of the next attempt
+    since: float | None = None  # wall time of the first failure of the spell
+    last_error: str = ""
+    ok: bool | None = None  # None until the channel was tried
+
+
+class Backoff:
+    """Per channel wait after a failure: base * 2^(k-1) seconds after the k-th failure in a row, at most BACKOFF_CAP.
+
+    A channel that waits is not called, so a dead server costs no timeout on the collector thread. The state lives in
+    one process: a restart tries every channel at once. Used from the collector thread only."""
+
+    def __init__(self, base: float = 120, clock: Callable[[], float] = time.monotonic,
+                 wall: Callable[[], float] = time.time):
+        self.base = max(float(base), 1.0)
+        self._clock = clock
+        self._wall = wall
+        self._state: dict[str, _ChannelState] = {}
+
+    def _get(self, name: str) -> _ChannelState:
+        return self._state.setdefault(name, _ChannelState())
+
+    def due(self, name: str) -> bool:
+        return self._clock() >= self._get(name).retry_at
+
+    def failed(self, name: str, error: object) -> bool:
+        """Record a failed attempt; True when it is the first of a spell (the one to log as a warning)."""
+        st = self._get(name)
+        st.fails += 1
+        st.ok = False
+        st.last_error = str(error)
+        st.retry_at = self._clock() + min(self.base * 2 ** min(st.fails - 1, 30), BACKOFF_CAP)
+        if st.fails == 1:
+            st.since = self._wall()
+        return st.fails == 1
+
+    def delivered(self, name: str) -> int:
+        """Record a delivery; return how many attempts of the spell that ends now had failed (0: no spell)."""
+        st = self._get(name)
+        n = st.fails
+        st.fails, st.retry_at, st.since, st.last_error, st.ok = 0, 0.0, None, "", True
+        return n
+
+    def states(self) -> dict[str, bool]:
+        """Channel -> last attempt delivered, for the channels tried so far."""
+        return {n: st.ok for n, st in self._state.items() if st.ok is not None}
+
+
+def new_devices(cfg: Config, devices: list[dict], backoff: Backoff | None = None) -> list[str]:
     """Send one message through every channel; return the names that delivered. Raises NotifyError when none did
-    (the caller keeps the queue then); a channel that failed while another delivered is logged here."""
+    (the caller keeps the queue then); a channel that failed while another delivered is logged here.
+
+    With a backoff, a channel that waits out its backoff is not called and counts as failed for this batch (it misses
+    it, as a channel that failed). When every channel waits, NotifyDeferred is raised and nothing was called."""
     msg = build_message(cfg, devices)
     chans = channels(cfg)
     if not chans:
@@ -354,9 +415,15 @@ def new_devices(cfg: Config, devices: list[dict]) -> list[str]:
     ok: list[str] = []
     errors: list[tuple[str, Exception]] = []
     for ch in chans:
+        if backoff is not None and not backoff.due(ch.name):
+            continue
         try:
             ch.send(msg)
             ok.append(ch.name)
+            if backoff is not None:
+                again = backoff.delivered(ch.name)
+                if again:
+                    log.info("%s delivers again after %d failed attempt(s)", ch.name, again)
         except NotifyError as e:
             errors.append((ch.name, e))
         except Exception as e:  # a bug in one channel must not cost the others their delivery
@@ -373,12 +440,21 @@ def new_devices(cfg: Config, devices: list[dict]) -> list[str]:
                                 for f in traceback.extract_tb(e.__traceback__))
                 log.error("%s failed unexpectedly: %s\nTraceback (most recent call last):%s", ch.name,
                           type(e).__name__, redact(stack))
+    n = len(devices)
+    if backoff is not None:
+        for name, e in errors:
+            if backoff.failed(name, e):
+                log.warning("%s failed (%d device(s)): %s; retrying with backoff up to %d min", name, n, e,
+                            BACKOFF_CAP // 60)
+            else:
+                log.debug("%s failed again (%d device(s)): %s", name, n, e)
     if not ok:
+        if not errors:
+            raise NotifyDeferred("every channel is waiting out its backoff")
         if len(errors) == 1:
             raise errors[0][1]
         raise NotifyError("; ".join(str(e) for _, e in errors))
-    n = len(devices)
-    for name, e in errors:
+    for name, e in errors if backoff is None else ():
         log.warning("%s failed (%d device(s)): %s", name, n, e)
     # a count only: the subject carries hostname, IP and network, which do not belong in the logs
     log.info("mail sent: %d new device%s (%s)", n, "s" if n != 1 else "", ", ".join(ok))
