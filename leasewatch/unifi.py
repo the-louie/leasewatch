@@ -1,15 +1,23 @@
-"""Wi-Fi details per MAC from a self-hosted UniFi Network controller (classic session API, read-only user).
+"""Wi-Fi details per MAC from a UniFi Network controller (read-only user): a self-hosted classic controller or a
+UniFi OS console (UDM, UCG, Cloud Key Gen2+ on UniFi OS, UniFi OS Server), where the same API sits under
+/proxy/network.
 
 GET /api/s/<site>/stat/sta gives every active client: ap_mac, essid, channel, radio, signal, is_wired,
 and the operator-set alias ("name"). /stat/device maps ap_mac to the AP's name.
+
+The login session is kept between polls; a 401 on a reused session logs in once more and retries once.
 """
 from __future__ import annotations
 
+import base64
 import http.client
 import http.cookiejar
 import json
 import logging
+import re
 import ssl
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -21,6 +29,28 @@ if TYPE_CHECKING:  # only for the annotation: connectors.unifi imports this modu
     from .connectors.unifi import _UnifiCfg
 
 log = logging.getLogger("leasewatch.unifi")
+
+TIMEOUT = 20            # seconds per request (module level so tests can shorten it)
+LOGOUT_TIMEOUT = 5
+RELOGIN_INTERVAL = 60   # at most one login per this many seconds after a successful one (as aiounifi)
+_monotonic = time.monotonic  # module level so tests can drive the re-login pacing
+# a classic controller's start page on newer standalone builds (older ones redirect / to /manage)
+_MANAGE_RE = re.compile(rb"""<base\s+href=["']/manage/["']""", re.IGNORECASE)
+
+
+class _LoginRequired(Exception):
+    """A read answered 401 (or LoginRequired): the session is gone."""
+
+
+def _jwt_csrf(token: str) -> str:
+    """The csrfToken claim of a UniFi OS TOKEN cookie, or "" for anything unexpected. Nothing else is kept."""
+    try:
+        part = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        v = claims.get("csrfToken") if isinstance(claims, dict) else None
+    except (IndexError, ValueError, UnicodeDecodeError, RecursionError):  # binascii.Error is a ValueError
+        return ""
+    return v if isinstance(v, str) else ""
 
 
 @dataclass
@@ -74,30 +104,124 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
 
 
 class UnifiClient:
+    """One controller session, kept across clients() calls. State (all guarded by _lock, since an abandoned poll
+    thread may still run while check() or close() uses the same client):
+    _op: the opener holding the session cookie jar, None = no session; _os: the session is a UniFi OS one;
+    _csrf: the UniFi OS CSRF token (a secret: never logged); _last_login: monotonic time of the last successful
+    login, for the re-login pacing."""
+
     def __init__(self, cfg: _UnifiCfg):
         self.cfg = cfg
         self._ctx = ssl.create_default_context()
         if not cfg.unifi_verify_tls:
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
+        self._op: urllib.request.OpenerDirector | None = None
+        self._os = False
+        self._csrf = ""
+        self._last_login: float | None = None
+        self._lock = threading.Lock()
 
-    def _opener(self):
+    def _opener(self) -> urllib.request.OpenerDirector:
         cj = http.cookiejar.CookieJar()
-        # no redirects: a 3xx on /api/login would carry the password to wherever it points
+        # no redirects: a 3xx on the login would carry the password to wherever it points
         handlers = [urllib.request.HTTPCookieProcessor(cj), urllib.request.HTTPSHandler(context=self._ctx), _NoRedirect()]
         if not self.cfg.lan_proxy:  # the controller is on the LAN: ignore http(s)_proxy unless the instance's proxy setting is set
             handlers.append(urllib.request.ProxyHandler({}))
-        return urllib.request.build_opener(*handlers)
+        op = urllib.request.build_opener(*handlers)
+        op.cookiejar = cj  # type: ignore[attr-defined]  # kept on the opener: the UniFi OS CSRF fallback reads TOKEN
+        return op
 
-    def _get(self, op, path: str) -> list[dict]:
-        with op.open(urllib.request.Request(self.cfg.unifi_url + path, headers={"Accept": "application/json"}), timeout=20) as r:
-            raw = r.read(MAX_BODY + 1)
+    def _open(self, op: urllib.request.OpenerDirector, path: str, data: bytes | None = None,
+              headers: dict[str, str] | None = None, timeout: float | None = None, limit: int = MAX_BODY + 1) -> bytes:
+        """One request; on UniFi OS it carries X-CSRF-Token and takes a rotated token from the reply."""
+        h = dict(headers or {})
+        if self._os and self._csrf:
+            h["X-CSRF-Token"] = self._csrf
+        req = urllib.request.Request(self.cfg.unifi_url + path, data=data, headers=h, method="POST" if data is not None else "GET")
+        try:
+            with op.open(req, timeout=TIMEOUT if timeout is None else timeout) as r:
+                self._rotate(r.headers)
+                return r.read(limit)
+        except urllib.error.HTTPError as e:
+            self._rotate(e.headers)
+            raise
+
+    def _rotate(self, headers: object) -> None:
+        new = headers.get("X-Updated-CSRF-Token") if headers is not None else None  # type: ignore[attr-defined]
+        if self._os and new:  # email.message headers: the lookup is case-insensitive
+            self._csrf = new
+
+    def _detect(self, op: urllib.request.OpenerDirector) -> bool:
+        """True for a UniFi OS console: GET / answers 200 with a page that is not the classic /manage app."""
+        try:
+            with op.open(urllib.request.Request(self.cfg.unifi_url + "/", headers={"Accept": "text/html"}), timeout=TIMEOUT) as r:
+                status, body = r.status, r.read(64 * 1024)
+        except urllib.error.HTTPError as e:
+            e.close()
+            if 300 <= e.code < 400:  # the classic controller sends / to /manage
+                return False
+            raise RuntimeError(f"unifi: cannot detect the controller type (HTTP {e.code}); set PLATFORM") from e
+        if status != 200:
+            raise RuntimeError(f"unifi: cannot detect the controller type (HTTP {status}); set PLATFORM")
+        return not _MANAGE_RE.search(body)
+
+    def _login(self) -> None:
+        """A fresh session on a fresh cookie jar; sets _op only when the login succeeded."""
+        now = _monotonic()
+        if self._last_login is not None and now - self._last_login < RELOGIN_INTERVAL:
+            raise RuntimeError("unifi: session expired, re-login deferred")
+        if self._last_login is not None:
+            log.info("unifi: session expired, logging in again")
+        op = self._opener()
+        platform = self.cfg.platform
+        self._os = self._detect(op) if platform == "auto" else platform == "unifi_os"
+        self._csrf = ""
+        path = "/api/auth/login" if self._os else "/api/login"
+        creds = {"username": self.cfg.unifi_user, "password": self.cfg.unifi_password}
+        creds["rememberMe" if self._os else "remember"] = True  # lifetime effect unverified; harmless
+        try:
+            with op.open(urllib.request.Request(self.cfg.unifi_url + path, data=json.dumps(creds).encode(),
+                                                headers={"Content-Type": "application/json"}), timeout=TIMEOUT) as r:
+                r.read(MAX_BODY + 1)
+                csrf = r.headers.get("X-CSRF-Token") or ""
+        except urllib.error.HTTPError as e:
+            e.close()
+            if 300 <= e.code < 400:
+                raise RuntimeError(f"unifi: HTTP {e.code}") from e
+            if e.code == 429:
+                raise RuntimeError("unifi: login rate-limited (HTTP 429)") from e
+            hint = "; check PLATFORM" if e.code == 404 else ""  # the other platform's login path does not exist
+            raise RuntimeError(f"unifi: login failed (HTTP {e.code}){hint}") from e
+        if self._os and not csrf:
+            token = next((c.value for c in op.cookiejar if c.name == "TOKEN"), "")  # type: ignore[attr-defined]
+            csrf = _jwt_csrf(token or "")
+        self._csrf = csrf if self._os else ""
+        self._op, self._last_login = op, now
+
+    def _drop(self) -> None:
+        self._op, self._csrf = None, ""
+
+    def _get(self, op: urllib.request.OpenerDirector, path: str) -> list[dict]:
+        prefix = "/proxy/network" if self._os else ""
+        try:
+            raw = self._open(op, prefix + path, headers={"Accept": "application/json"})
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                e.close()
+                raise _LoginRequired from e
+            if e.code == 403 and self._os:
+                e.close()
+                raise RuntimeError("unifi: HTTP 403 (user lacks Network access?)") from e
+            raise
         if len(raw) > MAX_BODY:
             raise RuntimeError("unifi: response too large")
         body = json.loads(raw.decode())
         if not isinstance(body, dict):
             raise RuntimeError("unifi: unexpected response shape")
         meta = body.get("meta")
+        if isinstance(meta, dict) and meta.get("rc") == "error" and meta.get("msg") == "api.err.LoginRequired":
+            raise _LoginRequired
         if isinstance(meta, dict) and "rc" in meta and meta["rc"] != "ok":
             raise RuntimeError(f"unifi: {meta.get('msg') or 'api error'}")
         data = body.get("data", [])
@@ -105,27 +229,55 @@ class UnifiClient:
             raise RuntimeError("unifi: unexpected response shape")
         return data
 
-    def clients(self) -> dict[str, WifiInfo]:
-        """Blocking. Raises on failure."""
-        op = self._opener()
+    def _read(self) -> dict[str, WifiInfo]:
+        op = self._op
+        assert op is not None
+        site = self.cfg.unifi_site
+        sta = self._get(op, f"/api/s/{site}/stat/sta")
+        devices = self._get(op, f"/api/s/{site}/stat/device")
+        return parse_clients(sta, devices)
+
+    def _clients(self) -> dict[str, WifiInfo]:
+        fresh = self._op is None
+        if fresh:
+            self._login()
         try:
-            body = json.dumps({"username": self.cfg.unifi_user, "password": self.cfg.unifi_password}).encode()
-            with op.open(urllib.request.Request(self.cfg.unifi_url + "/api/login", data=body, headers={"Content-Type": "application/json"}), timeout=20) as r:
-                r.read()
-            site = self.cfg.unifi_site
-            sta = self._get(op, f"/api/s/{site}/stat/sta")
-            devices = self._get(op, f"/api/s/{site}/stat/device")
-            return parse_clients(sta, devices)
-        except urllib.error.HTTPError as e:
-            e.close()  # the error carries the open response; release its socket
-            raise RuntimeError(f"unifi: HTTP {e.code}") from e
-        except (urllib.error.URLError, TimeoutError, ssl.SSLError, json.JSONDecodeError, OSError) as e:
-            raise RuntimeError(f"unifi: {e}") from e
-        except (TypeError, AttributeError, ValueError, OverflowError, RecursionError, http.client.HTTPException) as e:
-            # no exception text: an InvalidURL/ValueError can echo the URL, credentials included
-            raise RuntimeError("unifi: unexpected response") from e
-        finally:
+            return self._read()
+        except _LoginRequired:
+            self._drop()
+            if fresh:  # a 401 right after a login is an error, not a reason to loop
+                raise RuntimeError("unifi: HTTP 401") from None
+        self._login()  # the reused session expired: once more, then one retry
+        try:
+            return self._read()
+        except _LoginRequired:
+            self._drop()
+            raise RuntimeError("unifi: HTTP 401") from None
+
+    def clients(self) -> dict[str, WifiInfo]:
+        """Blocking. Raises RuntimeError on failure; any error but a 401 keeps the session."""
+        with self._lock:
             try:
-                op.open(urllib.request.Request(self.cfg.unifi_url + "/api/logout", data=b"", method="POST"), timeout=10).read()
-            except Exception:
-                pass
+                return self._clients()
+            except urllib.error.HTTPError as e:
+                e.close()  # the error carries the open response; release its socket
+                raise RuntimeError(f"unifi: HTTP {e.code}") from e
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError, json.JSONDecodeError, OSError) as e:
+                raise RuntimeError(f"unifi: {e}") from e
+            except (TypeError, AttributeError, ValueError, OverflowError, RecursionError, http.client.HTTPException) as e:
+                # no exception text: an InvalidURL/ValueError can echo the URL, credentials included
+                raise RuntimeError("unifi: unexpected response") from e
+
+    def close(self) -> None:
+        """Log out (best effort, errors ignored) and forget the session; the next clients() logs in again."""
+        with self._lock:
+            op = self._op
+            if op is not None:
+                try:
+                    self._open(op, "/api/auth/logout" if self._os else "/api/logout", data=b"", timeout=LOGOUT_TIMEOUT, limit=4096)
+                except urllib.error.HTTPError as e:
+                    e.close()
+                except Exception:
+                    pass
+            self._drop()
+            self._last_login = None  # a deliberate logout: the next login is not a re-login

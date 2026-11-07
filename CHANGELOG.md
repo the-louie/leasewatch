@@ -5,6 +5,8 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## 1.2.0 (unreleased)
 
 ### Added
+- UniFi connector keeps its login session between polls and logs in again only when the session expires; logout happens on close.
+- UniFi OS consoles supported (new PLATFORM setting: auto, classic, unifi_os; untested on hardware). UniFi connector version 1.1.
 
 - **Third-party connectors:** connector types are loaded from installed packages (entry point group `leasewatch.connectors.v1`) and from `LW_CONNECTORS_DIR` (no default; one package per subdirectory with its `pyproject.toml`, mounted read-only). A duplicate type name is refused (a built-in type always stays); a package that fails to load stops the start only when an instance uses its type. The start log lists the loaded types and their origin. A `<KEY>_FILE` secret of a third-party type is now read like a built-in one.
 - **docs/connectors.md:** how to write a connector for connector API 1: the lifecycle, the records and how they are merged, settings, errors and secrets, the public names, packaging, installing, loading and versioning rules, the contract tests, and a complete example package.

@@ -1,4 +1,4 @@
-"""A self-hosted UniFi Network controller as a connector: Wi-Fi SSID/AP/signal per client, or "wired" for a
+"""A UniFi Network controller (self-hosted, or a UniFi OS console) as a connector: Wi-Fi SSID/AP/signal per client, or "wired" for a
 client the controller sees on a cable. A thin wrapper around unifi.UnifiClient (read-only user).
 """
 from __future__ import annotations
@@ -20,6 +20,7 @@ class _UnifiCfg:
     unifi_password: str = field(repr=False)
     unifi_verify_tls: bool = True
     lan_proxy: bool = False
+    platform: str = "classic"  # "auto", "classic" or "unifi_os"; the connector always passes its PLATFORM setting
 
 
 def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> list[Attachment]:
@@ -33,7 +34,7 @@ def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> 
 
 class UnifiConnector(SettingsMixin):
     INFO = ConnectorInfo(
-        type="unifi", version="1.0", api_version=API_VERSION, produces=frozenset({"attachment"}),
+        type="unifi", version="1.1", api_version=API_VERSION, produces=frozenset({"attachment"}),
         roles=frozenset({"controller"}),
         settings=(
             Setting("url", required=True, help="https://<controller>"),
@@ -42,6 +43,8 @@ class UnifiConnector(SettingsMixin):
             Setting("password", required=True, secret=True, help="its password"),
             Setting("verify_tls", default="1", help="check the controller's certificate"),
             Setting("proxy", default="0", help="honour http(s)_proxy for this connection"),
+            Setting("platform", default="auto", choices=("auto", "classic", "unifi_os"),
+                    help="auto = detect; classic = self-hosted Network app; unifi_os = UDM/UCG/UniFi OS console"),
         ),
     )
 
@@ -52,7 +55,8 @@ class UnifiConnector(SettingsMixin):
         verify = parse_bool(s["verify_tls"])
         # read at call time: the host (and tests) may swap the client object
         self.client = client if client is not None else UnifiClient(_UnifiCfg(s["url"], s["site"], s["user"], s["password"],  # type: ignore[arg-type]
-                                                                                  True if verify is None else verify, bool(parse_bool(s["proxy"]))))
+                                                                                  True if verify is None else verify, bool(parse_bool(s["proxy"])),
+                                                                                  s["platform"]))
 
     def validate(self) -> list[str]:
         problems = self._generic_problems()
@@ -65,7 +69,7 @@ class UnifiConnector(SettingsMixin):
 
     def check(self) -> None:
         try:
-            self.client.clients()  # login, two reads, logout: the smallest call the classic API offers
+            self.client.clients()  # two reads on the kept session (login first if there is none)
         except ConnectorError:
             raise
         except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host
@@ -81,4 +85,6 @@ class UnifiConnector(SettingsMixin):
             raise ConnectorError(mask_url_host(str(e) or type(e).__name__, self.settings["url"])) from e
 
     def close(self) -> None:
-        pass  # each call logs in and out on its own opener
+        close = getattr(self.client, "close", None)  # a stand-in client (tests, host) may have none
+        if callable(close):
+            close()  # logs out of the kept session
