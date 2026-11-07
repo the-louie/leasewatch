@@ -118,8 +118,8 @@ def _detect_connector(args: object) -> tuple[object | None, list[str], str]:
                 return None, [], f"--host needs {flag} (the name of the environment variable that holds the key)"
             if not os.environ.get(var, "").strip():
                 return None, [], f"environment variable {var} (from {flag}) is not set or empty"
-        settings = {"host": args.host, "user": args.user, "auth": args.auth, "profile": args.profile or "",
-                    "profile_file": args.profile_file or "", "min_macs": "",
+        settings = {"host": args.host, "port": str(args.port), "user": args.user, "auth": args.auth, "priv": args.priv,
+                    "profile": args.profile or "", "profile_file": args.profile_file or "", "min_macs": "",
                     # keys come from the environment only: argv is visible to every user in the process list
                     "auth_key": os.environ.get(args.auth_key_env, "").strip(),
                     "priv_key": os.environ.get(args.priv_key_env, "").strip()}
@@ -165,12 +165,15 @@ def _own_problems(cfg: Config, name: str, exclude: list[str]) -> list[str]:
 def snmp_detect_cmd(argv: list[str]) -> int:
     import argparse
     from . import snmp_profiles
+    from .switch import AUTH_NAMES, PRIV_NAMES
     ap = argparse.ArgumentParser(prog="python -m leasewatch snmp-detect",
                                  description="Show sysObjectID, sysDescr, the SNMP profile and the first rows of each walk.")
     ap.add_argument("instance", nargs="?", help="configured snmp_switch instance (LW_CONNECTORS)")
     ap.add_argument("--host", help="switch address, instead of a configured instance")
+    ap.add_argument("--port", type=int, default=161, help="SNMP UDP port (default 161)")
     ap.add_argument("--user", default="leasewatch")
-    ap.add_argument("--auth", default="SHA", choices=("SHA", "SHA256"))
+    ap.add_argument("--auth", default="SHA", choices=tuple(AUTH_NAMES), help="auth protocol (default SHA)")
+    ap.add_argument("--priv", default="AES", choices=tuple(PRIV_NAMES), help="privacy protocol (default AES = AES-128)")
     ap.add_argument("--auth-key-env", help="with --host: name of the environment variable with the auth key")
     ap.add_argument("--priv-key-env", help="with --host: name of the environment variable with the privacy key")
     ap.add_argument("--profile", help="built-in profile instead of detection")

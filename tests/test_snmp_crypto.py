@@ -1,5 +1,6 @@
 """AUTH and PRIV choices of snmp_switch: each one reaches UsmUserData as the pysnmp constant, under either spelling."""
 import asyncio, os, sys, types, unittest
+from unittest import mock
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -142,13 +143,23 @@ class CryptoChoices(unittest.TestCase):
         from leasewatch.__main__ import _detect_connector
         os.environ["TEST_AK"], os.environ["TEST_PK"] = "x" * 16, "y" * 16
         try:
-            args = SimpleNamespace(host="10.0.0.2", instance=None, user="leasewatch", auth="SHA256", profile=None, profile_file=None,
-                                   auth_key_env="TEST_AK", priv_key_env="TEST_PK")
+            args = SimpleNamespace(host="10.0.0.2", port=1161, instance=None, user="leasewatch", auth="SHA256", priv="AES256",
+                                   profile=None, profile_file=None, auth_key_env="TEST_AK", priv_key_env="TEST_PK")
             conn, problems, err = _detect_connector(args)
         finally:
             os.environ.pop("TEST_AK"), os.environ.pop("TEST_PK")
         self.assertEqual(err, "")
-        self.assertEqual((conn.client.cfg.snmp_auth, conn.client.cfg.snmp_priv), ("SHA256", "AES"))
+        self.assertEqual((conn.client.cfg.snmp_auth, conn.client.cfg.snmp_priv, conn.client.cfg.snmp_port), ("SHA256", "AES256", 1161))
+
+    def test_snmp_detect_flags_accept_every_protocol_name(self):
+        # the --host form offers the same names as an instance's AUTH and PRIV settings
+        from leasewatch.__main__ import snmp_detect_cmd
+        with mock.patch("leasewatch.__main__._pysnmp_problem", return_value="pysnmp not installed"), \
+                mock.patch("leasewatch.__main__._out"), mock.patch("sys.argv", ["x"]):
+            for auth, priv in (("SHA512", "AES192B"), ("SHA224", "AES256")):
+                self.assertEqual(snmp_detect_cmd(["--host", "10.0.0.2", "--port", "1161", "--auth", auth, "--priv", priv]), 1)
+            with self.assertRaises(SystemExit):
+                snmp_detect_cmd(["--host", "10.0.0.2", "--priv", "DES"])
 
 
 if __name__ == "__main__":
