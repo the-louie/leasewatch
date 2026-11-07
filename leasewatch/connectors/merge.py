@@ -494,15 +494,42 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     # (a switch or a controller lists no leases, so its failure does not count)
     lease_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
                       and (state.producers is None or n in state.producers) for n, b in batches.items())
+    # lease-blind: a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
+    # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
+    # the producers known: otherwise a failed switch would count and hide new devices for nothing
+    hold = lease_blind and state.producers is not None
+    raw, keys, new_aliases, folds, folded, prev = _decide_keys(ok, prev, state, hold, now)
+    held = _held_back(raw, keys, prev, state, hold, now)
+    ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
+    merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
+    grace_s = cfg.online_grace_minutes * 60
+    grace = now - grace_s
+    res = MergeResult(aliases=new_aliases + folds, folds=folds,
+                      alias_seen=sorted(m for m, k in keys.items() if k != m))
+    res.events += _merge_events(new_aliases, folds, folded, now)
+    rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
+    before = {mac: dict(r) for mac, r in rows.items()}
+    changes = _update_rows(rows, merged, cfg, state, now, lease_blind, grace_s, res)
+    _apply_attachments(rows, merged, batches, ok, state, res, att_macs)
+    res.seen += _seen_rows(ok, rows, now)
+    for row in rows.values():
+        # devices not seen on the wire for longer than the grace period go offline
+        if row["online"] and (row["last_online"] or 0) < grace:
+            row["online"] = 0
+    res.events += _auto_archive(rows, cfg, state, now)
+    _assemble(res, rows, before, merged, state, changes)
+    return res
+
+
+def _decide_keys(ok: dict[str, Batch], prev: dict[str, dict], state: MergeState, hold: bool, now: int
+                 ) -> tuple[dict[str, Merged], dict[str, str], list[tuple[str, str, str, str]],
+                            list[tuple[str, str, str, str]], dict[str, dict], dict[str, dict]]:
+    """(raw MAC -> record, raw MAC -> device key, new aliases, folds, folded rows, prev without the folded rows)."""
     # private MACs: decide each raw MAC's device key, then rewrite every record to it, so an alias's history,
     # events, seen rows and port land on its device and the ranking below chooses between both MACs' records
     raw = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
     present = {s.mac for b in ok.values() for s in b.sightings if s.presence}
     present |= {a.mac for b in ok.values() for a in b.attachments if a.present is True}
-    # lease-blind: a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
-    # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
-    # the producers known: otherwise a failed switch would count and hide new devices for nothing
-    hold = lease_blind and state.producers is not None
     limits: dict = {}
     keys, new_aliases = decide_aliases(raw, present, prev, state.aliases, state.first_run or hold, now, limits)
     folds = [] if state.first_run or hold else decide_folds(raw, present, prev, state.aliases, limits["hosts"], keys, now,
@@ -523,6 +550,12 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         state.undecided_since.pop(cand, None)
     if folded:  # no offline pass, prune or result row for a folded row
         prev = {mac: r for mac, r in prev.items() if mac not in folded}
+    return raw, keys, new_aliases, folds, folded, prev
+
+
+def _held_back(raw: dict[str, Merged], keys: dict[str, str], prev: dict[str, dict], state: MergeState, hold: bool,
+               now: int) -> set[str]:
+    """New private MACs held back undecided (no row) this poll; updates state.undecided_since in place."""
     held: set[str] = set()
     if hold and not state.first_run:
         for mac in raw:
@@ -533,29 +566,41 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             state.undecided_since.pop(mac, None)
     else:  # every lease producer answered: what was held is decided now (or no longer listed)
         state.undecided_since.clear()
+    return held
+
+
+def _rekey_batches(ok: dict[str, Batch], keys: dict[str, str], aliases: dict[str, str], held: set[str]
+                   ) -> tuple[dict[str, Batch], dict[str, list[str]]]:
+    """(the batches on device keys without the held MACs' sightings, the MAC each attachment was listed under).
+    Adds each attachment-only MAC to keys in place."""
     for b in ok.values():  # an attachment-only MAC (a switch FDB) follows a known alias too
         for a in b.attachments:
-            keys.setdefault(a.mac, state.aliases.get(a.mac, a.mac))
+            keys.setdefault(a.mac, aliases.get(a.mac, a.mac))
     # the MAC each attachment was listed under, so an alias's record and its device's compete by rank
     att_macs = {n: [a.mac for a in b.attachments] for n, b in ok.items()}
     ok = {n: _rekey(b, keys) for n, b in ok.items()}
     if held:
         ok = {n: Batch(sightings=[s for s in b.sightings if s.mac not in held], attachments=b.attachments,
                        stats=b.stats) for n, b in ok.items()}
-    merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
-    grace_s = cfg.online_grace_minutes * 60
-    grace = now - grace_s
-    res = MergeResult(aliases=new_aliases + folds, folds=folds,
-                      alias_seen=sorted(m for m, k in keys.items() if k != m))
+    return ok, att_macs
+
+
+def _merge_events(new_aliases: list[tuple[str, str, str, str]], folds: list[tuple[str, str, str, str]],
+                  folded: dict[str, dict], now: int) -> list[tuple[str, str, str]]:
+    """The `merged` event on the device for each new alias and each fold, in that order."""
     # a merge is no new device: no `new` event and no mail, only this event on the device
-    res.events += [(dev, "merged", f"{alias} (client-id)" if reason == "client-id" else f"{alias} (hostname {value})")
-                   for alias, dev, reason, value in new_aliases]
+    events = [(dev, "merged", f"{alias} (client-id)" if reason == "client-id" else f"{alias} (hostname {value})")
+              for alias, dev, reason, value in new_aliases]
     # a fold: the same event, saying how long the MAC had its own row
-    res.events += [(dev, "merged", f"{cand} (hostname {value}, own row for "
-                                   f"{max(0, now - folded[cand]['first_seen']) // 60} min)")
-                   for cand, dev, _, value in folds]
-    rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
-    before = {mac: dict(r) for mac, r in rows.items()}
+    events += [(dev, "merged", f"{cand} (hostname {value}, own row for "
+                               f"{max(0, now - folded[cand]['first_seen']) // 60} min)")
+               for cand, dev, _, value in folds]
+    return events
+
+
+def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, state: MergeState, now: int,
+                 lease_blind: bool, grace_s: int, res: MergeResult) -> int:
+    """Each merged device's row added or updated in place, with its events and history; returns the changed count."""
     changes = 0
     for mac, m in merged.items():
         sources = ",".join(sorted(m.sources))
@@ -570,59 +615,93 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
                 res.new.append(mac)
             continue
-        ev = []
-        if m.ip and m.ip != cur["ip"]:
-            ev.append(("ip", f"{cur['ip'] or '-'} -> {m.ip}"))
-        if m.hostname and m.hostname != cur["hostname"]:
-            ev.append(("hostname", f"{cur['hostname'] or '-'} -> {m.hostname}"))
-        if m.vlan and m.vlan != cur["vlan"]:
-            ev.append(("vlan", f"{cur['vlan'] or '-'} -> {m.vlan}"))
-        if m.lease_type and m.lease_type != cur["lease_type"]:
-            ev.append(("lease_type", f"{cur['lease_type'] or 'no DHCP'} -> {m.lease_type}"))
-        lease_type = m.lease_type or cur["lease_type"]
-        if m.lease_type:
+        changes += _update_row(mac, cur, m, sources, cfg, state, now, lease_blind, grace_s, res)
+    return changes
+
+
+def _change_events(cur: dict, m: Merged) -> list[tuple[str, str]]:
+    """(kind, detail) for each of ip, hostname, vlan and lease type that this poll's record changes."""
+    ev = []
+    if m.ip and m.ip != cur["ip"]:
+        ev.append(("ip", f"{cur['ip'] or '-'} -> {m.ip}"))
+    if m.hostname and m.hostname != cur["hostname"]:
+        ev.append(("hostname", f"{cur['hostname'] or '-'} -> {m.hostname}"))
+    if m.vlan and m.vlan != cur["vlan"]:
+        ev.append(("vlan", f"{cur['vlan'] or '-'} -> {m.vlan}"))
+    if m.lease_type and m.lease_type != cur["lease_type"]:
+        ev.append(("lease_type", f"{cur['lease_type'] or 'no DHCP'} -> {m.lease_type}"))
+    return ev
+
+
+def _settle_lease_type(mac: str, cur: dict, m: Merged, cfg: Config, state: MergeState, now: int, lease_blind: bool,
+                       grace_s: int, ev: list[tuple[str, str]]) -> str:
+    """The row's lease type after this poll by LEASE_TYPE_MODE; appends a `-> no DHCP` event to ev when it is dropped."""
+    lease_type = m.lease_type or cur["lease_type"]
+    if m.lease_type:
+        state.no_lease_since.pop(mac, None)
+    elif cur["lease_type"] and cfg.lease_type_mode != "keep" and not lease_blind:
+        since = state.no_lease_since.setdefault(mac, now)
+        if cfg.lease_type_mode == "immediate" or now - since >= grace_s:
+            lease_type = ""
             state.no_lease_since.pop(mac, None)
-        elif cur["lease_type"] and cfg.lease_type_mode != "keep" and not lease_blind:
-            since = state.no_lease_since.setdefault(mac, now)
-            if cfg.lease_type_mode == "immediate" or now - since >= grace_s:
-                lease_type = ""
-                state.no_lease_since.pop(mac, None)
-                ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
-        # a row made by a split has sources '' and split_from set until a poll lists it: its first listing fills the
-        # empty fields and writes the history row, but the fill is no change worth an event. Sources '' alone is no
-        # marker: a connector that emits kind "" is stored that way for good
-        fields_changed = bool(ev)
-        if not cur["sources"] and cur.get("split_from"):
-            ev = []
-        # archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
-        # archived device back to the list; this `back` replaces the ordinary one. One archived while still online
-        # stays archived until it has been offline
-        if cur["archived_ts"] is not None and m.online and not cur["online"]:
-            days = max(0, now - cur["archived_ts"]) // 86400
-            ev.append(("back", f"back from the archive (archived {days} day{'' if days == 1 else 's'} ago)"))
-            cur["archived_ts"] = None
-        # prev_ok: after a failed poll every device looks "away" for the outage, so "back" would be a false positive
-        elif m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and state.prev_ok:
-            days = (now - cur["last_online"]) // 86400
-            ev.append(("back", f"back after {days} day{'' if days == 1 else 's'}"))
-        res.events += [(mac, kind, detail) for kind, detail in ev]
-        # ip/vlan/iface come from one sighting (merge_sightings): when the device moved, an empty ip, vlan or iface is
-        # unknown at the new place, and the stored one would name the old place
-        # an unknown stored network becoming known is no move: the stored IP is still right
-        moved = (m.ip and m.ip != cur["ip"]) or (m.vlan and cur["vlan"] and m.vlan != cur["vlan"])
-        ip = m.ip if moved else m.ip or cur["ip"]
-        vlan, iface = (m.vlan, m.iface) if moved else (m.vlan or cur["vlan"], m.iface or cur["iface"])
-        if fields_changed or any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
-            res.history.append((mac, {"ip": ip, "hostname": m.hostname or cur["hostname"],
-                                      "vlan": vlan, "lease_type": lease_type}))
-            changes += 1
-        # not on the wire right now: stays online until the grace period after its last sighting has passed
-        online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= grace)
-        cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
-                   hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
-                   iface=iface, lease_type=lease_type, sources=sources, online=int(online),
-                   client_id=m.client_id or cur["client_id"], label=m.label)
-    _apply_attachments(rows, merged, batches, ok, state, res, att_macs)
+            ev.append(("lease_type", f"{cur['lease_type']} -> no DHCP"))
+    return lease_type
+
+
+def _back_event(cur: dict, m: Merged, now: int, prev_ok: bool) -> tuple[str, str] | None:
+    """The `back` event of a device online again after the archive or a day away; clears cur's archived_ts."""
+    # archive: online again (on the wire, not merely listed: a static lease is listed every poll) brings an
+    # archived device back to the list; this `back` replaces the ordinary one. One archived while still online
+    # stays archived until it has been offline
+    if cur["archived_ts"] is not None and m.online and not cur["online"]:
+        days = max(0, now - cur["archived_ts"]) // 86400
+        cur["archived_ts"] = None
+        return ("back", f"back from the archive (archived {days} day{'' if days == 1 else 's'} ago)")
+    # prev_ok: after a failed poll every device looks "away" for the outage, so "back" would be a false positive
+    if m.online and not cur["online"] and cur["last_online"] and now - cur["last_online"] > 86400 and prev_ok:
+        days = (now - cur["last_online"]) // 86400
+        return ("back", f"back after {days} day{'' if days == 1 else 's'}")
+    return None
+
+
+def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state: MergeState, now: int,
+                lease_blind: bool, grace_s: int, res: MergeResult) -> int:
+    """A known device's row updated in place from this poll's record; returns 1 when it writes a history row."""
+    ev = _change_events(cur, m)
+    lease_type = _settle_lease_type(mac, cur, m, cfg, state, now, lease_blind, grace_s, ev)
+    # a row made by a split has sources '' and split_from set until a poll lists it: its first listing fills the
+    # empty fields and writes the history row, but the fill is no change worth an event. Sources '' alone is no
+    # marker: a connector that emits kind "" is stored that way for good
+    fields_changed = bool(ev)
+    if not cur["sources"] and cur.get("split_from"):
+        ev = []
+    back = _back_event(cur, m, now, state.prev_ok)
+    if back is not None:
+        ev.append(back)
+    res.events += [(mac, kind, detail) for kind, detail in ev]
+    # ip/vlan/iface come from one sighting (merge_sightings): when the device moved, an empty ip, vlan or iface is
+    # unknown at the new place, and the stored one would name the old place
+    # an unknown stored network becoming known is no move: the stored IP is still right
+    moved = (m.ip and m.ip != cur["ip"]) or (m.vlan and cur["vlan"] and m.vlan != cur["vlan"])
+    ip = m.ip if moved else m.ip or cur["ip"]
+    vlan, iface = (m.vlan, m.iface) if moved else (m.vlan or cur["vlan"], m.iface or cur["iface"])
+    changed = 0
+    if fields_changed or any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
+        res.history.append((mac, {"ip": ip, "hostname": m.hostname or cur["hostname"],
+                                  "vlan": vlan, "lease_type": lease_type}))
+        changed = 1
+    # not on the wire right now: stays online until the grace period after its last sighting has passed
+    online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= now - grace_s)
+    cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
+               hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
+               iface=iface, lease_type=lease_type, sources=sources, online=int(online),
+               client_id=m.client_id or cur["client_id"], label=m.label)
+    return changed
+
+
+def _seen_rows(ok: dict[str, Batch], rows: dict[str, dict], now: int) -> list[tuple[str, str, int, int | None]]:
+    """(mac, instance, last_seen, last_present or None) for each MAC with a device row that an instance listed."""
+    seen: list[tuple[str, str, int, int | None]] = []
     # only MACs with a device row: a switch FDB lists MACs no sighting ever named, which would leave orphan rows
     for n, b in ok.items():
         listed: dict[str, bool] = {}
@@ -630,11 +709,13 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             listed[s.mac] = listed.get(s.mac, False) or s.presence
         for a in b.attachments:
             listed[a.mac] = listed.get(a.mac, False) or a.present is True
-        res.seen += [(mac, n, now, now if present else None) for mac, present in listed.items() if mac in rows]
-    for row in rows.values():
-        # devices not seen on the wire for longer than the grace period go offline
-        if row["online"] and (row["last_online"] or 0) < grace:
-            row["online"] = 0
+        seen += [(mac, n, now, now if present else None) for mac, present in listed.items() if mac in rows]
+    return seen
+
+
+def _auto_archive(rows: dict[str, dict], cfg: Config, state: MergeState, now: int) -> list[tuple[str, str, str]]:
+    """Archives (in place) each row PRUNE_DAYS prunes this poll; returns their `archived` events."""
+    events: list[tuple[str, str, str]] = []
     # PRUNE_DAYS: archive what has been offline that long and was never named or marked known; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
     if cfg.prune_days > 0 and not state.first_run:
@@ -646,7 +727,13 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
             if (row["archived_ts"] is None and not row["online"] and since < cutoff and not row["name"]
                     and not row["acked"] and state.restored.get(mac, 0) < since):
                 row["archived_ts"] = now
-                res.events.append((mac, "archived", f"auto: not online for {(ref - since) // 86400} days"))
+                events.append((mac, "archived", f"auto: not online for {(ref - since) // 86400} days"))
+    return events
+
+
+def _assemble(res: MergeResult, rows: dict[str, dict], before: dict[str, dict], merged: dict[str, Merged],
+              state: MergeState, changes: int) -> None:
+    """The result's first-run events and history, its rows (every merged or changed device) and its stats."""
     if state.first_run:
         # until the baseline is taken, a producer answering late only completes the
         # first picture (e.g. "hostname - -> laptop"), so it is no change: no events, and no history until the poll
@@ -658,7 +745,6 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
                 if mac in merged or any(row[k] != before[mac][k] for k in UPDATE_COLUMNS)}
     # what the first run counted is no change (no event, no history row of its own), so it is not reported as one
     res.stats = {"devices": len(merged), "new": len(res.new), "changed": 0 if state.first_run else changes}
-    return res
 
 
 def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches: dict[str, Batch | ConnectorFailure],
@@ -671,35 +757,7 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
     gets no switch port). A "wifi"
     attachment from an instance without the controller role is ignored (its list is not complete)."""
     controllers = [n for n in batches if n in state.controllers]
-    wifi: dict[str, Attachment] = {}
-    wired: dict[str, Attachment] = {}
-    rank: dict[str, tuple] = {}  # mac -> sort key of the wired candidate kept so far (lower wins)
-    for i, (n, b) in enumerate(ok.items()):
-        mine: set[str] = set()  # MACs this instance already put up: its first wired attachment is its candidate
-        listed = (att_macs or {}).get(n) or [a.mac for a in b.attachments]  # as listed, before the alias rewrite
-        for a, lmac in zip(b.attachments, listed):
-            if a.link not in LINKS:
-                value = str(a.link)[:40]  # whatever the connector put there; capped so a log line stays one line
-                if (n, value) not in _link_warned:
-                    _link_warned.add((n, value))
-                    log.warning("connector %s: attachments with link %r ignored (allowed: wired, wifi)", n, value)
-                continue
-            if n in state.controllers:
-                # an alias and its device in one client list: the active client is where the device is
-                old = wifi.get(a.mac)
-                if old is None or (old.source == n and a.present is True and old.present is not True):
-                    wifi[a.mac] = a
-            # per MAC as listed: an alias and its device on one switch are two candidates, ranked below
-            elif a.link == "wired" and lmac not in mine:
-                mine.add(lmac)
-                # the edge port is where the device is; an uplink only says which way it lies. Two edge ports (the
-                # FDBs age at different speeds): the switch that already holds the device (sticky, so a walk order
-                # or an FDB timing never makes it flap), then the instance order
-                sticky = n == rows.get(a.mac, {}).get("loc_source")
-                # an empty label ranks last: the row would drop it below, losing a labelled candidate of another switch
-                key = (not a.port, bool(a.uplink), not sticky, i)
-                if a.mac not in rank or key < rank[a.mac]:
-                    wired[a.mac], rank[a.mac] = a, key
+    wifi, wired = _pick_attachments(rows, ok, state.controllers, att_macs)
     # a batch normalise_batch dropped records from (here or in the collector) is not a complete list: what it leaves
     # out is no evidence, so it counts as failed for "left Wi-Fi" and for releasing a held port
     partial = {n for n, b in ok.items() if b.stats.get("dropped", 0) > 0}
@@ -726,57 +784,113 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         # Wi-Fi beats any switch port, also an edge port: a controller's client list is first-hand, an FDB entry for a
         # Wi-Fi client can be an AP port that is not marked as an uplink
         if sw and on_wire and not on_wifi and not blind and not held and sw.port:
-            # only the winner is compared with the row, so a losing candidate that moves writes no event
-            # another switch with the same port label (switches of one model share GE1/0/N): a move all the same, named
-            # by instance as the label alone would read "GE1/0/14 -> GE1/0/14"
-            other = (cur["sw_port"] == sw.port and cur["loc_source"] not in ("", sw.source)
-                     and cur["loc_source"] not in state.controllers)
-            if other:
-                res.events.append((mac, "port", f"{cur['sw_port']} ({cur['loc_source']}) -> {sw.port} ({sw.source})"
-                                                f"{' via ' + sw.via if sw.via else ''}"))
-            if sw.port != cur["sw_port"] or sw.via != cur["sw_via"]:
-                if cur["sw_port"] and sw.port != cur["sw_port"]:
-                    res.events.append((mac, "port", f"{cur['sw_port']} -> {sw.port}{' via ' + sw.via if sw.via else ''}"))
-                upd.update(sw_port=sw.port, sw_via=sw.via)
-            upd["loc_source"] = sw.source
+            _place_on_port(mac, cur, sw, state.controllers, res, upd)
         if on_wifi:
-            # this poll's listing is the evidence of presence: only here, never from the stored SSID
-            if w.ssid:
-                res.wifi.append((mac, w.ssid, w.ap))
-            # only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
-            if w.ssid and w.ssid != cur["wifi_ssid"]:
-                if cur["wifi_ssid"]:
-                    res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> {w.ssid}"))
-                # joined from a cable only: on Wi-Fi without an SSID, or placed nowhere (a walk-out
-                # cleared silently below), it never left Wi-Fi as far as the record shows
-                # a row wired through an uplink (sw_via names what is behind it: the AP a walked-out phone was
-                # last learned on) showed no cable either
-                elif mac not in new and cur["link"] == "wired" and not cur["sw_via"]:
-                    res.events.append((mac, "wifi", f"- -> {w.ssid}"))
-            # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next change is logged
-            upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
-                       loc_source=w.source)
-            if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale
-                upd.update(sw_port="", sw_via="")
+            _place_on_wifi(mac, cur, w, mac in new, res, upd)
         elif w is not None:  # the controller says wired now: drop the old Wi-Fi details
-            if cur["wifi_ssid"]:
-                res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> wired"))
-            upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
-            if not held:  # the failed holder switch keeps the device: taking loc_source would unlock a port move next poll
-                upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
+            _place_off_wifi(mac, cur, w, held, res, upd)
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
         # its last SSID must stay (the FDB may still hold it on the AP uplink, which is not a cable)
         # a client listed without an SSID has link "wifi" but no SSID: it left Wi-Fi too
         if ctrl_ok and not ctrl_failed and on_wire and (cur["wifi_ssid"] or cur["link"] == "wifi") and mac not in wifi:
-            # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
-            # branch above already recorded its port, so a cable is shown in this same poll.
-            # an event only with a cable shown: ARP alone keeps a walked-out phone ~20 min after the
-            # controller dropped it, so without a switch port this cannot be told from a walk-out
-            if cur["wifi_ssid"] and edge:
-                res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> off Wi-Fi"))
-            upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if edge else "")
-            upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
+            _leave_wifi(mac, cur, edge, res, upd)
         # on the wire, as for the port above: a device only in grace would be called wired on a stale FDB entry
         if on_wire and sw and not on_wifi and cur["link"] != "wifi":
             upd["link"] = "wired"
         row.update(upd)
+
+
+def _pick_attachments(rows: dict[str, dict], ok: dict[str, Batch], controllers: frozenset[str],
+                      att_macs: dict[str, list[str]] | None) -> tuple[dict[str, Attachment], dict[str, Attachment]]:
+    """(device -> its controller attachment, device -> its winning switch attachment) from this poll's batches."""
+    wifi: dict[str, Attachment] = {}
+    wired: dict[str, Attachment] = {}
+    rank: dict[str, tuple] = {}  # mac -> sort key of the wired candidate kept so far (lower wins)
+    for i, (n, b) in enumerate(ok.items()):
+        mine: set[str] = set()  # MACs this instance already put up: its first wired attachment is its candidate
+        listed = (att_macs or {}).get(n) or [a.mac for a in b.attachments]  # as listed, before the alias rewrite
+        for a, lmac in zip(b.attachments, listed):
+            if a.link not in LINKS:
+                value = str(a.link)[:40]  # whatever the connector put there; capped so a log line stays one line
+                if (n, value) not in _link_warned:
+                    _link_warned.add((n, value))
+                    log.warning("connector %s: attachments with link %r ignored (allowed: wired, wifi)", n, value)
+                continue
+            if n in controllers:
+                # an alias and its device in one client list: the active client is where the device is
+                old = wifi.get(a.mac)
+                if old is None or (old.source == n and a.present is True and old.present is not True):
+                    wifi[a.mac] = a
+            # per MAC as listed: an alias and its device on one switch are two candidates, ranked below
+            elif a.link == "wired" and lmac not in mine:
+                mine.add(lmac)
+                # the edge port is where the device is; an uplink only says which way it lies. Two edge ports (the
+                # FDBs age at different speeds): the switch that already holds the device (sticky, so a walk order
+                # or an FDB timing never makes it flap), then the instance order
+                sticky = n == rows.get(a.mac, {}).get("loc_source")
+                # an empty label ranks last: the row would drop it below, losing a labelled candidate of another switch
+                key = (not a.port, bool(a.uplink), not sticky, i)
+                if a.mac not in rank or key < rank[a.mac]:
+                    wired[a.mac], rank[a.mac] = a, key
+    return wifi, wired
+
+
+def _place_on_port(mac: str, cur: dict, sw: Attachment, controllers: frozenset[str], res: MergeResult,
+                   upd: dict) -> None:
+    """The winning switch port into upd, with a `port` event when the device moved."""
+    # only the winner is compared with the row, so a losing candidate that moves writes no event
+    # another switch with the same port label (switches of one model share GE1/0/N): a move all the same, named
+    # by instance as the label alone would read "GE1/0/14 -> GE1/0/14"
+    other = (cur["sw_port"] == sw.port and cur["loc_source"] not in ("", sw.source)
+             and cur["loc_source"] not in controllers)
+    if other:
+        res.events.append((mac, "port", f"{cur['sw_port']} ({cur['loc_source']}) -> {sw.port} ({sw.source})"
+                                        f"{' via ' + sw.via if sw.via else ''}"))
+    if sw.port != cur["sw_port"] or sw.via != cur["sw_via"]:
+        if cur["sw_port"] and sw.port != cur["sw_port"]:
+            res.events.append((mac, "port", f"{cur['sw_port']} -> {sw.port}{' via ' + sw.via if sw.via else ''}"))
+        upd.update(sw_port=sw.port, sw_via=sw.via)
+    upd["loc_source"] = sw.source
+
+
+def _place_on_wifi(mac: str, cur: dict, w: Attachment, is_new: bool, res: MergeResult, upd: dict) -> None:
+    """A controller's Wi-Fi listing into upd and res.wifi, with a `wifi` event for an SSID change or a join."""
+    # this poll's listing is the evidence of presence: only here, never from the stored SSID
+    if w.ssid:
+        res.wifi.append((mac, w.ssid, w.ap))
+    # only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
+    if w.ssid and w.ssid != cur["wifi_ssid"]:
+        if cur["wifi_ssid"]:
+            res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> {w.ssid}"))
+        # joined from a cable only: on Wi-Fi without an SSID, or placed nowhere (a walk-out
+        # cleared silently below), it never left Wi-Fi as far as the record shows
+        # a row wired through an uplink (sw_via names what is behind it: the AP a walked-out phone was
+        # last learned on) showed no cable either
+        elif not is_new and cur["link"] == "wired" and not cur["sw_via"]:
+            res.events.append((mac, "wifi", f"- -> {w.ssid}"))
+    # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next change is logged
+    upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
+               loc_source=w.source)
+    if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale
+        upd.update(sw_port="", sw_via="")
+
+
+def _place_off_wifi(mac: str, cur: dict, w: Attachment, held: bool, res: MergeResult, upd: dict) -> None:
+    """A controller listing the device as wired: the old Wi-Fi details dropped in upd, with a `wifi` event."""
+    if cur["wifi_ssid"]:
+        res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> wired"))
+    upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wired")
+    if not held:  # the failed holder switch keeps the device: taking loc_source would unlock a port move next poll
+        upd.setdefault("loc_source", w.source)  # a switch port found above names the device's place more exactly
+
+
+def _leave_wifi(mac: str, cur: dict, edge: bool, res: MergeResult, upd: dict) -> None:
+    """No answering controller lists the device: its Wi-Fi details cleared in upd, with an event if a cable shows."""
+    # every controller answered and none lists it: it left Wi-Fi, so the SSID/AP are stale. The switch
+    # branch above already recorded its port, so a cable is shown in this same poll.
+    # an event only with a cable shown: ARP alone keeps a walked-out phone ~20 min after the
+    # controller dropped it, so without a switch port this cannot be told from a walk-out
+    if cur["wifi_ssid"] and edge:
+        res.events.append((mac, "wifi", f"{cur['wifi_ssid']} -> off Wi-Fi"))
+    upd.update(wifi_ssid="", wifi_ap="", wifi_signal=None, wifi_radio="", link="wired" if edge else "")
+    upd.setdefault("loc_source", "")  # the controller no longer places it; a switch port above may
