@@ -23,9 +23,11 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **Login (optional):** `AUTH_USER` and `AUTH_PASSWORD_HASH` (both or neither, checked at startup) turn on HTTP basic auth for every path, including `/static/`, the CSV export and `/healthz`. The Host check still comes first (421/400), then 401 with `WWW-Authenticate: Basic realm="leasewatch", charset="UTF-8"`. The password is stored only as a PBKDF2-SHA256 hash (`pbkdf2_sha256:<iterations>:<salt>:<hash>`) and compared in constant time; a correct login is remembered for 10 minutes, at most two password checks run at once (else 503 with `Retry-After: 5`), and failed logins are logged at most once a minute with a count and the client address only.
 - **`python -m leasewatch hash-password [--iterations N]`:** prints the `AUTH_PASSWORD_HASH` value; the password comes from a prompt (asked twice) or one line of stdin, never from the command line.
 - **`PRUNE_DAYS`** (default 0 = off): devices not online for that many days, with no name and not marked known, are archived once per poll (never at the first poll or while the baseline waits).
+- **SECURITY.md:** how to report a vulnerability, the supported versions and the security stance (login, Host check, CSP, what is never logged, what the notification channels send).
 
 ### Changed
 
+- **Container user:** the image's user `app` has the fixed uid:gid `10001:10001` (was the next free system ids, uid 100, gid 101) and `USER` is numeric. An existing bind-mounted data directory needs `chown -R 10001:10001 data` before the upgrade, or the start fails on a read-only database.
 - **docker-compose.yml:** the default publishes `8080:8080` and uses no external network, so it works on a clean host; the nginx-proxy setup (`VIRTUAL_HOST`, external network) is a commented variant.
 - **Docker healthcheck:** a 401 (login on) counts as alive, as a 200 does; the command is in exec form.
 - **Content-Security-Policy** on every response (page, static files, API, CSV and errors): `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. The page no longer uses inline style attributes (the network colours are set from `data-vc`).

@@ -16,7 +16,7 @@ What changed between releases: [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
 cp .env.example .env && chmod 600 .env      # set LW_CONNECTOR__FW1__URL, __KEY, __SECRET (and the optional sources)
-install -d -o 100 -g 101 data               # the container runs as uid 100 (alpine "app")
+install -d -o 10001 -g 10001 data           # the container runs as uid:gid 10001:10001; for an existing data/ run chown -R 10001:10001 data
 docker compose up -d --build                # publishes port 8080 on the host; for nginx-proxy see the commented variant in docker-compose.yml
 docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/api/stats   # the meta block shows the last poll; /healthz is for monitors (503 + reason on failure, which busybox wget does not print)
 ```
@@ -29,6 +29,8 @@ Local development: `DATA_DIR=./data LISTEN_PORT=8089 LW_CONNECTORS=fw1 LW_CONNEC
 Sources are configured only as connector instances (`LW_CONNECTORS`, see Connectors). Upgrading from 1.0: the 1.0 source variables (firewall, switch, UniFi, and the DHCP backend, interface and proxy settings) are gone; a start with any of them set stops with a message that names the new variables, and [CHANGELOG.md](CHANGELOG.md) has the migration table.
 
 ### OPNsense API user
+
+Supported DHCP back ends: OPNsense with ISC DHCPv4, Kea or dnsmasq (built in); a dnsmasq leases file (Pi-hole, OpenWrt, Linux) and MikroTik RouterOS 7 through the connectors in [contrib/](contrib/README.md).
 
 Create a user with only the privileges *Diagnostics: ARP Table* and the leases page of the DHCPv4 server you run — *Services: DHCP: Kea(v4)* (`LW_CONNECTOR__FW1__DHCP_BACKEND=kea`, the default; leasewatch reads the leases, `/api/kea/leases4/search`, and the reservations, `/api/kea/dhcpv4/searchReservation`; OPNsense has no read-only Kea privilege, so this one also allows configuration writes), *Services: Dnsmasq DNS/DHCP: Settings* (`LW_CONNECTOR__FW1__DHCP_BACKEND=dnsmasq`, OPNsense 25.1.6 or later; leasewatch reads only the leases, `/api/dnsmasq/leases/search`, and skips IPv6 leases; there is no reservation search for dnsmasq, so a reservation without an active lease is not listed; OPNsense has no read-only dnsmasq privilege, so this one also allows writes to all dnsmasq settings) or, for the legacy ISC server, *Services: ISC DHCPv4: Leases* (`LW_CONNECTOR__FW1__DHCP_BACKEND=isc`; ISC DHCP is end-of-life in OPNsense and moves to a plugin from 26.1, so new installs should use Kea or dnsmasq) — generate an API key for it (System › Access › Users › the user › API keys) and put key and secret in `.env` (`LW_CONNECTOR__FW1__KEY`, `LW_CONNECTOR__FW1__SECRET`). The ACL for the ARP table matches the snake_case endpoint (`get_arp`), which is what leasewatch calls.
 

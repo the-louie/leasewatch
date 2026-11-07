@@ -500,6 +500,18 @@ class HealthcheckTests(WebTestCase):
             self.assertEqual(self.run_code(port), 1)
 
 
+class DockerUserTests(unittest.TestCase):
+    """S6 T-05: the image runs as a fixed numeric uid:gid that owns /data, so bind mounts can be chowned up front."""
+
+    def test_fixed_ids(self):
+        with open(os.path.join(REPO, "Dockerfile"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("addgroup -S -g 10001 app", text)
+        self.assertIn("adduser -S -u 10001 -G app", text)
+        self.assertIn("chown 10001:10001 /data", text)
+        self.assertEqual([x for x in text.splitlines() if x.startswith("USER ")], ["USER 10001:10001"])
+
+
 class socketserver_port:
     """A local port with nothing listening on it."""
 
