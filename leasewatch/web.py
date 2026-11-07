@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import html
 import io
 import json
@@ -209,6 +210,36 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj: object, status: int = 200) -> None:
         self._send(status, json.dumps(obj, ensure_ascii=False).encode(), _JSON)
 
+    def _accepts_gzip(self) -> bool:
+        q: dict[str, float] = {}
+        for part in (self.headers.get("Accept-Encoding") or "").split(","):
+            name, _, params = part.partition(";")
+            name, weight = name.strip().lower(), 1.0
+            for param in params.split(";"):
+                k, _, v = param.partition("=")
+                if k.strip().lower() == "q":
+                    try:
+                        weight = float(v)
+                    except ValueError:
+                        weight = 0.0  # an unreadable weight is not an offer
+            if name:
+                q[name] = weight
+        return q.get("gzip", q.get("*", 0.0)) > 0
+
+    def _encode(self, body: bytes) -> tuple[bytes, dict]:
+        """gzip for a client that accepts it; small bodies cost more to compress than they save. mtime=0 keeps the
+        output the same for the same input."""
+        if len(body) > 1024 and self._accepts_gzip():
+            return gzip.compress(body, 6, mtime=0), {"Content-Encoding": "gzip"}
+        return body, {}
+
+    def _json_vary(self, obj: object) -> None:
+        """A JSON API answer that may be compressed; the cache must key on Accept-Encoding either way."""
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        # a conditional-request check on the uncompressed body goes here, before the encoding
+        body, extra = self._encode(body)
+        self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra})
+
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status)
 
@@ -247,16 +278,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": ok, "reason": reason, **m}, 200 if ok else 503)
 
     def _api_devices(self) -> None:
-        self._json({"meta": self._meta(), "devices": [_dev(d) for d in self.db.devices()]})
+        self._json_vary({"meta": self._meta(), "devices": [_dev(d) for d in self.db.devices()]})
 
     def _api_status(self) -> None:
-        self._json({"meta": self._meta()})
+        self._json_vary({"meta": self._meta()})
 
     def _api_stats(self) -> None:
         self._json({"meta": self._meta(), "stats": self.db.stats(self.cfg.new_days)})
 
     def _api_events(self) -> None:
-        self._json({"events": self.db.events(limit=300)})
+        self._json_vary({"events": self.db.events(limit=300)})
 
     def _api_device_get(self, mac: str) -> None:
         if not MAC_RE.match(mac):
