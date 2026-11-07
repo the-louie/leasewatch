@@ -238,6 +238,9 @@ class MergeResult:
     seen: list[tuple[str, str, int, int | None]] = field(default_factory=list)
     aliases: list[tuple[str, str, str, str]] = field(default_factory=list)  # new (alias, device, reason, detail)
     alias_seen: list[str] = field(default_factory=list)       # alias MACs (known or new) listed this poll
+    # (device key, ssid, ap): a controller that answered this poll lists the device on that SSID. One entry per device;
+    # a device kept on its stored SSID while its controller is blind, or listed without an SSID, has none
+    wifi: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def to_fw1(s: Sighting) -> Fw1Sighting:
@@ -642,6 +645,9 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
                 upd.update(sw_port=sw.port, sw_via=sw.via)
             upd["loc_source"] = sw.source
         if on_wifi:
+            # this poll's listing is the evidence of presence: only here, never from the stored SSID
+            if w.ssid:
+                res.wifi.append((mac, w.ssid, w.ap))
             # B-13 (owner decision): only an SSID change or joining Wi-Fi is an event; a roam between APs updates the row silently
             if w.ssid and w.ssid != cur["wifi_ssid"]:
                 if cur["wifi_ssid"]:
