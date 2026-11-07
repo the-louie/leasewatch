@@ -67,6 +67,12 @@ VERSION_STEPS = {
     # into, so the key and every row keyed by it stay valid; one statement, as the loop and the table regex expect
     3: "CREATE TABLE IF NOT EXISTS aliases (mac TEXT PRIMARY KEY, device TEXT NOT NULL, reason TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', merged_ts INTEGER NOT NULL, last_seen INTEGER NOT NULL)",
 }
+# run on every open (after the version steps, also for a newer schema); CREATE INDEX IF NOT EXISTS is cheap when present
+INDEXES = (
+    # serves the per-poll MAX(ts) per MAC of 'restored' events; the query must spell the literal 'restored'
+    "CREATE INDEX IF NOT EXISTS events_restored ON events(mac, ts) WHERE kind='restored'",
+    "CREATE INDEX IF NOT EXISTS aliases_device ON aliases(device)",
+)
 
 # strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
 # U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
@@ -117,6 +123,9 @@ class Database:
             with self.tx() as c:  # the step and its version number together, so a crash in between re-runs the step
                 c.execute(VERSION_STEPS[step])
                 self.set_meta("schema_version", str(step), c)
+        for stmt in INDEXES:
+            with self.tx() as c:
+                c.execute(stmt)
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

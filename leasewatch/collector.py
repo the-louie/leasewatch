@@ -454,6 +454,7 @@ class Collector:
             prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
             # read with prev in one transaction, so the alias map and the rows it points to agree
             state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
+            # keep the literal 'restored' in the SQL: a bound parameter cannot use the partial index events_restored
             if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS (S4R07); only read when it runs
                 state.restored = {r["mac"]: r["ts"] for r in c.execute(
                     "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
