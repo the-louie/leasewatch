@@ -28,7 +28,7 @@ from .fw1 import Fw1Client
 from . import notify
 
 log = logging.getLogger("leasewatch.collector")
-CLOSE_SECONDS = 10  # all connectors together, well inside the 30 s the container gets to stop
+CLOSE_SECONDS = 5  # all connectors together, well inside the 30 s the container gets to stop
 HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
 MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
@@ -77,9 +77,13 @@ def close_connector(conn: object, name: str, timeout: float, log: logging.Logger
         return True
     # a disabled instance may have TIMEOUT out of range (14 digits): join() would raise OverflowError, so the
     # setting's own maximum caps it
-    t.join(max(0.0, min(timeout, 3600)))
+    wait = max(0.0, min(timeout, 3600))
+    t.join(wait)
     if t.is_alive():
-        log.warning("connector %s: close() did not return within %d s", name, timeout)
+        if wait <= 0:
+            log.info("connector %s: close() started without waiting (shutdown budget used)", name)
+        else:
+            log.warning("connector %s: close() did not return within %.1f s", name, wait)
         return False
     return True
 
@@ -125,7 +129,7 @@ class Collector:
         self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
         self._poll_fails = 0  # failed polls in the current spell
         self._mail_backoff = notify.Backoff(cfg.poll_seconds)  # per channel wait after a failed send (this process only)
-        self._mail_error: str | None = None  # the last "mail failed" text logged as a warning, until a send works
+        self._mail_failing = False  # the queue could not be cleared since the last send that worked: warned once
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
@@ -165,18 +169,29 @@ class Collector:
 
     def close(self) -> None:
         """Close every built connector (a UniFi session logs out), each for at most its instance's TIMEOUT and all
-        for at most CLOSE_SECONDS. A close() still running is left in its daemon thread. Safe to call twice."""
+        for at most CLOSE_SECONDS. An instance whose worker thread still runs is not waited for (its close() would
+        queue behind the call the worker holds): close() is started in a daemon thread with no wait, so a logout is
+        still tried, and it is named as busy. A close() still running is left in its daemon thread, and a late
+        connector never delays the others. Safe to call twice."""
         if self._closed:
             return
         self._closed = True
         deadline = time.monotonic() + CLOSE_SECONDS
         late: list[str] = []
+        busy: list[str] = []
         for name, conn in self._connectors.items():
+            thread = self._runs[name].thread
+            if thread is not None and thread.is_alive():
+                busy.append(name)
+                close_connector(conn, name, 0.0)
+                continue
             wait = min(self._runs[name].timeout, max(0.0, deadline - time.monotonic()))
             if not close_connector(conn, name, wait):
                 late.append(name)
-        if late:
-            log.warning("connectors still closing at shutdown: %s", ", ".join(late))
+        if late or busy:
+            parts = ([f"still busy: {', '.join(busy)}"] if busy else []) + \
+                    ([f"still closing: {', '.join(late)}"] if late else [])
+            log.warning("connectors not closed at shutdown, %s", "; ".join(parts))
         else:
             log.info("connectors closed")
 
@@ -462,14 +477,16 @@ class Collector:
             self._write_notify_state()
             return
         except Exception as e:  # never let mail break the collector; the queue is kept for the next poll
-            # the same text again and again would fill the log: the channels' own spell warnings say the rest
-            text = str(e)
-            log.log(logging.WARNING if text != self._mail_error else logging.DEBUG,
-                    "mail failed (%d device(s) queued): %s", len(rows), text)
-            self._mail_error = text
+            # one warning per failed spell of the queue: the text changes with whichever channels were due, and the
+            # channels' own spell warnings say the rest
+            log.log(logging.DEBUG if self._mail_failing else logging.WARNING,
+                    "mail failed (%d device(s) queued): %s", len(rows), e)
+            self._mail_failing = True
             self._write_notify_state()
             return
-        self._mail_error = None
+        if self._mail_failing:
+            log.info("mail delivers again (%d device(s) queued)", len(rows))
+            self._mail_failing = False
         self._write_notify_state()
         macs = [r["mac"] for r in rows]
         try:

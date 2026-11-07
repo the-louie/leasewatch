@@ -106,6 +106,66 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(self.cli("backup", "--keep", "1")[0], 0)  # the newest is the -3 file
         self.assertEqual(self.backups(), ["leasewatch-20261107-031500-3.sqlite3"])
 
+    def test_future_stamps_never_delete_the_new_backup(self):
+        self.make_db()
+        bdir = os.path.join(self.dir, "backups")
+        os.makedirs(bdir)
+        for d in range(1, 9):
+            open(os.path.join(bdir, f"leasewatch-209901{d:02d}-120000.sqlite3"), "w").close()
+        with mock.patch.object(maintenance, "_stamp", lambda: "20261107-031500"):
+            rc, out, err = self.cli("backup", "--keep", "7")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("7 kept, 2 removed", out)
+        left = self.backups()
+        self.assertIn("leasewatch-20261107-031500.sqlite3", left)
+        self.assertEqual(len(left), 7)
+        self.assertNotIn("leasewatch-20990101-120000.sqlite3", left)
+
+    def test_keep_one_keeps_only_the_new_file(self):
+        self.make_db()
+        bdir = os.path.join(self.dir, "backups")
+        os.makedirs(bdir)
+        open(os.path.join(bdir, "leasewatch-20990101-120000.sqlite3"), "w").close()
+        rc, out, _ = self.cli("backup", "--keep", "1")
+        self.assertEqual(rc, 0)
+        self.assertIn("1 kept, 1 removed", out)
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_bad_backup_keep_env_writes_nothing(self):
+        self.make_db()
+        for bad in ("-1", "1001", "abc"):
+            os.environ["BACKUP_KEEP"] = bad
+            rc, out, err = self.cli("backup")
+            self.assertEqual((rc, out), (2, ""), bad)
+            self.assertIn("backup: BACKUP_KEEP must be 0-1000", err)
+            self.assertEqual(self.backups(), [], bad)
+        os.environ["BACKUP_KEEP"] = "-1"
+        self.assertEqual(self.cli("backup", "--keep", "3")[0], 0)  # --keep wins over the env value
+
+    def test_parallel_runs_in_the_same_second(self):
+        self.make_db()
+        results = []
+        with mock.patch.object(maintenance, "_stamp", lambda: "20261107-031500"):
+            def run():
+                out = []
+                rc = maintenance.backup_cmd(["--keep", "0"], out.append)
+                results.append((rc, out[0] if out else ""))
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual([r[0] for r in results], [0, 0], results)
+        self.assertEqual(len(self.backups()), 2)
+        self.assertEqual(len({r[1].split()[1] for r in results}), 2)
+
+    def test_data_dir_with_doubled_leading_slash(self):
+        self.make_db()
+        os.environ["DATA_DIR"] = "/" + self.dir
+        rc, out, err = self.cli("backup")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(len(self.backups()), 1)
+
     def test_missing_db(self):
         rc, out, err = self.cli("backup")
         self.assertEqual((rc, out), (1, ""))

@@ -62,7 +62,8 @@ class CloseTests(Base):
         self.assertLess(time.monotonic() - t0, 2)
         self.assertEqual(fast.calls, 1)
         text = "\n".join(cm.output)
-        self.assertIn("connectors still closing at shutdown: fw1", text)
+        self.assertIn("still closing: fw1", text)
+        self.assertIn("close() did not return within 0.2 s", text)
         self.assertNotIn("second", text)
 
     def test_total_cap(self):
@@ -74,11 +75,37 @@ class CloseTests(Base):
         for r in col._runs.values():
             r.timeout = 30
         t0 = time.monotonic()
-        with mock.patch.object(collector_mod, "CLOSE_SECONDS", 0.3), self.assertLogs("leasewatch", "WARNING") as cm:
+        with mock.patch.object(collector_mod, "CLOSE_SECONDS", 0.3), self.assertLogs("leasewatch", "INFO") as cm:
             col.close()
         self.assertLess(time.monotonic() - t0, 2)
         self.assertEqual((a.calls, b.calls), (1, 1))  # the second is still asked to close
         self.assertIn("fw1, second", "\n".join(cm.output))
+        self.assertIn("still closing: fw1, second", "\n".join(cm.output))
+        self.assertIn("close() started without waiting (shutdown budget used)", "\n".join(cm.output))
+
+    def test_total_cap_is_five_seconds(self):
+        self.assertEqual(collector_mod.CLOSE_SECONDS, 5)
+
+    def test_busy_worker_is_not_waited_for_but_still_asked_to_close(self):
+        col, _ = self.collector(TWO)
+        busy, fast = Closer(block=5), Closer()
+        self.addCleanup(busy.release.set)
+        col._connectors = {"fw1": busy, "second": fast}
+        worker_stop = threading.Event()
+        worker = threading.Thread(target=worker_stop.wait, daemon=True)
+        worker.start()
+        self.addCleanup(worker_stop.set)
+        col._runs["fw1"].thread = worker
+        t0 = time.monotonic()
+        with self.assertLogs("leasewatch", "INFO") as cm:
+            col.close()
+        self.assertLess(time.monotonic() - t0, 1)
+        time.sleep(0.1)
+        self.assertEqual((busy.calls, fast.calls), (1, 1))
+        text = "\n".join(cm.output)
+        self.assertIn("still busy: fw1", text)
+        self.assertNotIn("still closing", text)
+        self.assertNotIn("did not return", text)
 
 
 class UnifiCollectorClose(Base):

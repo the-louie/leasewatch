@@ -5,10 +5,10 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## 1.3.0 (unreleased)
 
 ### Added
-- **`python -m leasewatch backup [--to PATH] [--keep N]`:** a consistent copy of the database with the SQLite backup API, safe while the service runs, written to `DATA_DIR/backups/leasewatch-<date>-<time>.sqlite3` (one self-contained file, mode 0600, integrity-checked); `BACKUP_KEEP` (default 7) older copies are kept. README: a cron line and the restore steps.
+- **`python -m leasewatch backup [--to PATH] [--keep N]`:** a consistent copy of the database with the SQLite backup API, safe while the service runs, written to `DATA_DIR/backups/leasewatch-<date>-<time>.sqlite3` (one self-contained file, mode 0600, integrity-checked); the newest `BACKUP_KEEP` (default 7) copies are kept. README: a cron line and the restore steps.
 - **`python -m leasewatch vacuum`:** rebuilds the database file of a stopped service.
 - **`/healthz` `reason`:** `ok`, `source` (polls run but fail or the data is old) or `collector` (no poll attempt within the attempt limit: the poll thread is hung or dead). `last_attempt_ts`, `last_attempt_age`, `attempt_limit` and `collector_stale` in the status meta; the page shows a banner when the collector has stopped polling. The container healthcheck is unchanged.
-- **Notification backoff:** a channel that failed is skipped for 2 minutes, doubling to 30 minutes, until it delivers again; the other channels still get each batch, and the queue is kept while every channel waits. One warning per failed spell, one line on recovery; `notify.<channel>.ok` in the status meta.
+- **Notification backoff:** a channel that failed is skipped for one poll interval, doubling up to 30 minutes, until it delivers again; the other channels still get each batch, and the queue is kept while every channel waits. One warning per failed spell, one line on recovery; `meta.notify` (`{"smtp": true, ...}`) in `/api/status`.
 
 ### Changed
 - **Shutdown:** the connectors are closed (a UniFi session logs out) and the database is closed with a WAL checkpoint, so a copy of `leasewatch.sqlite3` taken after `docker compose stop` holds the last poll (before, the last changes stayed in the `-wal` file).

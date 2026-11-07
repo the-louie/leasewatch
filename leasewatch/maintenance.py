@@ -18,7 +18,9 @@ BACKUP_NAME_RE = re.compile(r"^leasewatch-(\d{8}-\d{6})(?:-(\d+))?\.sqlite3$")
 
 def _open_source(db_path: str) -> sqlite3.Connection:
     # mode=rw never creates a file: a wrong DATA_DIR is an error, not an empty database
-    conn = sqlite3.connect("file:" + urllib.parse.quote(db_path) + "?mode=rw", uri=True, isolation_level=None)
+    # one leading slash only: "file://tmp/x" would read "tmp" as the authority
+    path = "/" + os.path.abspath(db_path).lstrip("/")
+    conn = sqlite3.connect("file:" + urllib.parse.quote(path) + "?mode=rw", uri=True, isolation_level=None)
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
@@ -58,15 +60,29 @@ def _free_name(directory: str) -> str:
     return name
 
 
-def _rotate(directory: str, keep: int) -> tuple[int, int]:
-    """Delete all but the newest `keep` backups (0 = all are kept). Returns (kept, removed)."""
+def _reserve(directory: str) -> str:
+    """Create the final file empty (mode 0600) under a name no other run holds. Returns its path."""
+    while True:
+        final = os.path.join(directory, _free_name(directory))
+        try:
+            os.close(os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return final
+        except FileExistsError:
+            continue  # taken between the check and the create: the next name is free
+
+
+def _rotate(directory: str, keep: int, current: str) -> tuple[int, int]:
+    """Delete all but the newest `keep` backups (0 = all are kept); the file `current`, just written, always stays.
+    Returns (kept, removed)."""
     found = []
     for name in os.listdir(directory):
         m = BACKUP_NAME_RE.match(name)
         if m:
             found.append((m.group(1), int(m.group(2) or 0), name))
     found.sort()  # by stamp, then by the -N suffix as a number ("-10" after "-2", "-1" after the plain name)
-    doomed = found[:-keep] if keep and len(found) > keep else []
+    others = [f for f in found if f[2] != current]
+    room = keep - 1  # the new file takes one of the places
+    doomed = [] if not keep else others[:len(others) - room] if len(others) > room else []
     removed = 0
     for _, _, name in doomed:
         try:
@@ -77,10 +93,11 @@ def _rotate(directory: str, keep: int) -> tuple[int, int]:
     return len(found) - removed, removed
 
 
-def _copy(src: sqlite3.Connection, final: str) -> str:
-    """Write a consistent copy to final. Returns its size text, or "!" plus the failure text."""
+def _copy(src: sqlite3.Connection, final: str, reserved: bool = False) -> str:
+    """Write a consistent copy to final (an empty file this run reserved, if `reserved`). Returns its size text,
+    or "!" plus the failure text."""
     directory, name = os.path.split(final)
-    part = os.path.join(directory, f".{name}.part")
+    part = os.path.join(directory, f".{name}.{os.getpid()}.part")
     old_umask = os.umask(0o077)
     try:
         dst = sqlite3.connect(part, isolation_level=None)
@@ -112,6 +129,11 @@ def _copy(src: sqlite3.Connection, final: str) -> str:
                     os.unlink(part + suffix)
                 except OSError:
                     pass
+            if reserved:
+                try:
+                    os.unlink(final)
+                except OSError:
+                    pass
 
 
 def _say(out: Callable[[str], None], line: str, rc: int) -> int:
@@ -136,6 +158,15 @@ def backup_cmd(argv: list[str], out: Callable[[str], None]) -> int:
     # Config() only collects problems and never raises; validate() is not called, so a bad connector setting
     # does not stop a backup
     cfg = Config()
+    raw_keep = os.environ.get("BACKUP_KEEP", "").strip()
+    if args.keep is None and raw_keep:
+        try:
+            ok = 0 <= int(raw_keep) <= 1000
+        except ValueError:
+            ok = False
+        if not ok:
+            sys.stderr.write("backup: BACKUP_KEEP must be 0-1000\n")
+            return 2
     if args.to is not None and os.path.lexists(args.to):
         sys.stderr.write(f"backup: {args.to} exists\n")
         return 2
@@ -150,8 +181,8 @@ def backup_cmd(argv: list[str], out: Callable[[str], None]) -> int:
             else:
                 directory = os.path.join(cfg.data_dir, "backups")
                 os.makedirs(directory, mode=0o700, exist_ok=True)
-                final = os.path.join(directory, _free_name(directory))
-            res = _copy(src, final)
+                final = _reserve(directory)
+            res = _copy(src, final, reserved=directory is not None)
         finally:
             src.close()
         if res.startswith("!"):
@@ -159,7 +190,7 @@ def backup_cmd(argv: list[str], out: Callable[[str], None]) -> int:
         if directory is None:
             return _say(out, f"backup: {final} ({res})", 0)
         keep = cfg.backup_keep if args.keep is None else args.keep
-        kept, removed = _rotate(directory, keep)
+        kept, removed = _rotate(directory, keep, os.path.basename(final))
         return _say(out, f"backup: {final} ({res}; {kept} kept, {removed} removed)", 0)
     except (OSError, sqlite3.Error) as e:
         return _fail("backup", e)

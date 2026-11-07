@@ -125,7 +125,9 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             limit = (2 * cfg.poll_seconds + 2 * max([i.timeout for i in cfg.instances if m.get(f"conn.{i.name}.enabled", "1") == "1"] or [0]) + 120)
             # abs(): an attempt in the future (the clock stepped back) proves nothing; no attempt yet: by process age
             collector_stale = abs(now - attempt) > limit if attempt else now - started > limit
+            notify = {k[len("notify."):-len(".ok")]: v == "1" for k, v in m.items() if k.startswith("notify.") and k.endswith(".ok")}
             return {
+                "notify": notify,
                 "last_attempt_ts": attempt or None, "last_attempt_age": abs(now - attempt) if attempt else None,
                 "attempt_limit": limit, "collector_stale": collector_stale,
                 "now": now, "last_poll_ts": last, "last_poll_age": abs(now - last) if last else None,  # abs(): as stale below

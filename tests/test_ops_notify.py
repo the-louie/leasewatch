@@ -192,6 +192,25 @@ class CollectorNotifyTests(Base):
             self.col._notify()
         self.assertEqual([r.levelname for r in logs.records if "mail failed" in r.getMessage()], ["WARNING", "DEBUG"])
 
+    def test_two_channels_failing_out_of_phase_warn_once_per_spell(self):
+        self.smtp.fail = True  # smtp fails from poll 0, mailgun from poll 3: the error text keeps changing
+        with self.assertLogs("leasewatch", "DEBUG") as logs:
+            for poll in range(200):
+                if poll == 3:
+                    self.mg.fail = True
+                self.queue(f"02:00:00:00:{poll // 256:02x}:{poll % 256:02x}")
+                self.col._notify()
+                self.clk.t += 120
+            self.mg.fail = False
+            self.clk.t += 1800
+            self.col._notify()
+        collector_log = [r for r in logs.records if r.name == "leasewatch.collector"]
+        warn = [r for r in collector_log if r.levelname == "WARNING"]
+        self.assertEqual(len(warn), 1, [r.getMessage() for r in warn])
+        self.assertIn("mail failed", warn[0].getMessage())
+        self.assertEqual(len([r for r in logs.records if r.levelname == "WARNING" and r.name == "leasewatch.notify"]), 2)
+        self.assertEqual(len([r for r in collector_log if r.levelname == "INFO" and "mail delivers again" in r.getMessage()]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

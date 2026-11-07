@@ -59,6 +59,17 @@ class HealthzTests(QW.Base):
         self.meta(5, True, -3600)
         self.assertTrue(self.health()[1]["collector_stale"])
 
+    def test_attempt_in_the_future_is_collector(self) -> None:
+        self.meta(3600, False, -3600)
+        code, body = self.health()
+        self.assertEqual((code, body["reason"], body["collector_stale"]), (503, "collector", True))
+        self.assertLess(body["now"], body["last_attempt_ts"])  # the page words this as a clock step, not a dead collector
+
+    def test_meta_notify_lists_channel_state(self) -> None:
+        self.db.set_meta("notify.smtp.ok", "1")
+        self.db.set_meta("notify.webhook.ok", "0")
+        self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {"smtp": True, "webhook": False})
+
     def test_meta_in_api_exposes_collector_stale(self) -> None:
         self.meta(5, True, 5)
         h = self.handler(path="/api/stats")

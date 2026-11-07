@@ -128,7 +128,8 @@
       txt.insertAdjacentHTML("beforeend", `<span class="src" title="${esc(tip)}"><span class="dot ${old ? "" : s.ok ? "ok" : "bad"}"></span>${esc(label)}</span>`);
     }
     $("#status").title = m.last_error ? `Last error: ${m.last_error}` : `Polls every ${m.poll_seconds}s`;
-    if (m.collector_stale) showBanner(`Collector has not run a poll since ${m.last_attempt_ts ? rel(m.last_attempt_ts) : "start"}; restart the service`);
+    if (m.collector_stale && m.last_attempt_ts && m.now < m.last_attempt_ts) showBanner("The clock moved back; polls resume after the next interval");
+    else if (m.collector_stale) showBanner(`Collector has not run a poll since ${m.last_attempt_ts ? rel(m.last_attempt_ts) : "start"}; restart the service`);
     else if (!m.last_poll_ok && m.last_error) showBanner(`Collector cannot read the firewall: ${m.last_error} (last good data ${rel(m.last_poll_ts)})`);
     else if (stale) showBanner(`Data is stale: last successful poll ${rel(m.last_poll_ts)}.`);
     else if (state.renderError) showBanner(`Page error: ${state.renderError}`);
