@@ -524,6 +524,25 @@ class BrowserSourceEventsTest(_BrowserCase):
         self.assertFalse(d["drawer_open_after_click"])
 
 
+class BrowserReadOnlyTest(_BrowserCase):
+    """READ_ONLY=1: the page leaves out every edit control and says why."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base, _ = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new],
+                        [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if new], env={"READ_ONLY": "1"})
+        cls.run_scenarios(base, ("readonly",))
+
+    def test_drawer_and_rows_are_read_only(self) -> None:
+        d = self.result("readonly")
+        self.assertFalse(d["can_write"])
+        self.assertEqual(d["row_acks"], 0)
+        self.assertEqual(d["line"], "Read-only: changes are off on this server")
+        self.assertEqual(d["buttons"], [])
+        self.assertTrue(d["name_readonly"])
+        self.assertTrue(d["note_readonly"])
+
+
 class BrowserAuthTest(_BrowserCase):
     """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
 

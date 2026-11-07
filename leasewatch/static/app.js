@@ -262,7 +262,8 @@
       if (isNew(d)) fs.classList.add("recent");
       const ls = $(".c-last", tr); ls.textContent = d.online ? "now" : (d.last_online ? rel(d.last_online) : "not since the start"); ls.title = d.last_online ? `last online ${abs(d.last_online)} · last listed by the firewall ${abs(d.last_seen)}` : `listed by the firewall but not seen on the wire since leasewatch started; last listed ${abs(d.last_seen)}`;
       const ack = $(".ack", tr);
-      if (d.acked || d.baseline) ack.remove();
+      // can_write false: the server refuses this client's changes (READ_ONLY, or outside WRITE_ALLOW)
+      if (d.acked || d.baseline || state.meta?.can_write === false) ack.remove();
       else ack.onclick = ev => { ev.stopPropagation(); setFields(d.mac, { acked: true }); };
       tr.onclick = () => openDrawer(d.mac);
       tr.onkeydown = ev => { if (ev.target !== tr) return; /* keys on the row's buttons are theirs */ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(d.mac); } };
@@ -428,17 +429,20 @@
     // rebuilding the body drops keyboard focus: note the focused control (and caret) to focus its replacement
     const fe = b.contains(document.activeElement) ? document.activeElement : null;
     const fid = fe?.id || "", caret = fe && "selectionStart" in fe ? [fe.selectionStart, fe.selectionEnd] : null;
+    // the server refuses this client's changes: no buttons, Name and Note read-only, one line that says why
+    const ro = state.meta?.can_write === false ? " readonly" : "";
     b.innerHTML = `
       <dl class="kv">${kv}
       </dl>
       <div class="form">
-        <label>Name (what this device is)<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="e.g. Alex's iPad"></label>
-        <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="where it lives, who owns it, anything useful">${esc(d.note)}</textarea></label>
-        <div class="actions">
+        <label>Name (what this device is)<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="e.g. Alex's iPad"${ro}></label>
+        <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="where it lives, who owns it, anything useful"${ro}>${esc(d.note)}</textarea></label>
+        <div class="actions">${ro ? `
+          <span class="muted" id="fReadOnly">${state.meta.read_only ? "Read-only: changes are off on this server" : "Read-only: changes are off for this address"}</span>` : `
           <button class="btn" id="fSave">Save</button>
           <button class="btn" id="fAck"></button>
           <button class="btn" id="fArch"></button>
-          <span class="saved" id="fSaved"></span>
+          <span class="saved" id="fSaved"></span>`}
         </div>
       </div>
       ${aliasesHtml(r.aliases)}
@@ -456,6 +460,7 @@
   // the drawer's buttons follow the device's ack state; a baseline device is known already, so Save is the main one
   function drawerActions(d) {
     const save = $("#fSave"), ack = $("#fAck"), main = !d.acked && !d.baseline;
+    if (!save) return; // read-only drawer: no buttons
     save.className = main ? "btn" : "btn primary"; ack.className = main ? "btn primary" : "btn";
     // a baseline device is called known already ("present at the start"): its ack only records that it was checked
     ack.textContent = d.acked ? "Mark unknown" : d.baseline ? "Save & mark checked" : "Save & mark known";

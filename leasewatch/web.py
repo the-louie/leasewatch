@@ -18,7 +18,7 @@ from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodyS
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from . import auth
+from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec
 from .connectors.merge import is_private_mac
@@ -125,6 +125,41 @@ class _DeadlineRaw(io.RawIOBase):
             self._raw.close()
 
 
+class _WriteRefusals:
+    """Counts POSTs refused outside WRITE_ALLOW and logs them at most once a minute, as the verifier does for failed
+    logins: a client that keeps retrying must not fill the log, and a burst that ends inside the window still gets
+    its line (from a timer)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._n = 0
+        self._client = ""
+        self._logged = float("-inf")
+        self._timer: threading.Timer | None = None
+
+    def refused(self, client: str) -> None:
+        with self._lock:
+            self._n += 1
+            self._client = client
+            wait = self._logged + auth.FAIL_LOG_EVERY - time.monotonic()
+            if wait > 0:
+                if self._n == 1:
+                    t = threading.Timer(wait + 0.05, self._report)
+                    t.daemon = True
+                    t.start()
+                    self._timer = t
+                return
+        self._report()
+
+    def _report(self) -> None:
+        with self._lock:
+            n, client, now = self._n, self._client, time.monotonic()
+            if not n or now - self._logged < auth.FAIL_LOG_EVERY:
+                return
+            self._n, self._logged, self._timer = 0, now, None
+        log.warning("refused %d write(s) outside WRITE_ALLOW (last from %s)", n, client or "?")
+
+
 class Handler(BaseHTTPRequestHandler):
     """The UI and API. make_handler() binds it to one config, database and version through a subclass."""
 
@@ -140,6 +175,7 @@ class Handler(BaseHTTPRequestHandler):
     verifier: auth.Verifier | None = None  # None when auth is off
     started: float = 0.0  # process start, for the collector check before the first poll attempt
     boot: str = ""  # per make_handler(): the version counter starts again at 0 after a restart, an old ETag must not match
+    write_refusals: _WriteRefusals  # per make_handler(): one log throttle per server
 
     def setup(self) -> None:
         deadline = time.monotonic() + self.REQUEST_READ_SECONDS
@@ -171,10 +207,28 @@ class Handler(BaseHTTPRequestHandler):
         p = self._checked_target()
         if p is None:
             return
+        # after auth, so a client without credentials learns nothing about the write rules; before routing, so a
+        # refused client learns nothing about which paths exist
+        if not self._write_ok():
+            return
         m = _DEVICE_PATH.match(p)
         if not m:
             return self._error(404, "not found")
         self._api_device_post(m.group(1), p)
+
+    def _write_ok(self) -> bool:
+        """True when this client may change data; else the 403 is sent. The socket peer only: X-Forwarded-For is
+        set by the client and would let anyone on the LAN claim an allowed address."""
+        addr = self.client_address[0]
+        if self.cfg.read_only_on:
+            log.debug("%s write refused: READ_ONLY", addr)
+            self._error(403, "read-only")
+            return False
+        if self.cfg.write_allowed(addr):
+            return True
+        self.write_refusals.refused(addr)
+        self._error(403, "writes are not allowed from this address")  # the address stays out of the body
+        return False
 
     def _method_not_allowed(self) -> None:
         self._send(405, b'{"error": "method not allowed"}', _JSON, _ALLOW)
@@ -183,7 +237,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch_get(self, p: str) -> None:
         exact = {"/": self._route_index, "/healthz": self._healthz, "/api/devices": self._api_devices, "/api/devices.csv": self._csv,
-                 "/api/status": self._api_status, "/api/stats": self._api_stats, "/api/events": self._api_events}.get(p)
+                 "/api/status": self._api_status, "/api/stats": self._api_stats, "/api/events": self._api_events,
+                 "/metrics": self._metrics}.get(p)
         if exact is not None:
             return exact()
         if p.startswith("/static/"):
@@ -294,9 +349,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
 
     def _etag(self, version: int, stale: bool) -> str:
-        # the write bit: the body's write permission depends on the client; no write protection exists yet, so every
-        # client may write until READ_ONLY / WRITE_ALLOW set it per client
-        w = 1
+        # the write bit: meta.can_write differs per client, so two clients must not share a tag (and a 304)
+        w = int(self.cfg.write_allowed(self.client_address[0]))
         return f'W/"{self.boot}.{version}.{w}{int(stale)}"'
 
     def _matches(self, etag: str) -> bool:
@@ -355,6 +409,11 @@ class Handler(BaseHTTPRequestHandler):
         # collector: the poll loop is hung or dead (restart helps); source: polls run but fail or the data is old
         reason = "ok" if ok else "collector" if m["collector_stale"] else "source"
         self._json({"ok": ok, "reason": reason, **m}, 200 if ok else 503)
+
+    def _metrics(self) -> None:
+        # no ETag: every scrape wants the current numbers, and most change each poll anyway
+        body, extra = self._encode(metrics.render(self.cfg, self.db, self.app_version).encode())
+        self._send(200, body, metrics.CONTENT_TYPE, {"Vary": "Accept-Encoding", **extra})
 
     def _api_devices(self) -> None:
         # the version before the body: a write in between makes the body newer than its tag (one extra 200 later),
@@ -422,6 +481,8 @@ class Handler(BaseHTTPRequestHandler):
             "stale": abs(now - last) > cfg.poll_seconds * 3 if last else True,
             # one entry per configured instance, in LW_CONNECTORS order; name stays the instance id
             "connectors": [self._connector_meta(m, s) for s in cfg.instances],
+            # read_only: for every client; can_write: for this one (the page leaves out its edit controls when false)
+            "read_only": cfg.read_only_on, "can_write": cfg.write_allowed(self.client_address[0]),
         }
 
     def _connector_meta(self, m: dict, s: InstanceSpec) -> dict:
@@ -515,7 +576,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
         verifier = auth.Verifier(cfg.auth_user, parsed)
     # a subclass per call: two servers in one process (the tests) do not share settings
     return type("Handler", (Handler,), {"cfg": cfg, "db": db, "app_version": version, "verifier": verifier, "started": time.time(),
-                                        "boot": secrets.token_hex(4)})
+                                        "boot": secrets.token_hex(4), "write_refusals": _WriteRefusals()})
 
 
 class Server(ThreadingHTTPServer):

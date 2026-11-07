@@ -408,6 +408,17 @@ const scenarios = {
              status_after: await page.$eval('#statusText', e => e.textContent),
              banner_hidden: await page.$eval('#banner', b => b.classList.contains('hidden')) };
   },
+  // server with READ_ONLY=1: no edit controls in the rows or the drawer, one line that says why
+  async readonly(page) {
+    const MAC = '02:00:00:00:00:06'; // new and not yet known: it would have a "Mark known" button
+    const rowAcks = await page.$$eval('#rows .ack', bs => bs.length);
+    await page.click(`${row(MAC)} .c-dev`);
+    await waitOpen(page, MAC);
+    return { row_acks: rowAcks, can_write: await page.evaluate(async () => (await (await fetch('/api/status')).json()).meta.can_write),
+             line: await page.$eval('#fReadOnly', e => e.textContent),
+             buttons: await page.$$eval('#dBody .actions button', bs => bs.map(b => b.id)),
+             name_readonly: await page.$eval('#fName', e => e.readOnly), note_readonly: await page.$eval('#fNote', e => e.readOnly) };
+  },
   // changes server state (a name, two acks): runs after the read-only scenarios
   async drawer(page) {
     const res = {};

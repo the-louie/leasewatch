@@ -39,13 +39,14 @@ class EtagTests(QW.Base):
         self.add_device(hostname="laptop")
 
     def get(self, path: str = "/api/devices", inm: str | None = None, enc: str | None = None,
-            command: str = "GET", H: type | None = None) -> tuple[int, dict, bytes]:
+            command: str = "GET", H: type | None = None, client: str = "127.0.0.1") -> tuple[int, dict, bytes]:
         hdr = b"Host: 127.0.0.1\r\n"
         if inm is not None:
             hdr += b"If-None-Match: " + inm.encode() + b"\r\n"
         if enc is not None:
             hdr += b"Accept-Encoding: " + enc.encode() + b"\r\n"
         h = self.handler(command=command, path=path, headers=hdr)
+        h.client_address = (client, 40000)
         if H is not None:
             h.__class__ = H
         h.do_GET()
@@ -146,6 +147,32 @@ class EtagTests(QW.Base):
             st, h, _ = self.get(path, "*")
             self.assertEqual(st, 200, path)
             self.assertNotIn("etag", h, path)
+
+
+class WriteBitTests(QW.Base):
+    """The w bit is meta.can_write of the asking client: two clients with a different right never share a tag."""
+    env = {"WRITE_ALLOW": "10.0.1.0/24"}
+    get = EtagTests.get
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.set_meta("last_poll_ts", str(int(time.time())))
+        self.add_device(hostname="laptop")
+
+    def test_tag_differs_per_write_right_and_no_304_across(self) -> None:
+        for path in ("/api/devices", "/api/events"):
+            _, ok, _ = self.get(path, client="10.0.1.7")
+            _, no, _ = self.get(path, client="10.0.9.9")
+            self.assertTrue(ok["etag"].endswith('.10"'), ok["etag"])
+            self.assertTrue(no["etag"].endswith('.00"'), no["etag"])
+            self.assertEqual(self.get(path, ok["etag"], client="10.0.9.9")[0], 200, path)
+            self.assertEqual(self.get(path, no["etag"], client="10.0.1.7")[0], 200, path)
+            self.assertEqual(self.get(path, ok["etag"], client="10.0.1.8")[0], 304, path)  # same right, same tag
+
+    def test_read_only_clears_the_bit(self) -> None:
+        with mock.patch.object(self.cfg, "read_only", "1"):
+            _, h, _ = self.get(client="10.0.1.7")
+        self.assertTrue(h["etag"].endswith('.00"'), h["etag"])
 
 
 if __name__ == "__main__":
