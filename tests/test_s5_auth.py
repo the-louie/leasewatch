@@ -211,6 +211,40 @@ class ReviewS5Tests(unittest.TestCase):
         self.assertEqual(self.v._fails, 0)
 
 
+class ShutdownFlushTests(unittest.TestCase):
+    """Held-back failed logins reach the log when the server stops (the daemon timer dies with the process)."""
+
+    def test_flush_reports_held_back_count_once(self):
+        v = auth.Verifier(USER, FAST)
+        with self.assertLogs("leasewatch.auth", "WARNING") as logs:
+            for _ in range(301):
+                v._failed("192.0.2.7")
+            timer = v._fail_timer
+            v.flush()
+            v.flush()  # idempotent: nothing pending, no second line
+        self.assertEqual(len(logs.output), 2, logs.output)
+        self.assertIn("300 failed attempts", logs.output[1])
+        self.assertIn("192.0.2.7", logs.output[1])
+        self.assertEqual(v._fails, 0)
+        timer.join(1)  # cancelled: no thread left behind
+        self.assertFalse(timer.is_alive())
+
+    def test_main_flushes_the_verifier_on_shutdown(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = clean_env({**FW1_ENV, "DATA_DIR": tmp.name})
+        self.addCleanup(restore, saved)
+        verifier = mock.Mock()
+        srv = mock.Mock()
+        srv.RequestHandlerClass.verifier = verifier
+        with mock.patch.object(cli, "serve", return_value=srv), mock.patch.object(cli, "Collector"), \
+                mock.patch.object(cli.signal, "signal"), mock.patch.object(cli, "startup_line", return_value=""), \
+                mock.patch.object(cli, "types_line", return_value=""), self.assertLogs("leasewatch", "INFO"):
+            self.assertEqual(cli.main([]), 0)
+        verifier.flush.assert_called_once_with()
+
+
 class ConfigTests(unittest.TestCase):
     def cfg(self, **env):
         saved = clean_env({**FW1_ENV, **env})
@@ -246,7 +280,8 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn(bad.split(":")[2], "".join(problems))
 
     def test_bad_user(self):
-        for u in ("a:b", "a\x01b", "a\x7fb", "a\x85b"):
+        # a surrogate: a Latin-1 env file read as UTF-8 (the hash check would raise UnicodeEncodeError)
+        for u in ("a:b", "a\x01b", "a\x7fb", "a\x85b", "Bj\udcf6rn"):
             self.assertEqual(self.auth_problems(AUTH_USER=u, AUTH_PASSWORD_HASH=HASH),
                              ["AUTH_USER must not contain ':' or control characters"], repr(u))
 
@@ -414,6 +449,11 @@ class HashPasswordCliTests(unittest.TestCase):
                 mock.patch.object(sys, "stderr", err):
             self.assertEqual(cli.main(["hash-password", "--iterations", "100000"]), 1)
         self.assertNotIn("Traceback", err.getvalue())
+
+    def test_stdout_closed_keeps_a_set_exit_code(self):
+        # argparse's usage error (2) stays 2 when there is no stdout to flush
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertEqual(cli.main(["check", "--bogus"]), 2)
 
     def test_real_process(self):
         env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}

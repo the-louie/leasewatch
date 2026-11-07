@@ -358,6 +358,27 @@ class NewDevicesTests(SmtpBase):
         self.assertIn("in send", text)
         self.assertNotIn(PASSWORD, text)
 
+    def test_unexpected_exception_log_has_no_device_data(self) -> None:
+        # the exception text and its context chain can carry hostnames and addresses: type and stack only
+        notify._logged_bugs.clear()
+
+        class Boom:
+            name = "smtp"
+
+            def send(self, msg):
+                try:
+                    raise ValueError("ops@example.com refused")
+                except ValueError:
+                    raise KeyError("Alex's iPad")
+        with mock.patch.object(notify, "channels", lambda cfg: [Boom(), ok_channel("webhook", [])]):
+            with self.assertLogs("leasewatch.notify", "WARNING") as logs:
+                notify.new_devices(self.cfg(), [DEV])
+        text = "\n".join(logs.output)
+        self.assertIn("smtp failed unexpectedly: KeyError", text)
+        self.assertIn("in send", text)
+        for leak in ("iPad", "ops@example.com", "During handling", "ValueError"):
+            self.assertNotIn(leak, text)
+
     def test_unicode_line_breaks_leave_the_subject(self) -> None:
         # S5R27: EmailMessage refuses U+0085/U+2028/U+2029 in a header as it does CR/LF
         for ch in ("\x85", " ", " "):
@@ -374,10 +395,14 @@ class S5FixSmtpTests(SmtpBase):
     def test_from_address_rules(self) -> None:
         # S5R06/S5R12: brackets, a list or a non-ASCII sender passed, then every send failed or lost the address
         msg = "SMTP_FROM must be an e-mail address (required with SMTP_HOST)"
-        for bad in ("<lw@example.com>", "a@example.com,b@example.com", "lw@exämple.se", "lö@example.se"):
+        for bad in ("<lw@example.com>", "a@example.com,b@example.com", "lw@exämple.se", "lö@example.se",
+                    "a@example.com;b@example.com", "mailto:lw@example.com", "lw@a@example.com", 'a"@example.com',
+                    "a(b)@example.com", "a[b]@example.com", "a\\b@example.com", "@example.com", "lw@"):
             self.assertIn(msg, self.problems(SMTP_FROM=bad), bad)
-        self.assertIn("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)",
-                      self.problems(MAIL_TO="<ops@example.com>"))
+        for bad in ("<ops@example.com>", "ops@example.com;alex@example.com", "ops@a@example.com"):
+            self.assertIn("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)",
+                          self.problems(MAIL_TO=bad), bad)
+        self.assertEqual(self.problems(SMTP_FROM="lw.alerts+x@example.com", MAIL_TO="ops@example.com, a-b@example.com"), [])
 
     def test_mail_to_trailing_comma(self) -> None:
         # S5R08: the sender drops empty pieces, so validation does too
@@ -398,6 +423,14 @@ class S5FixSmtpTests(SmtpBase):
         self.assertEqual(cfg.smtp_port, 465)
         self.assertIn("using 465", "\n".join(logs.output))
         self.assertEqual(self.cfg(SMTP_TLS="tls", SMTP_PORT="").smtp_port, 465)
+
+    def test_port_minus_one_is_not_the_default(self) -> None:
+        # -1 is the "use the default" marker inside Config; set by hand it is no port
+        with self.assertLogs("leasewatch.config", "WARNING") as logs:
+            cfg = self.cfg(SMTP_TLS="tls", SMTP_PORT="-1")
+        self.assertEqual(cfg.smtp_port, 465)
+        self.assertIn("SMTP_PORT", "\n".join(logs.output))
+        self.assertIn("using 465", "\n".join(logs.output))
 
     def test_non_ascii_login_refused_at_startup(self) -> None:
         # S5R14: smtplib encodes the login as ASCII, so such a value can never log in

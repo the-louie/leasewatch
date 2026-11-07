@@ -102,6 +102,7 @@ class Verifier:
         self._fails = 0
         self._fail_client = ""
         self._fail_logged = float("-inf")
+        self._fail_timer: threading.Timer | None = None
 
     def check(self, header: str | None, client: str = "") -> bool:
         """True when the header carries the right user and password. Raises Busy when no PBKDF2 slot frees up."""
@@ -149,14 +150,24 @@ class Verifier:
                     t = threading.Timer(wait + 0.05, self._report_fails)
                     t.daemon = True
                     t.start()
+                    self._fail_timer = t  # kept so flush() can stop it
                 return
         self._report_fails()
 
-    def _report_fails(self) -> None:
+    def flush(self) -> None:
+        """Log the held-back failed attempts now. Called at shutdown: the daemon timer dies with the process.
+        Idempotent: a second call finds nothing pending."""
+        with self._lock:
+            t, self._fail_timer = self._fail_timer, None
+        if t is not None:
+            t.cancel()
+        self._report_fails(force=True)
+
+    def _report_fails(self, force: bool = False) -> None:
         with self._lock:
             n, client, now = self._fails, self._fail_client, time.monotonic()
             # nothing pending, or a newer window has its own timer
-            if not n or now - self._fail_logged < FAIL_LOG_EVERY:
+            if not n or (not force and now - self._fail_logged < FAIL_LOG_EVERY):
                 return
             self._fails, self._fail_logged = 0, now
         log.warning("auth: %d failed attempt%s since the last report, last from %s", n, "" if n == 1 else "s",

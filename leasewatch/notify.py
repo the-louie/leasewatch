@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
@@ -31,7 +32,7 @@ log = logging.getLogger("leasewatch.notify")
 _CTRL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 MAX_RESPONSE = 64 * 1024  # bytes of a webhook answer read (and discarded)
 DISCORD_MAX = 2000  # characters of a Discord message
-# bytes of an ntfy message: ntfy's default message-size-limit; a longer one is refused or turns into an attachment
+# bytes of an ntfy message: ntfy's default message-size-limit; one that reaches it is refused or turns into an attachment
 NTFY_MAX = 4096
 _logged_bugs: set = set()  # (channel, file, line) of unexpected channel exceptions whose traceback was logged
 
@@ -225,7 +226,7 @@ class SmtpChannel:
                 smtp.close()
 
 
-def _fit_lines(lines: list[str], budget: int, size) -> list[str]:
+def _fit_lines(lines: list[str], budget: int, size: Callable[[str], int]) -> list[str]:
     """The first lines that fit in `budget` (each measured by `size`, plus its newline), then "… and N more"."""
     shown: list[str] = []
     used = 0
@@ -260,7 +261,7 @@ class WebhookChannel:
             parts = urllib.parse.urlsplit(url)
             root, _, topic = parts.path.rstrip("/").rpartition("/")
             text = msg.text
-            if len(text.encode()) > NTFY_MAX:
+            if len(text.encode()) >= NTFY_MAX:  # ntfy takes a body that reaches the limit as an attachment
                 # build_message's layout: two head lines, one line per device, then the review link (if any)
                 rows = text.split("\n")
                 k = 2 + len(msg.devices)
@@ -327,6 +328,8 @@ class WebhookChannel:
             raise WebhookError("webhook: timeout") from e
         except OSError as e:
             raise WebhookError(f"webhook: {e.strerror or type(e).__name__}") from e
+        except http.client.InvalidURL as e:  # an HTTPException, but the setting's fault (e.g. a blank in the path)
+            raise WebhookError("webhook: bad WEBHOOK_URL") from e
         except http.client.HTTPException as e:
             raise WebhookError("webhook: bad response") from e
         except ValueError as e:  # an invalid URL; its text would echo the URL
@@ -358,16 +361,18 @@ def new_devices(cfg: Config, devices: list[dict]) -> list[str]:
             errors.append((ch.name, e))
         except Exception as e:  # a bug in one channel must not cost the others their delivery
             errors.append((ch.name, NotifyError(f"{ch.name}: {type(e).__name__}")))
-            # as the collector does for connectors: the traceback once per bug (not every poll), as redacted text
-            # (not exc_info: its last line is the raw exception text)
+            # the stack once per bug (not every poll): file, line and function only. Not the exception text, the
+            # source lines or the context chain: they can carry hostnames, addresses and server replies
             tb_last = traceback.extract_tb(e.__traceback__)[-1:]
             key = (ch.name, *((tb_last[0].filename, tb_last[0].lineno) if tb_last else ()))
             if key not in _logged_bugs:
                 _logged_bugs.add(key)
                 redact = make_redactor([cfg.mailgun_key, cfg.smtp_user, cfg.smtp_password, cfg.webhook_url,
                                         cfg.webhook_secret])
-                log.error("%s failed unexpectedly: %s\n%s", ch.name, type(e).__name__,
-                          redact("".join(traceback.format_exception(e))).rstrip())
+                stack = "".join(f'\n  File "{f.filename}", line {f.lineno}, in {f.name}'
+                                for f in traceback.extract_tb(e.__traceback__))
+                log.error("%s failed unexpectedly: %s\nTraceback (most recent call last):%s", ch.name,
+                          type(e).__name__, redact(stack))
     if not ok:
         if len(errors) == 1:
             raise errors[0][1]

@@ -102,6 +102,13 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - A bug in a notification channel is logged once with a redacted traceback. U+0085, U+2028 and U+2029 are removed from the mail subject and body lines.
 - UniFi OS: a csrfToken claim in the TOKEN cookie that is not plain visible ASCII (1-512 characters) is ignored, so it can no longer make every poll fail on a session that is kept.
 - UniFi: a 401 right after a fresh login is reported as 'unifi: HTTP 401' on every poll again. Such a login no longer triggers the 60 s re-login pacing or a false 'session expired' log line.
+- Login: failed attempts still held back for the next log line are logged when the service stops.
+- `SMTP_FROM` and `MAIL_TO` accept only plain `name@domain` addresses: a second `@`, `;`, `:`, quotes, parentheses, square brackets or a backslash (e.g. `a@example.com;b@example.com`, `mailto:…`) are refused at startup instead of failing every send.
+- `SMTP_PORT=-1` is no longer taken silently as the default port; it is logged as not a port, and the default is used.
+- ntfy: a message of exactly 4096 bytes is cut too (ntfy took it as an attachment).
+- Webhook: an invalid character in `WEBHOOK_URL` is reported as "webhook: bad WEBHOOK_URL" instead of "webhook: bad response".
+- A bug in a notification channel is logged with the exception type and the stack (file, line, function) only: no exception text, source lines or chained exceptions, which could carry device names or e-mail addresses.
+- With stdout closed (`>&-`), a command keeps the exit code it set (e.g. 2 for a usage error) instead of 1.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

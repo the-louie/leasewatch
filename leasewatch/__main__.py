@@ -616,7 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         except AttributeError:
             if sys.stdout is not None:
                 raise
-            return 1  # started with stdout closed (>&-): nowhere to write the output
+            # started with stdout closed (>&-): nowhere to write the output; a code the command set stays
+            return 1 if not rc else rc
         except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
             return 130  # 128 + SIGINT, as the shell reports an interrupted command
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
@@ -658,6 +659,9 @@ def main(argv: list[str] | None = None) -> int:
     log.info("%s", types_line())
     srv.serve_forever()
     srv.server_close()
+    verifier = getattr(srv.RequestHandlerClass, "verifier", None)
+    if verifier is not None:  # failed logins still held back for the next log line
+        verifier.flush()
     t.join(10)  # let a poll in flight commit before the interpreter goes away
     return 0
 

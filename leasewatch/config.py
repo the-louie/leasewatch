@@ -41,12 +41,13 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _is_address(addr: str) -> bool:
-    """A plausible mail address: an "@" with text on both sides, no blank or control character (a CR/LF would
-    inject a header), and no "<", ">" or "," (the sender wraps it in <...> itself; a list or brackets would mangle
-    the header and the envelope)."""
+    """A plain local@domain: exactly one "@" with text on both sides, no blank or control character (a CR/LF would
+    inject a header), and none of <>,;:"()[]\\ (the sender wraps it in <...> itself; a list, a "mailto:", quotes or
+    brackets would mangle the header and the envelope)."""
     a = addr.strip()
-    local, at, domain = a.rpartition("@")
-    return bool(local and at and domain) and not any(c.isspace() or c in "<>," or unicodedata.category(c) == "Cc" for c in a)
+    local, at, domain = a.partition("@")
+    return (bool(local and at and domain) and "@" not in domain
+            and not any(c.isspace() or c in '<>,;:"()[]\\' or unicodedata.category(c) == "Cc" for c in a))
 
 
 def _smtp_tls_env() -> str:
@@ -58,7 +59,12 @@ def _smtp_port_env() -> int:
     # its warning names the port actually used
     if not _env("SMTP_PORT"):
         return -1
-    return _env_int("SMTP_PORT", SMTP_PORTS.get(_smtp_tls_env(), 587))
+    default = SMTP_PORTS.get(_smtp_tls_env(), 587)
+    port = _env_int("SMTP_PORT", default)
+    if port == -1:  # the "use the default" marker; set by hand it is no port
+        log.warning("SMTP_PORT=-1 is not a port, using %d", default)
+        return default
+    return port
 
 
 def _is_http(url: str) -> bool:

@@ -176,6 +176,18 @@ class FormatTests(WebhookBase):
         self.assertTrue(message.startswith("50 new devices on the network:\n\n"))
         self.assertTrue(message.endswith("Review and acknowledge: https://lw.example.lan/?filter=unacked"))
 
+    def test_ntfy_exactly_at_the_limit_is_cut(self) -> None:
+        # ntfy takes a body that reaches its limit as an attachment
+        h = self.hook(status=200)
+        cfg = self.cfg(WEBHOOK_URL=h.url + "/lw", WEBHOOK_FORMAT="ntfy")
+        devs = [{**DEV, "mac": f"02:00:00:00:01:{i:02x}", "hostname": "host-" + "x" * 300} for i in range(10)]
+        devs[-1]["hostname"] += "x" * (notify.NTFY_MAX - len(notify.build_message(cfg, devs).text.encode()))
+        self.assertEqual(len(notify.build_message(cfg, devs).text.encode()), notify.NTFY_MAX)
+        self.send(cfg, devs)
+        message = json.loads(h.requests[0][2])["message"]
+        self.assertLess(len(message.encode("utf-8")), notify.NTFY_MAX)
+        self.assertRegex(message, r"… and \d+ more")
+
     def test_bad_secret_is_named(self) -> None:
         # S5R29: a decode error of the secret is not a bad URL (a Config built without validate())
         h = self.hook()
@@ -215,6 +227,10 @@ class ErrorTests(WebhookBase):
         e = self.err(self.cfg(WEBHOOK_URL=url))
         self.assertTrue(e.startswith("webhook: "), e)
         self.assertNotIn("127.0.0.1", e)
+
+    def test_invalid_url_names_the_setting(self) -> None:
+        # http.client.InvalidURL is an HTTPException, but the setting's fault (a Config that skipped validate())
+        self.assertEqual(self.err(self.cfg(WEBHOOK_URL="http://127.0.0.1:9/a b")), "webhook: bad WEBHOOK_URL")
 
     def test_secret_url_never_leaks(self) -> None:
         h = self.hook(status=403)
