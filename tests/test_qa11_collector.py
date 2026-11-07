@@ -198,11 +198,13 @@ class MailRetryTests(Base):
         self.client.rows = [arp(MAC, "10.0.0.12"), arp("02:00:00:00:00:02", "10.0.0.13")]
         col.run_once()
         db.update_user_fields(MAC, True, None, None)
-        old = {"mac": "", "ip": "10.0.0.9", "hostname": "oldname", "vendor": "", "vlan": "LAN", "lease_type": "dynamic"}
-        col._unmailed = [{**old, "mac": MAC}, {**old, "mac": "02:00:00:00:00:02"}, {**old, "mac": "02:00:00:00:00:03"}]
+        now = int(time.time())  # S4 T-09: the queue is devices.mail_queued
+        db.q("UPDATE devices SET mail_queued=?", (now,))
+        db.q("INSERT INTO devices(mac,first_seen,last_seen,ip,vlan,lease_type,mail_queued) VALUES(?,?,?,?,?,?,?)",
+             ("02:00:00:00:00:03", now, now, "10.0.0.9", "LAN", "dynamic", now))
         sent = []
         with mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append(devs)):
-            col._notify([])
+            col._notify()
         self.assertEqual([(d["mac"], d["ip"]) for d in sent[0]],
                          [("02:00:00:00:00:02", "10.0.0.13"), ("02:00:00:00:00:03", "10.0.0.9")])
 
@@ -228,23 +230,19 @@ class Round2Tests(Base):
             col._outcome(run, "down", ConnectorError("down"))
             col._outcome(run, "ValueError", ValueError("bug"))
 
-    def test_refresh_error_still_mails_this_polls_new_devices(self):  # V02
+    def test_queue_read_error_skips_mail_and_retries_next_poll(self):  # V02, S4 T-09
         col, db = self.collector(self.MAIL)
-        queued = {"mac": "02:00:00:00:00:03", "ip": "10.0.0.9", "hostname": "", "vendor": "", "vlan": "LAN",
-                  "lease_type": "dynamic"}
-        new = {**queued, "mac": "02:00:00:00:00:05"}
-        col._unmailed = [queued]
-        orig = db.q
-
-        def q(sql, *a, **k):
-            if "WHERE mac IN" in sql:
-                raise sqlite3.OperationalError("database is locked")
-            return orig(sql, *a, **k)
+        now = int(time.time())
+        db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)",
+             ("02:00:00:00:00:03", now, now, now))
         sent = []
-        with mock.patch.object(db, "q", q), mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append(devs)), \
-                self.assertLogs("leasewatch.collector", "WARNING"):
-            col._notify([new])
-        self.assertEqual(sent, [[queued, new]])
+        with mock.patch.object(notify, "new_devices", lambda cfg, devs: sent.append([d["mac"] for d in devs])):
+            with mock.patch.object(db, "tx", side_effect=sqlite3.OperationalError("database is locked")), \
+                    self.assertLogs("leasewatch.collector", "WARNING"):
+                col._notify()
+            self.assertEqual(sent, [])
+            col._notify()
+        self.assertEqual(sent, [["02:00:00:00:00:03"]])
 
     def test_fixed_instance_drops_the_stale_disabled_error_at_start(self):  # V27
         env = {"LW_CONNECTORS": "fw1,wifi", **FW1, "LW_CONNECTOR__WIFI__TYPE": "unifi",

@@ -92,7 +92,7 @@ Each instance collects in its own thread. One that fails, or takes longer than i
 - Backup: `docker compose exec leasewatch python -c "import sqlite3; sqlite3.connect('/data/leasewatch.sqlite3').backup(sqlite3.connect('/data/backup.sqlite3'))"` then copy `data/backup.sqlite3` (WAL mode: do not copy the live file while the container runs).
 - Upgrade to 1.2: the first start migrates the database one-way (schema 3: new device columns and an `aliases` table). Back up `data/` first if you may go back to 1.1; 1.1 opens a migrated database but logs that its schema is newer.
 - Reset the baseline: stop the container, delete `data/leasewatch.sqlite3*`, start again (names and notes are lost — export the CSV first).
-- Mail on new devices (never for a private MAC, see Semantics) is retried with the next poll if Mailgun fails (up to 50 queued devices, lost on restart); a retried mail leaves out devices acknowledged in the meantime and shows their current IP and hostname.
+- Mail on new devices (never for a private MAC or a merge, see Semantics): a new device is queued in the database (`devices.mail_queued`) when it is first stored, so the queue survives a restart; devices found while mail is off are never queued. Each poll mails up to 50 queued devices (oldest first; the rest wait for the next poll) with their current IP and hostname. If Mailgun fails, the queue is kept and retried at the next poll; a device acknowledged or archived in the meantime leaves the queue, and one not mailed within 24 h is dropped with a warning. Delivery is at-least-once: a crash or database error between the send and clearing the queue mails those devices again at the next poll.
 
 ## Security notes
 

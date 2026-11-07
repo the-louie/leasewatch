@@ -30,6 +30,8 @@ from . import notify
 log = logging.getLogger("leasewatch.collector")
 HISTORY_PER_MAC = 200
 EVENT_DAYS = 365
+MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
+MAIL_MAX_AGE = 86400  # a queued device not mailed within this many seconds is dropped with a warning
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
 
@@ -122,7 +124,6 @@ class Collector:
             log.info("removed %d seen rows and %d location sources of instances that are no longer configured",
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
-        self._unmailed: list[dict] = []  # new devices whose mail failed; retried with the next batch
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
 
@@ -323,6 +324,12 @@ class Collector:
             else:
                 c.execute(f"INSERT INTO devices({','.join(INSERT_COLUMNS)}) VALUES({','.join('?' * len(INSERT_COLUMNS))})",
                           tuple(row[k] for k in INSERT_COLUMNS))
+        # the mail queue entry commits with the device row (S4 T-09). Only with mail on: turning mail on later must
+        # not mail every older device. No new-device mail for a private MAC, merged or not (owner answer Q1): it
+        # rotates, so it would mail again and again; it is still listed and marked new
+        if self.cfg.mail_enabled:
+            c.executemany("UPDATE devices SET mail_queued=? WHERE mac=?",
+                          [(now, mac) for mac in res.new if not is_private_mac(mac)])
         for mac, h in res.history:
             c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)", (mac, now, h["ip"], h["hostname"], h["vlan"], h["lease_type"]))
         c.executemany("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
@@ -362,28 +369,42 @@ class Collector:
             self.db.set_meta("events_prune_ts", str(ref), c)
         c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
 
-    def _notify(self, new_devices: list[dict]) -> None:
-        if self.cfg.mail_enabled:
-            if self._unmailed:
-                # a queued device may have been acked, or changed IP or hostname, since its poll: mail what is true now
-                macs = [d["mac"] for d in self._unmailed]
-                try:
-                    cur = {r["mac"]: r for r in self.db.q(f"SELECT * FROM devices WHERE mac IN ({','.join('?' * len(macs))})", tuple(macs))}
-                except sqlite3.Error as e:  # the poll is committed: mail the old snapshots rather than lose this poll's new devices
-                    log.warning("cannot refresh queued new devices before mailing: %s", e)
-                    cur = {}
-                self._unmailed = [{k: cur[d["mac"]][k] for k in d} if d["mac"] in cur else d
-                                  for d in self._unmailed if not (d["mac"] in cur and cur[d["mac"]]["acked"])]
-            pending = self._unmailed + new_devices
-            if pending:
-                try:
-                    notify.new_devices(self.cfg, pending)
-                    self._unmailed = []
-                except Exception as e:  # never let mail break the collector; keep the batch for the next poll
-                    self._unmailed = pending[-50:]
-                    log.warning("mail failed (%d device(s) queued): %s", len(self._unmailed), e)
-                    if len(pending) > len(self._unmailed):
-                        log.warning("mail retry queue full: %d device(s) dropped without a mail", len(pending) - len(self._unmailed))
+    def _notify(self) -> None:
+        """Mail the queued new devices (devices.mail_queued), up to MAIL_BATCH per mail, oldest first.
+
+        Delivery is at-least-once: if the mail goes out and the UPDATE that clears the queue fails (or the process
+        dies in between), the same devices are mailed again at the next poll."""
+        if not self.cfg.mail_enabled:
+            return
+        now = int(time.time())
+        try:
+            with self.db.tx() as c:
+                # acked or archived devices leave the queue; entries older than MAIL_MAX_AGE are dropped unmailed
+                c.execute("UPDATE devices SET mail_queued=NULL WHERE mail_queued IS NOT NULL "
+                          "AND (acked=1 OR archived_ts IS NOT NULL)")
+                dropped = c.execute("UPDATE devices SET mail_queued=NULL WHERE mail_queued<?",
+                                    (now - MAIL_MAX_AGE,)).rowcount
+                # current rows: a device that changed IP or hostname since it was queued is mailed as it is now
+                rows = [dict(r) for r in c.execute(
+                    "SELECT mac, ip, hostname, vendor, vlan, lease_type FROM devices WHERE mail_queued IS NOT NULL "
+                    "AND acked=0 AND archived_ts IS NULL ORDER BY mail_queued, mac LIMIT ?", (MAIL_BATCH,)).fetchall()]
+        except sqlite3.Error as e:  # the queue stays in the database: retried at the next poll
+            log.warning("cannot read the mail queue: %s", e)
+            return
+        if dropped:
+            log.warning("%d device(s) dropped without a mail after 24 h", dropped)
+        if not rows:
+            return
+        try:
+            notify.new_devices(self.cfg, rows)
+        except Exception as e:  # never let mail break the collector; the queue is kept for the next poll
+            log.warning("mail failed (%d device(s) queued): %s", len(rows), e)
+            return
+        macs = [r["mac"] for r in rows]
+        try:
+            self.db.q(f"UPDATE devices SET mail_queued=NULL WHERE mac IN ({','.join('?' * len(macs))})", tuple(macs))
+        except sqlite3.Error as e:  # mailed again at the next poll (at-least-once)
+            log.warning("mail sent but the queue was not cleared (%d device(s) will be mailed again): %s", len(macs), e)
 
     def run_once(self) -> dict:
         t0 = time.time()
@@ -453,10 +474,7 @@ class Collector:
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
             self._runs[n].answered = True
-        # no new-device mail for a private MAC, merged or not (owner answer Q1): it rotates, so it would mail again
-        # and again; it is still listed and marked new
-        self._notify([{k: res.rows[mac][k] for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")}
-                      for mac in res.new if not is_private_mac(mac)])
+        self._notify()
         st = res.stats
         log.info("poll ok: %d devices, %d new, %d changed, %d ms", st["devices"], st["new"], st["changed"], int((time.time() - t0) * 1000))
         return {"ok": True, "devices": st["devices"], "new": st["new"], "changed": st["changed"], "first_run": first_run}

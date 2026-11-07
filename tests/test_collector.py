@@ -335,18 +335,23 @@ class ReviewFixTests(unittest.TestCase):
         from leasewatch import notify
         os.environ.update({"MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example", "MAIL_TO": "a@example.lan"})
         c = FakeClient([S("02:00:00:00:00:09", "10.0.0.9")]); col = Collector(Config(), self.db, c); col.run_once()
-        col._unmailed = [{"mac": f"02:00:00:00:01:{i:02x}"} for i in range(60)]
+        now = int(time.time())  # 60 older queued devices (S4 T-09: the queue is devices.mail_queued)
+        for i in range(60):
+            self.db.q("INSERT INTO devices(mac,first_seen,last_seen,mail_queued) VALUES(?,?,?,?)",
+                      (f"02:00:00:00:01:{i:02x}", now, now, now - 60))
         c.sightings_data.append(S("00:00:5e:00:53:01", "10.0.0.5"))  # a hardware MAC: a private one is never mailed
         orig = notify.new_devices
-        notify.new_devices = lambda cfg, devs: (_ for _ in ()).throw(RuntimeError("mailgun down"))
+        tried = []
+        notify.new_devices = lambda cfg, devs: (tried.append(len(devs)), (_ for _ in ()).throw(RuntimeError("mailgun down")))
         try:
             with self.assertLogs("leasewatch.collector", "WARNING") as logs:
                 col.run_once()
         finally:
             notify.new_devices = orig
-        self.assertEqual(len(col._unmailed), 50)
+        self.assertEqual(tried, [50])  # one mail holds at most 50; the rest wait
+        self.assertEqual(self.db.q("SELECT COUNT(*) n FROM devices WHERE mail_queued IS NOT NULL")[0]["n"], 61)
         self.assertTrue(any("50 device(s) queued" in m for m in logs.output), logs.output)
-        self.assertTrue(any("11 device(s) dropped" in m for m in logs.output), logs.output)
+        self.assertFalse(any("dropped" in m for m in logs.output), logs.output)  # a failure drops nothing
 
 
 class DatabaseFixTests(unittest.TestCase):
