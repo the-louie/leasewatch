@@ -43,7 +43,7 @@ class CheckFallbackWhileWaitingTests(Base):
     ENV = qa11.BaselineWaitTests.ENV
     FX_MACS = qa11.BaselineWaitTests.FX_MACS
     fx_batch = qa11.BaselineWaitTests.fx_batch
-    down = qa11.BaselineWaitTests.down
+    down = staticmethod(qa11.BaselineWaitTests.down)  # class access unwraps the staticmethod; re-wrap it
     poll = qa11.BaselineWaitTests.poll
 
     # S2R01/S2R15: a check() that keeps failing while collect() works must still reach the MAX_BACKOFF fallback

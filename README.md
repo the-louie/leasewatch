@@ -22,6 +22,8 @@ docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/api/stats   # the
 ```
 The default compose file publishes `8080:8080` and needs no external network. leasewatch covers IPv4 only (no NDP or IPv6 sightings). Timestamps in logs and CSV are UTC unless `TZ` is set (the image has tzdata).
 
+Without Docker: `pip install .` (or `pip install '.[snmp]'` for the SNMP switch connector) installs the `leasewatch` command, which runs like `python3 -m leasewatch`.
+
 Local development: `DATA_DIR=./data LISTEN_PORT=8089 LW_CONNECTORS=fw1 LW_CONNECTOR__FW1__TYPE=opnsense LW_CONNECTOR__FW1__URL=… LW_CONNECTOR__FW1__KEY=… LW_CONNECTOR__FW1__SECRET=… python3 -m leasewatch`.
 
 Sources are configured only as connector instances (`LW_CONNECTORS`, see Connectors). Upgrading from 1.0: the 1.0 source variables (firewall, switch, UniFi, and the DHCP backend, interface and proxy settings) are gone; a start with any of them set stops with a message that names the new variables, and [CHANGELOG.md](CHANGELOG.md) has the migration table.

@@ -238,7 +238,14 @@ class ShutdownFlushTests(unittest.TestCase):
         verifier = mock.Mock()
         srv = mock.Mock()
         srv.RequestHandlerClass.verifier = verifier
-        with mock.patch.object(cli, "serve", return_value=srv), mock.patch.object(cli, "Collector"), \
+        real = cli.Database
+
+        def database(path: str) -> object:  # main() never closes its Database (the process ends); the test must
+            db = real(path)
+            self.addCleanup(db._conn.close)
+            return db
+        with mock.patch.object(cli, "Database", database), \
+                mock.patch.object(cli, "serve", return_value=srv), mock.patch.object(cli, "Collector"), \
                 mock.patch.object(cli.signal, "signal"), mock.patch.object(cli, "startup_line", return_value=""), \
                 mock.patch.object(cli, "types_line", return_value=""), self.assertLogs("leasewatch", "INFO"):
             self.assertEqual(cli.main([]), 0)

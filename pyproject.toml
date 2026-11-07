@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leasewatch"
+dynamic = ["version"]
+description = "Who is on the home network: DHCP leases and ARP from an OPNsense firewall, new devices first."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+# same pins as requirements.txt: pysnmp for SNMPv3 to the switch, cryptography as its crypto backend
+snmp = ["pysnmp>=7,<8", "cryptography"]
+
+[project.scripts]
+leasewatch = "leasewatch.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "leasewatch.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["leasewatch", "leasewatch.*"]
+
+[tool.setuptools.package-data]
+leasewatch = ["static/*"]
+"leasewatch.snmp_profiles" = ["*.json"]
