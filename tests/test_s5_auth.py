@@ -170,6 +170,47 @@ class VerifierTests(unittest.TestCase):
                 self.v.check(None, "10.0.0.5")  # no credentials sent: the browser's first request, not an attempt
 
 
+class ReviewS5Tests(unittest.TestCase):
+    """S5 review: non-ASCII blanks in the header, a burst that ends inside the log window."""
+
+    def setUp(self):
+        self.v = auth.Verifier(USER, FAST)
+
+    def test_non_ascii_blank_is_a_failed_login(self):
+        # str.strip() drops 0xA0 and 0x85 (http.server decodes headers as latin-1); check() then raised
+        for h in (GOOD + "\xa0", "\x85" + GOOD, "Basic \xa0" + GOOD[6:], GOOD + "\xe4"):
+            with self.subTest(h=h):
+                self.assertIsNone(auth.parse_basic(h))
+                with self.assertLogs("leasewatch.auth", "WARNING"):
+                    self.v._fail_logged = float("-inf")
+                    self.assertFalse(self.v.check(h, "10.0.0.1"))
+
+    def test_burst_inside_the_window_is_reported_later(self):
+        reported = threading.Event()
+        lines = []
+
+        class H(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+                reported.set()
+
+        h = H()
+        logging.getLogger("leasewatch.auth").addHandler(h)
+        try:
+            with mock.patch.object(auth, "FAIL_LOG_EVERY", 0.3):
+                self.v._failed("10.0.0.1")
+                self.assertEqual(len(lines), 1)
+                reported.clear()
+                for _ in range(5):
+                    self.v._failed("10.0.0.2")
+                self.assertTrue(reported.wait(5), "the held-back attempts never reached the log")
+        finally:
+            logging.getLogger("leasewatch.auth").removeHandler(h)
+        self.assertIn("5 failed attempts", lines[1])
+        self.assertIn("10.0.0.2", lines[1])
+        self.assertEqual(self.v._fails, 0)
+
+
 class ConfigTests(unittest.TestCase):
     def cfg(self, **env):
         saved = clean_env({**FW1_ENV, **env})
@@ -238,6 +279,19 @@ class AuthWebTests(WebTestCase):
                     self.assert_401(*self.req("GET", path, headers=h))
         st, hd, body = self.req("HEAD", "/api/stats")
         self.assertEqual((st, body), (401, b""))
+
+    def test_non_ascii_blank_gets_401(self):
+        import socket
+        token = GOOD[6:].encode()
+        for raw in (b"Basic " + token + b"\xa0", b"\x85Basic " + token, b"Basic \xa0" + token):
+            for method in (b"GET", b"POST"):
+                with self.subTest(raw=raw, method=method), socket.create_connection(("127.0.0.1", self.port), 10) as s:
+                    s.sendall(method + b" /api/devices/" + MAC2.encode() + b" HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                              b"Content-Length: 0\r\nAuthorization: " + raw + b"\r\n\r\n")
+                    reply = b""
+                    while chunk := s.recv(65536):
+                        reply += chunk
+                    self.assertRegex(reply, rb"^HTTP/1\.[01] 401 ")
 
     def test_right_credentials(self):
         for path in self.ROUTES:
@@ -347,6 +401,19 @@ class HashPasswordCliTests(unittest.TestCase):
         rc, out, err, _ = self.run_cli([], tty, [PASSWORD, PASSWORD + "x"])
         self.assertEqual((rc, out), (1, ""))
         self.assertIn("do not match", err)
+
+    def test_undecodable_byte_is_refused(self):
+        # a C/C.UTF-8 locale (the image's) reads a non-UTF-8 byte as a surrogate instead of raising
+        rc, out, err, _ = self.run_cli(["--iterations", "100000"], io.StringIO("abc\udcffdefghijklm\n"))
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, "cannot read the password\n")
+
+    def test_stdout_closed(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(PASSWORD)), mock.patch.object(sys, "stdout", None), \
+                mock.patch.object(sys, "stderr", err):
+            self.assertEqual(cli.main(["hash-password", "--iterations", "100000"]), 1)
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_real_process(self):
         env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}

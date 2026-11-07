@@ -563,7 +563,10 @@ def hash_password_cmd(argv: list[str]) -> int:
         else:
             # one line, its line break dropped (printf '%s' sends none, echo sends one); blanks are part of it
             password = (sys.stdin.readline() if sys.stdin is not None else "").removesuffix("\n").removesuffix("\r")
-    except (EOFError, UnicodeDecodeError):
+        # a C/C.UTF-8 locale reads a non-UTF-8 byte as a surrogate; make_hash would raise on it, and no login could
+        # send it (parse_basic decodes strict UTF-8)
+        password.encode("utf-8")
+    except (EOFError, UnicodeDecodeError, UnicodeEncodeError):
         sys.stderr.write("cannot read the password\n")
         return 1
     if not password:
@@ -610,6 +613,10 @@ def main(argv: list[str] | None = None) -> int:
                 pass
             # a failed run stays failed (set -o pipefail); one that broke off mid-output had nothing left to report
             return 0 if rc is None else rc
+        except AttributeError:
+            if sys.stdout is not None:
+                raise
+            return 1  # started with stdout closed (>&-): nowhere to write the output
         except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
             return 130  # 128 + SIGINT, as the shell reports an interrupted command
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()

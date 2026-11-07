@@ -11,6 +11,7 @@ import re
 import smtplib
 import ssl
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,13 +23,17 @@ from typing import Protocol
 
 from . import __version__
 from .config import Config
-from .connectors import build_opener, parse_bool
+from .connectors import build_opener, make_redactor, parse_bool
 
 log = logging.getLogger("leasewatch.notify")
 # hostnames come from DHCP clients: a CR/LF (or other control char) in the subject would inject mail headers
-_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+# (and the Unicode line breaks U+0085, U+2028 and U+2029, which EmailMessage refuses in a header as it does CR/LF)
+_CTRL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 MAX_RESPONSE = 64 * 1024  # bytes of a webhook answer read (and discarded)
 DISCORD_MAX = 2000  # characters of a Discord message
+# bytes of an ntfy message: ntfy's default message-size-limit; a longer one is refused or turns into an attachment
+NTFY_MAX = 4096
+_logged_bugs: set = set()  # (channel, file, line) of unexpected channel exceptions whose traceback was logged
 
 
 class NotifyError(Exception):
@@ -98,16 +103,20 @@ def _send(cfg: Config, subject: str, text: str) -> None:
         # inside the try: a base without a scheme raises ValueError here, not in urlopen
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Authorization", "Basic " + base64.b64encode(f"api:{cfg.mailgun_key}".encode()).decode())
-        # urlopen honours http(s)_proxy on purpose: Mailgun is on the internet (the instances' proxy setting only covers LAN clients)
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        # honours http(s)_proxy on purpose: Mailgun is on the internet (the instances' proxy setting only covers LAN
+        # clients). Never follows a redirect: it would resend the Authorization header (the API key) elsewhere
+        with build_opener(verify_tls=True, use_env_proxy=True).open(req, timeout=20) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         e.close()
-        raise MailgunError(f"mailgun: HTTP {e.code}") from e
+        note = " (redirect not followed)" if 300 <= e.code < 400 else ""
+        raise MailgunError(f"mailgun: HTTP {e.code}{note}") from e
     except urllib.error.URLError as e:
         raise MailgunError(f"mailgun: {e.reason}") from e
     except (TimeoutError, OSError) as e:
         raise MailgunError(f"mailgun: {e}") from e
+    except http.client.InvalidURL as e:  # an HTTPException, but a setting's fault (e.g. a blank in the domain)
+        raise MailgunError("mailgun: bad MAILGUN_DOMAIN or MAILGUN_API_BASE") from e
     except http.client.HTTPException as e:  # e.g. a malformed status line
         raise MailgunError("mailgun: bad response") from e
     except ValueError as e:
@@ -177,7 +186,10 @@ class SmtpChannel:
                 phase = "login"
                 smtp.login(cfg.smtp_user, cfg.smtp_password)
             phase = "send"
-            smtp.send_message(em, cfg.smtp_from, to)
+            # smtplib raises only when every recipient is refused; the others come back here
+            refused = smtp.send_message(em, cfg.smtp_from, to)
+            if refused:
+                log.warning("smtp: %d of %d recipient(s) refused", len(refused), len(to))  # no address: personal data
             phase = "quit"
             try:
                 smtp.quit()
@@ -206,11 +218,25 @@ class SmtpChannel:
             raise SmtpError(f"smtp: {type(e).__name__}") from e
         except OSError as e:
             raise SmtpError(f"smtp: {e.strerror or type(e).__name__}") from e
-        except ValueError as e:  # incl. UnicodeEncodeError: an address the server cannot take
-            raise SmtpError("smtp: bad address") from e
+        except ValueError as e:  # incl. UnicodeEncodeError: an address, or a login smtplib encodes as ASCII
+            raise SmtpError("smtp: bad SMTP_USER or SMTP_PASSWORD" if phase == "login" else "smtp: bad address") from e
         finally:
             if smtp is not None:
                 smtp.close()
+
+
+def _fit_lines(lines: list[str], budget: int, size) -> list[str]:
+    """The first lines that fit in `budget` (each measured by `size`, plus its newline), then "… and N more"."""
+    shown: list[str] = []
+    used = 0
+    for ln in lines:
+        if used + size(ln) + 1 > budget:
+            break
+        shown.append(ln)
+        used += size(ln) + 1
+    if len(shown) < len(lines):
+        shown.append(f"  … and {len(lines) - len(shown)} more")
+    return shown
 
 
 def _md_escape(text: str) -> str:
@@ -233,7 +259,15 @@ class WebhookChannel:
             # topic URL would show as raw text)
             parts = urllib.parse.urlsplit(url)
             root, _, topic = parts.path.rstrip("/").rpartition("/")
-            body = {"topic": topic, "title": msg.subject, "message": msg.text}
+            text = msg.text
+            if len(text.encode()) > NTFY_MAX:
+                # build_message's layout: two head lines, one line per device, then the review link (if any)
+                rows = text.split("\n")
+                k = 2 + len(msg.devices)
+                head, tail = rows[:2], rows[k:]
+                budget = NTFY_MAX - len("\n".join(head + tail).encode()) - 40  # the newlines and the "more" line
+                text = "\n".join(head + _fit_lines(rows[2:k], budget, lambda s: len(s.encode())) + tail)
+            body = {"topic": topic, "title": msg.subject, "message": text}
             if msg.url:
                 body["click"] = msg.url
             return urllib.parse.urlunsplit(parts._replace(path=root + "/")), body
@@ -242,14 +276,7 @@ class WebhookChannel:
             tail = f"\n{msg.url}" if msg.url else ""
             # a code block keeps the columns and shows hostnames as plain text; a backtick cannot close it
             lines = [_device_line(d).replace("`", "'") for d in msg.devices]
-            budget = DISCORD_MAX - len(head) - len(tail) - 40  # the fences and the "more" line
-            shown: list[str] = []
-            for ln in lines:
-                if sum(len(x) + 1 for x in shown) + len(ln) + 1 > budget:
-                    break
-                shown.append(ln)
-            if len(shown) < len(lines):
-                shown.append(f"  … and {len(lines) - len(shown)} more")
+            shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
             content = head + "\n```\n" + "\n".join(shown) + "\n```" + tail
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}
         return url, {"event": "new_devices", "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
@@ -260,7 +287,8 @@ class WebhookChannel:
     def _signature_headers(self, body: bytes) -> dict:
         """Standard Webhooks: v1 = HMAC-SHA256 over "<id>.<timestamp>.<body>"."""
         secret = self.cfg.webhook_secret
-        key = base64.b64decode(secret[6:]) if secret.startswith("whsec_") else secret.encode()
+        # validate=True: decoded exactly as Config.validate() checks it
+        key = base64.b64decode(secret[6:], validate=True) if secret.startswith("whsec_") else secret.encode()
         msg_id, ts = f"msg_{uuid.uuid4().hex}", str(int(time.time()))
         sig = base64.b64encode(hmac.new(key, f"{msg_id}.{ts}.".encode() + body, hashlib.sha256).digest()).decode()
         return {"webhook-id": msg_id, "webhook-timestamp": ts, "webhook-signature": f"v1,{sig}"}
@@ -274,7 +302,11 @@ class WebhookChannel:
             req.add_header("Content-Type", "application/json")
             req.add_header("User-Agent", f"leasewatch/{__version__}")
             if self.cfg.webhook_secret:
-                for k, v in self._signature_headers(body).items():
+                try:
+                    sig = self._signature_headers(body)
+                except ValueError as e:  # not the URL's fault (a Config that skipped validate())
+                    raise WebhookError("webhook: bad WEBHOOK_SECRET") from e
+                for k, v in sig.items():
                     req.add_header(k, v)
             # never follows a redirect (it would resend the body elsewhere); honours http(s)_proxy and no_proxy,
             # as Mailgun does
@@ -326,6 +358,16 @@ def new_devices(cfg: Config, devices: list[dict]) -> list[str]:
             errors.append((ch.name, e))
         except Exception as e:  # a bug in one channel must not cost the others their delivery
             errors.append((ch.name, NotifyError(f"{ch.name}: {type(e).__name__}")))
+            # as the collector does for connectors: the traceback once per bug (not every poll), as redacted text
+            # (not exc_info: its last line is the raw exception text)
+            tb_last = traceback.extract_tb(e.__traceback__)[-1:]
+            key = (ch.name, *((tb_last[0].filename, tb_last[0].lineno) if tb_last else ()))
+            if key not in _logged_bugs:
+                _logged_bugs.add(key)
+                redact = make_redactor([cfg.mailgun_key, cfg.smtp_user, cfg.smtp_password, cfg.webhook_url,
+                                        cfg.webhook_secret])
+                log.error("%s failed unexpectedly: %s\n%s", ch.name, type(e).__name__,
+                          redact("".join(traceback.format_exception(e))).rstrip())
     if not ok:
         if len(errors) == 1:
             raise errors[0][1]

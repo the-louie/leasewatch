@@ -441,6 +441,23 @@ class NotifyTests(StubCase):
         self.assertNotIn("\r", subject); self.assertNotIn("\n", subject)
         self.assertIn("evil  Bcc: x@example.com", subject)
 
+    def test_redirect_is_not_followed(self):
+        # S5R11: a 3xx would resend the Authorization header (the API key) to the redirect target
+        target = self.stub({"/v3/mg.example.com/messages": js({"id": "x"})})
+        mg = self.stub({"/v3/mg.example.com/messages": (302, {"Location": target.url + "/v3/mg.example.com/messages"}, b"")})
+        with self.assertRaises(notify.MailError) as cm:
+            notify.new_devices(mail_cfg(mg.url), [DEVICE])
+        self.assertEqual(str(cm.exception), "mailgun: HTTP 302 (redirect not followed)")
+        self.assertEqual(target.requests, [])
+
+    def test_invalid_domain_names_the_settings(self):
+        # S5R28: http.client.InvalidURL is an HTTPException, not a server's bad response
+        cfg = Config(mailgun_key="key", mailgun_domain="mg example", mail_to="you@example.com",
+                     mailgun_api_base="http://127.0.0.1:1")
+        with self.assertRaises(notify.MailError) as cm:
+            notify.new_devices(cfg, [DEVICE])
+        self.assertEqual(str(cm.exception), "mailgun: bad MAILGUN_DOMAIN or MAILGUN_API_BASE")
+
 
 class ProxyTests(StubCase):
     """LAN clients must not send the firewall/UniFi credentials through an http(s)_proxy unless the instance's proxy setting is set."""

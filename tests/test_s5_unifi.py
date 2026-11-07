@@ -47,6 +47,7 @@ class Controller:
         self.stat_status = 0              # nonzero: every stat GET answers this status
         self.root_status = 0              # nonzero: GET / answers this status
         self.login_redirect = ""          # nonzero: the login answers 302 to this URL
+        self.jwt_csrf: str | None = None  # set: the csrfToken claim the TOKEN JWT carries instead of a random one
         self.stall = 0.0                  # seconds the stat GETs wait before answering
         self.requests: list[tuple[str, str, dict, bytes]] = []
         self.lock = threading.Lock()
@@ -116,7 +117,7 @@ class Controller:
             self.sessions.add(sid)
             if not self.os:
                 return js({"meta": {"rc": "ok"}, "data": []}, headers={"Set-Cookie": f"unifises={sid}; Path=/"})
-            self.csrf = secrets.token_hex(8)
+            self.csrf = secrets.token_hex(8) if self.jwt_csrf is None else self.jwt_csrf
             token = (f"{b64url({'alg': 'none'})}.{b64url({'csrfToken': self.csrf, 'sid': sid})}.sig" if self.jwt_ok
                      else f"{sid}.%%%not-base64.sig")
             if not self.jwt_ok:
@@ -273,6 +274,19 @@ class SessionReuseClassic(Base):
         self.assert_ok(c.clients())
         self.assertEqual(ctl.count("POST", "/api/login"), 2)
 
+    def test_401_after_every_fresh_login_stays_http_401_and_is_not_paced(self) -> None:
+        # S5R20: a login whose session never read must not count as an expired session
+        ctl = self.ctl("classic302")
+        ctl.reject_stats = True
+        c = self.client(ctl, "classic")
+        with self.assertNoLogs("leasewatch.unifi", "INFO"):
+            for _ in range(3):
+                with self.assertRaises(RuntimeError) as cm:
+                    c.clients()
+                self.assertEqual(str(cm.exception), "unifi: HTTP 401")
+                self.clock.t += 30
+        self.assertEqual(ctl.count("POST", "/api/login"), 3)
+
     def test_failed_login_is_not_paced(self) -> None:
         ctl = self.ctl("classic302")
         c = self.client(ctl, "classic", password="wrong-pass-123")
@@ -378,6 +392,18 @@ class UnifiOs(Base):
         c = self.client(ctl)
         self.assert_ok(c.clients())
         self.assertEqual([hd.get("X-Csrf-Token") for m, p, hd, _ in ctl.requests if "/stat/" in p], [None, None])
+
+    def test_unusable_jwt_csrf_is_not_sent(self) -> None:
+        # S5R19/S5R21: a csrfToken claim that cannot be a header value is ignored, so the reads (which work without
+        # CSRF) still succeed instead of failing every poll on a kept session
+        for bad in ("a\r\nX", "a\nb", "\u20ac", "a b", "", "x" * 513):
+            ctl = self.ctl("os", csrf_in_header=False)
+            ctl.jwt_csrf = bad
+            c = self.client(ctl)
+            for _ in range(2):
+                self.assert_ok(c.clients())
+            self.assertEqual([hd.get("X-Csrf-Token") for m, p, hd, _ in ctl.requests if "/stat/" in p], [None] * 4, bad)
+            self.assertEqual(ctl.count("POST", "/api/auth/login"), 1)
 
     def test_csrf_rotation(self) -> None:
         ctl = self.ctl("os")

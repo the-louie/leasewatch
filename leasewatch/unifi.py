@@ -36,6 +36,9 @@ RELOGIN_INTERVAL = 60   # at most one login per this many seconds after a succes
 _monotonic = time.monotonic  # module level so tests can drive the re-login pacing
 # a classic controller's start page on newer standalone builds (older ones redirect / to /manage)
 _MANAGE_RE = re.compile(rb"""<base\s+href=["']/manage/["']""", re.IGNORECASE)
+# a csrfToken claim must be a plain visible-ASCII token: anything else (CR/LF, non-Latin-1) makes http.client refuse
+# the header on every request of a session that is never dropped
+_CSRF_RE = re.compile(r"[\x21-\x7e]{1,512}")
 
 
 class _LoginRequired(Exception):
@@ -50,7 +53,7 @@ def _jwt_csrf(token: str) -> str:
         v = claims.get("csrfToken") if isinstance(claims, dict) else None
     except (IndexError, ValueError, UnicodeDecodeError, RecursionError):  # binascii.Error is a ValueError
         return ""
-    return v if isinstance(v, str) else ""
+    return v if isinstance(v, str) and _CSRF_RE.fullmatch(v) else ""
 
 
 @dataclass
@@ -246,6 +249,9 @@ class UnifiClient:
         except _LoginRequired:
             self._drop()
             if fresh:  # a 401 right after a login is an error, not a reason to loop
+                # and that session never worked: the next login is not a re-login, so it is neither paced nor
+                # reported as an expired session
+                self._last_login = None
                 raise RuntimeError("unifi: HTTP 401") from None
         self._login()  # the reused session expired: once more, then one retry
         try:

@@ -42,10 +42,23 @@ def _env_int(name: str, default: int) -> int:
 
 def _is_address(addr: str) -> bool:
     """A plausible mail address: an "@" with text on both sides, no blank or control character (a CR/LF would
-    inject a header)."""
+    inject a header), and no "<", ">" or "," (the sender wraps it in <...> itself; a list or brackets would mangle
+    the header and the envelope)."""
     a = addr.strip()
     local, at, domain = a.rpartition("@")
-    return bool(local and at and domain) and not any(c.isspace() or unicodedata.category(c) == "Cc" for c in a)
+    return bool(local and at and domain) and not any(c.isspace() or c in "<>," or unicodedata.category(c) == "Cc" for c in a)
+
+
+def _smtp_tls_env() -> str:
+    return _env("SMTP_TLS", "starttls").lower() or "starttls"
+
+
+def _smtp_port_env() -> int:
+    # empty: -1, the default for SMTP_TLS (set in __post_init__); a junk value falls back to that same default, so
+    # its warning names the port actually used
+    if not _env("SMTP_PORT"):
+        return -1
+    return _env_int("SMTP_PORT", SMTP_PORTS.get(_smtp_tls_env(), 587))
 
 
 def _is_http(url: str) -> bool:
@@ -232,12 +245,12 @@ class Config:
     # mail through an SMTP server (on when SMTP_HOST, SMTP_FROM and MAIL_TO are set). TLS: starttls (required, never
     # downgraded), tls (implicit, SMTPS) or none; SMTP_PORT -1 = the default for the TLS mode (set in __post_init__)
     smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST"))
-    smtp_tls: str = field(default_factory=lambda: _env("SMTP_TLS", "starttls").lower() or "starttls")
-    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", -1))
+    smtp_tls: str = field(default_factory=_smtp_tls_env)
+    smtp_port: int = field(default_factory=_smtp_port_env)
     smtp_user: str = field(default_factory=lambda: _env("SMTP_USER"))
     smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD"), repr=False)
     smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM"))
-    smtp_verify_tls: str = field(default_factory=lambda: _env("SMTP_VERIFY_TLS", "1"))
+    smtp_verify_tls: str = field(default_factory=lambda: _env("SMTP_VERIFY_TLS", "1") or "1")  # empty = the default
     # a POST per batch of new devices; the URL often carries the token (Discord, Home Assistant), so it is a secret
     webhook_url: str = field(default_factory=lambda: _env("WEBHOOK_URL"), repr=False)
     webhook_secret: str = field(default_factory=lambda: _env("WEBHOOK_SECRET"), repr=False)
@@ -319,12 +332,17 @@ class Config:
         if self.smtp_host:
             if not 1 <= self.smtp_port <= 65535:
                 problems.append("SMTP_PORT must be 1-65535")
-            if not _is_address(self.smtp_from):
+            # ASCII: formataddr() refuses anything else, before the server could offer SMTPUTF8
+            if not _is_address(self.smtp_from) or not self.smtp_from.isascii():
                 problems.append("SMTP_FROM must be an e-mail address (required with SMTP_HOST)")
-            if not self.mail_to or not all(_is_address(a) for a in self.mail_to.split(",")):
+            # empty pieces ("a@example.com,") are dropped, as the sender drops them
+            to = [a for a in self.mail_to.split(",") if a.strip()]
+            if not to or not all(_is_address(a) for a in to):
                 problems.append("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)")
             if bool(self.smtp_user) != bool(self.smtp_password):
                 problems.append("SMTP_USER and SMTP_PASSWORD must be set together")
+            if not (self.smtp_user + self.smtp_password).isascii():
+                problems.append("SMTP_USER and SMTP_PASSWORD must be ASCII")  # smtplib's AUTH encodes them as ASCII
             if self.smtp_password and self.smtp_tls == "none":
                 # the password would cross the network in clear text
                 problems.append("SMTP_PASSWORD needs SMTP_TLS=starttls or tls")
@@ -332,6 +350,14 @@ class Config:
                 problems.append("SMTP_VERIFY_TLS must be 1 or 0")
         if self.webhook_url:
             problems += url_problems("WEBHOOK_URL", self.webhook_url, "https://<host>/<path>")
+            # http.client sends the request line as ASCII (the host alone is IDNA-encoded)
+            try:
+                parts = urlparse(self.webhook_url)
+                rest = parts.path + parts.params + parts.query  # the fragment is never sent
+            except ValueError:
+                rest = ""  # reported by url_problems
+            if not rest.isascii():
+                problems.append("WEBHOOK_URL: the path and query must be ASCII (percent-encode other characters)")
             if self.webhook_format == "ntfy" and _is_http(self.webhook_url):
                 try:
                     topic = urlparse(self.webhook_url).path.rstrip("/").rsplit("/", 1)[-1]
@@ -341,11 +367,19 @@ class Config:
                     problems.append("WEBHOOK_URL needs a topic (https://<host>/<topic>) with WEBHOOK_FORMAT=ntfy")
         if self.webhook_format not in ("json", "ntfy", "discord"):
             problems.append("WEBHOOK_FORMAT must be json, ntfy or discord")
+        # checked as notify signs with it: whsec_ base64-decoded (strictly), any other value as UTF-8
         if self.webhook_secret.startswith("whsec_"):
             try:
-                base64.b64decode(self.webhook_secret[6:], validate=True)
+                if not base64.b64decode(self.webhook_secret[6:], validate=True):
+                    # an empty HMAC key: anyone could sign
+                    problems.append("WEBHOOK_SECRET: the whsec_ value is empty")
             except ValueError:
                 problems.append("WEBHOOK_SECRET: the whsec_ value is not valid base64")
+        else:
+            try:
+                self.webhook_secret.encode()
+            except UnicodeEncodeError:  # bytes the environment could not decode, kept as surrogates
+                problems.append("WEBHOOK_SECRET is not valid UTF-8")
         return problems
 
     def validate(self) -> list[str]:
@@ -395,7 +429,7 @@ class Config:
         # never echo the values: the hash is a secret
         if bool(self.auth_user) != bool(self.auth_password_hash):
             problems.append("AUTH_USER and AUTH_PASSWORD_HASH must be set together")
-        if ":" in self.auth_user or any(unicodedata.category(c) == "Cc" for c in self.auth_user):
+        if ":" in self.auth_user or any(unicodedata.category(c) in ("Cc", "Cs") for c in self.auth_user):
             problems.append("AUTH_USER must not contain ':' or control characters")  # Basic splits on the first ':'
         if self.auth_password_hash and parse_hash(self.auth_password_hash) is None:
             problems.append("AUTH_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")

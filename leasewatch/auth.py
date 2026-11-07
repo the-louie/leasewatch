@@ -69,7 +69,8 @@ def parse_hash(s: str) -> tuple[int, bytes, bytes] | None:
 
 def parse_basic(header: str | None) -> tuple[str, str] | None:
     """(user, password) from an `Authorization: Basic ...` header (RFC 7617), else None."""
-    if not header or len(header) > MAX_HEADER:
+    # ASCII only: str.strip() also drops non-ASCII blanks (0xA0, 0x85), and a header like that is a failed login
+    if not header or len(header) > MAX_HEADER or not header.isascii():
         return None
     scheme, _, token = header.strip().partition(" ")
     if not scheme.isascii() or scheme.lower() != "basic":
@@ -99,6 +100,7 @@ class Verifier:
         self._lock = threading.Lock()
         # failed attempts since the last log line (at most one line per FAIL_LOG_EVERY)
         self._fails = 0
+        self._fail_client = ""
         self._fail_logged = float("-inf")
 
     def check(self, header: str | None, client: str = "") -> bool:
@@ -108,7 +110,7 @@ class Verifier:
             if header:
                 self._failed(client)
             return False
-        # parse_basic accepted it, so the header is ASCII
+        # parse_basic accepted it, so the header is ASCII (it refuses any other)
         key = hmac.new(self._cache_key, header.encode("ascii"), hashlib.sha256).digest()
         now = time.monotonic()
         with self._lock:
@@ -139,9 +141,23 @@ class Verifier:
         # no lockout (anyone could lock the owner out); the address only, never the user name or password
         with self._lock:
             self._fails += 1
-            now = time.monotonic()
-            if now - self._fail_logged < FAIL_LOG_EVERY:
+            self._fail_client = client
+            wait = self._fail_logged + FAIL_LOG_EVERY - time.monotonic()
+            if wait > 0:
+                # the first one held back: a burst that ends inside the window must still reach the log
+                if self._fails == 1:
+                    t = threading.Timer(wait + 0.05, self._report_fails)
+                    t.daemon = True
+                    t.start()
                 return
-            n, self._fails, self._fail_logged = self._fails, 0, now
+        self._report_fails()
+
+    def _report_fails(self) -> None:
+        with self._lock:
+            n, client, now = self._fails, self._fail_client, time.monotonic()
+            # nothing pending, or a newer window has its own timer
+            if not n or now - self._fail_logged < FAIL_LOG_EVERY:
+                return
+            self._fails, self._fail_logged = 0, now
         log.warning("auth: %d failed attempt%s since the last report, last from %s", n, "" if n == 1 else "s",
                     client or "?")

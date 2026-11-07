@@ -167,7 +167,7 @@ class NotifyTest(MailBase):
            "vlan": "HomeNet", "lease_type": "dynamic"}
 
     def test_s12x_sent_log_has_no_device_data(self) -> None:
-        with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        with mock.patch.object(notify, "build_opener", lambda **k: mock.Mock(open=lambda req, timeout=None: _Resp())):
             with self.assertLogs("leasewatch.notify", "INFO") as cm:
                 notify.new_devices(self.cfg, [self.DEV])
         text = "\n".join(cm.output)

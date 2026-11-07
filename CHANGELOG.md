@@ -89,6 +89,19 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - PRUNE_DAYS no longer re-archives a device restored by hand until it has been online again.
 - Wi-Fi events: no 'joined' event for the first SSID of a client already on Wi-Fi, and no 'off Wi-Fi' or 'joined' events for a phone that walks out while the firewall's ARP still lists it; leaving to a shown cable is still an event. A switch that still holds the phone on an uplink (the access point's port) is no cable: the walk-out and the return write no `wifi` events.
 - GET and POST /api/devices/<mac> with a merged private (alias) MAC now act on the device it was merged into, instead of returning 404.
+- Auth: an Authorization header with non-ASCII bytes (for example a 0xA0 or 0x85 blank) now gets a 401 and counts as a failed attempt. Before, the server dropped the connection and printed a traceback.
+- Auth: failed logins held back by the once-a-minute log limit are now reported when the minute ends, even if no later attempt arrives.
+- hash-password: a password with a byte that is not UTF-8 now gives 'cannot read the password' under every locale (C.UTF-8 included), and a run with stdout closed exits 1 without a traceback.
+- Mailgun no longer follows a redirect: it would resend the API key to another host ("mailgun: HTTP 3xx (redirect not followed)").
+- SMTP_FROM must be a plain ASCII address without <>, and a list is refused. MAIL_TO entries must not use <>, and a trailing comma is accepted. SMTP_USER and SMTP_PASSWORD must be ASCII. All are checked at startup, not on every send.
+- An empty SMTP_VERIFY_TLS= means the default (verify). A non-integer SMTP_PORT warning names the port actually used.
+- WEBHOOK_SECRET=whsec_ with an empty key, or a secret that is not valid UTF-8, is refused at startup. A non-ASCII path or query in WEBHOOK_URL is refused at startup.
+- SMTP: recipients refused while another is accepted are logged as a warning (a count, no address).
+- ntfy messages are cut to 4096 bytes with "… and N more".
+- Clearer errors: "smtp: bad SMTP_USER or SMTP_PASSWORD", "webhook: bad WEBHOOK_SECRET", "mailgun: bad MAILGUN_DOMAIN or MAILGUN_API_BASE".
+- A bug in a notification channel is logged once with a redacted traceback. U+0085, U+2028 and U+2029 are removed from the mail subject and body lines.
+- UniFi OS: a csrfToken claim in the TOKEN cookie that is not plain visible ASCII (1-512 characters) is ignored, so it can no longer make every poll fail on a session that is kept.
+- UniFi: a 401 right after a fresh login is reported as 'unifi: HTTP 401' on every poll again. Such a login no longer triggers the 60 s re-login pacing or a false 'session expired' log line.
 
 - **Kea:** on OPNsense 26.1.5 – 26.7.3, which send `is_reserved` as a list and no `lease_type`, every lease was marked static.
 

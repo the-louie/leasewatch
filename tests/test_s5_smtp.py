@@ -339,6 +339,89 @@ class NewDevicesTests(SmtpBase):
         self.assertEqual(m.devices, [DEV])
         self.assertEqual(notify.build_message(self.cfg(PUBLIC_URL=""), [DEV]).url, "")
 
+    def test_unexpected_exception_logs_redacted_traceback(self) -> None:
+        # S5R30: a bug in a channel must leave its stack in the log (once), without a secret from the exception text
+        notify._logged_bugs.clear()
+
+        class Boom:
+            name = "smtp"
+
+            def send(self, msg):
+                raise KeyError(PASSWORD)
+        cfg = self.cfg(SMTP_HOST="mail.example.com", SMTP_USER="ro", SMTP_PASSWORD=PASSWORD)
+        with mock.patch.object(notify, "channels", lambda cfg: [Boom(), ok_channel("webhook", [])]):
+            with self.assertLogs("leasewatch.notify", "WARNING") as logs:
+                notify.new_devices(cfg, [DEV])
+                notify.new_devices(cfg, [DEV])
+        text = "\n".join(logs.output)
+        self.assertEqual(text.count("Traceback"), 1, text)  # once per bug, not every poll
+        self.assertIn("in send", text)
+        self.assertNotIn(PASSWORD, text)
+
+    def test_unicode_line_breaks_leave_the_subject(self) -> None:
+        # S5R27: EmailMessage refuses U+0085/U+2028/U+2029 in a header as it does CR/LF
+        for ch in ("\x85", " ", " "):
+            m = notify.build_message(self.cfg(), [{**DEV, "hostname": f"evil{ch}X"}])
+            self.assertEqual(m.subject, "New device: evil X (10.0.0.9, HomeNet)")
+
+
+class S5FixSmtpTests(SmtpBase):
+    """Review fixes: a setting that passes validation works when sent; a partial refusal is logged."""
+
+    def problems(self, **env: str) -> list[str]:
+        return [p for p in self.cfg(SMTP_HOST="mail.example.com", **env).validate() if "SMTP" in p or "MAIL_TO" in p]
+
+    def test_from_address_rules(self) -> None:
+        # S5R06/S5R12: brackets, a list or a non-ASCII sender passed, then every send failed or lost the address
+        msg = "SMTP_FROM must be an e-mail address (required with SMTP_HOST)"
+        for bad in ("<lw@example.com>", "a@example.com,b@example.com", "lw@exämple.se", "lö@example.se"):
+            self.assertIn(msg, self.problems(SMTP_FROM=bad), bad)
+        self.assertIn("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)",
+                      self.problems(MAIL_TO="<ops@example.com>"))
+
+    def test_mail_to_trailing_comma(self) -> None:
+        # S5R08: the sender drops empty pieces, so validation does too
+        self.assertEqual(self.problems(MAIL_TO="ops@example.com,"), [])
+        self.assertIn("MAIL_TO must be one or more e-mail addresses, comma separated (required with SMTP_HOST)",
+                      self.problems(MAIL_TO=" , "))
+
+    def test_empty_verify_tls_is_default(self) -> None:
+        # S5R09: an empty global setting means its default
+        cfg = self.cfg(SMTP_HOST="mail.example.com", SMTP_VERIFY_TLS="")
+        self.assertEqual([p for p in cfg.validate() if "SMTP" in p], [])
+        self.assertEqual(cfg.smtp_verify_tls, "1")
+
+    def test_bad_port_warning_names_the_port_used(self) -> None:
+        # S5R07: the warning said "using -1" while 465 was used
+        with self.assertLogs("leasewatch.config", "WARNING") as logs:
+            cfg = self.cfg(SMTP_TLS="tls", SMTP_PORT="abc")
+        self.assertEqual(cfg.smtp_port, 465)
+        self.assertIn("using 465", "\n".join(logs.output))
+        self.assertEqual(self.cfg(SMTP_TLS="tls", SMTP_PORT="").smtp_port, 465)
+
+    def test_non_ascii_login_refused_at_startup(self) -> None:
+        # S5R14: smtplib encodes the login as ASCII, so such a value can never log in
+        for env in ({"SMTP_USER": "ü", "SMTP_PASSWORD": PASSWORD}, {"SMTP_USER": "ro", "SMTP_PASSWORD": "pässword"}):
+            self.assertIn("SMTP_USER and SMTP_PASSWORD must be ASCII", self.problems(**env))
+
+    def test_non_ascii_login_error_names_the_login(self) -> None:
+        srv = self.fake(extensions=("AUTH PLAIN",))
+        cfg = self.cfg(SMTP_HOST="127.0.0.1", SMTP_PORT=str(srv.port), SMTP_USER="ro", SMTP_PASSWORD="pässword")
+        cfg.smtp_tls = "none"  # past validation: only the runtime message is tested here
+        self.assertEqual(self.err(cfg), "smtp: bad SMTP_USER or SMTP_PASSWORD")
+
+    def test_partially_refused_recipients_logged(self) -> None:
+        # S5R13: send_message returns the refused recipients instead of raising while one is accepted
+        srv = self.fake()
+        cfg = self.cfg(SMTP_HOST="127.0.0.1", SMTP_PORT=str(srv.port), SMTP_TLS="none",
+                       MAIL_TO="a@example.com, b@example.com")
+        with mock.patch("smtplib.SMTP.send_message", return_value={"b@example.com": (550, b"no")}):
+            with self.assertLogs("leasewatch.notify", "WARNING") as logs:
+                self.send(cfg)
+        text = "\n".join(logs.output)
+        self.assertIn("smtp: 1 of 2 recipient(s) refused", text)
+        self.assertNotIn("b@example.com", text)  # an address is personal data
+
 
 MAIL2 = {"LW_CONNECTORS": "fw1", **FW1, "MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com", "MAIL_TO": "a@example.com",
          "SMTP_HOST": "mail.example.com", "SMTP_FROM": "lw@example.com"}
