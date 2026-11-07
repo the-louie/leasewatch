@@ -6,6 +6,10 @@
 
   const state = {
     devices: [], meta: null, stats: null, events: [],
+    evNext: null, // id to pass as before= for the next events page (null: the list is complete)
+    evPaged: false, // a "Load more" page is on screen: the periodic refresh then merges instead of replacing
+    evKind: "", evFrom: "", evTo: "", // events filters: one kind, local days as YYYY-MM-DD
+    evGen: 0, // bumped by a filter change: a page requested under an older filter is dropped when it arrives
     q: "", status: "all", vlan: null, sort: "first_desc", open: null, returnTo: null, apiDown: false,
     deepLink: null, // the ?device= MAC from the address, until the first load has opened its drawer
     renderError: null, // kept so the 15 s status refresh does not hide a page error while the table is still broken
@@ -106,12 +110,12 @@
 
   // ---------- load ----------
   async function load() {
-    const seq = ++state.loadSeq;
+    const seq = ++state.loadSeq, gen = state.evGen;
     try {
-      const [d, s, e] = await Promise.all([api("/api/devices"), api("/api/stats"), api("/api/events")]);
+      const [d, s, e] = await Promise.all([api("/api/devices"), api("/api/stats"), api(eventsPath())]);
       if (seq !== state.loadSeq) return; // a newer load (e.g. the one after a save) already rendered fresher data
       state.skew = d.meta?.now ? d.meta.now - Date.now() / 1000 : 0;
-      state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; state.events = e.events;
+      state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) mergeFirstPage(e);
       state.renderError = null;
       try { renderStatus(); renderCards(); renderVlans(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
       catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
@@ -338,8 +342,12 @@
 
   function renderEvents() {
     const ul = $("#events"); ul.innerHTML = "";
-    if (!state.events.length) { ul.innerHTML = '<li><span class="t">–</span><span></span><span class="muted">No events yet. New devices, address changes and acknowledgements show up here.</span></li>'; return; }
-    for (const e of state.events.slice(0, 60)) {
+    renderEventControls();
+    if (!state.events.length) {
+      const none = state.evKind || state.evFrom || state.evTo ? "No events match these filters." : "No events yet. New devices, address changes and acknowledgements show up here.";
+      ul.innerHTML = `<li><span class="t">–</span><span></span><span class="muted">${esc(none)}</span></li>`; return;
+    }
+    for (const e of state.events) {
       const li = document.createElement("li");
       const t = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span>`;
       if (e.kind === "source_down" || e.kind === "source_up") {
@@ -364,6 +372,66 @@
       $(".who", li).onclick = () => openDrawer(e.mac);
       ul.appendChild(li);
     }
+  }
+  // ---------- events list: filters, paging ----------
+  const EV_PAGE = 60;
+  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged"]], ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
+    ["Review", ["acked", "unacked"]], ["Sources", ["source_down", "source_up"]]];
+  const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(new Date(`${v}T00:00:00`));
+  // local midnight of a YYYY-MM-DD day, plus n days, as epoch seconds
+  const dayTs = (v, n = 0) => { const [y, m, d] = v.split("-").map(Number); return Math.floor(new Date(y, m - 1, d + n).getTime() / 1000); };
+  // the filters as query parameters; null when From is after To (the server would answer 400)
+  function eventsFilter() {
+    if (state.evFrom && state.evTo && state.evFrom > state.evTo) return null;
+    const p = new URLSearchParams();
+    if (state.evKind) p.set("kind", state.evKind);
+    if (state.evFrom) p.set("since", dayTs(state.evFrom));
+    if (state.evTo) p.set("until", dayTs(state.evTo, 1));
+    return p;
+  }
+  function eventsPath(before) {
+    const q = new URLSearchParams({ limit: EV_PAGE });
+    for (const [k, v] of eventsFilter() || []) q.set(k, v);
+    if (before) q.set("before", before);
+    return `/api/events?${q}`;
+  }
+  function renderEventControls() {
+    const p = eventsFilter(), bad = p === null;
+    $("#evMore").classList.toggle("hidden", state.evNext === null || bad);
+    $("#evCsv").classList.toggle("hidden", bad); $("#evRange").classList.toggle("hidden", !bad);
+    if (p) $("#evCsv").href = `/api/events.csv${p.toString() ? `?${p}` : ""}`;
+  }
+  // the periodic refresh: the first page. With "Load more" pages on screen it only adds the newer events, and only when
+  // the page still reaches the newest one shown; otherwise more than a page arrived, there could be a gap, so reset
+  function mergeFirstPage(e) {
+    const had = state.events, top = had.length ? had[0].id : null, i = e.events.findIndex(x => x.id === top);
+    if (state.evPaged && i >= 0) state.events = e.events.slice(0, i).concat(had);
+    else { state.events = e.events; state.evNext = e.next; state.evPaged = false; }
+  }
+  // a changed filter starts over: first page, with the address and the controls following
+  async function eventsFilterChanged() {
+    const gen = ++state.evGen;
+    syncUrl();
+    if (eventsFilter() === null) { state.events = []; state.evNext = null; state.evPaged = false; renderEvents(); return; }
+    try {
+      const e = await api(eventsPath());
+      if (gen !== state.evGen) return;
+      state.events = e.events; state.evNext = e.next; state.evPaged = false;
+      renderEvents();
+    } catch (err) { if (gen === state.evGen) showBanner(`Cannot load events: ${err.message}`); }
+  }
+  async function loadMoreEvents() {
+    const btn = $("#evMore"), gen = state.evGen, next = state.evNext;
+    if (!next || btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const e = await api(eventsPath(next));
+      if (gen !== state.evGen) return;
+      const seen = new Set(state.events.map(x => x.id));
+      state.events = state.events.concat(e.events.filter(x => !seen.has(x.id))); state.evNext = e.next; state.evPaged = true;
+      renderEvents();
+    } catch (err) { showBanner(`Cannot load more events: ${err.message}`); }
+    finally { btn.disabled = false; }
   }
   const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up" }[k] || k);
 
@@ -558,6 +626,7 @@
     clearTimeout(urlRetry);
     const p = new URLSearchParams();
     if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan !== null) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
+    if (state.evKind) p.set("ek", state.evKind); if (state.evFrom) p.set("es", state.evFrom); if (state.evTo) p.set("eu", state.evTo);
     // the open drawer is part of the address, so a copied URL shows the same device; a link not yet opened stays
     const dev = state.open || state.deepLink;
     // WebKit throws after ~100 calls in a short window (fast typing): retry until the window ends, or the URL keeps
@@ -570,6 +639,10 @@
     const p = new URLSearchParams(location.search);
     state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan"); state.sort = p.get("sort") || "first_desc";
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
+    const ek = p.get("ek") || "", es = p.get("es") || "", eu = p.get("eu") || "";
+    state.evKind = /^[a-z_]{1,20}$/.test(ek) ? ek : ""; state.evFrom = isDay(es) ? es : ""; state.evTo = isDay(eu) ? eu : "";
+    $("#evKind").value = state.evKind; $("#evFrom").value = state.evFrom; $("#evTo").value = state.evTo;
+    if (!$("#evKind").value) state.evKind = ""; // a kind the list does not offer
     // lower case, colon form only: anything else is ignored, and the next syncUrl() drops it from the address
     const dl = (p.get("device") || "").toLowerCase();
     state.deepLink = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(dl) ? dl : null;
@@ -598,6 +671,15 @@
   $("#fStatus").addEventListener("change", e => { state.status = e.target.value; renderCards(); renderTable(); syncUrl(); });
   $("#sort").addEventListener("change", e => { state.sort = e.target.value; renderTable(); syncUrl(); });
   $$(".card[data-filter]").forEach(c => c.onclick = () => { state.status = state.status === c.dataset.filter ? "all" : c.dataset.filter; $("#fStatus").value = state.status; renderCards(); renderTable(); syncUrl(); });
+  for (const [label, kinds] of EV_KINDS) {
+    const g = document.createElement("optgroup"); g.label = label;
+    for (const k of kinds) { const o = document.createElement("option"); o.value = k; o.textContent = kindText(k); g.appendChild(o); }
+    $("#evKind").appendChild(g);
+  }
+  $("#evKind").addEventListener("change", e => { state.evKind = e.target.value; eventsFilterChanged(); });
+  $("#evFrom").addEventListener("change", e => { state.evFrom = isDay(e.target.value) ? e.target.value : ""; eventsFilterChanged(); });
+  $("#evTo").addEventListener("change", e => { state.evTo = isDay(e.target.value) ? e.target.value : ""; eventsFilterChanged(); });
+  $("#evMore").onclick = loadMoreEvents;
   $("#emptyClear").onclick = clearFilters;
   // leaving the mode clears the selection, so no hidden ticks wait for the next time
   $("#selBtn").onclick = () => { state.selecting = !state.selecting; state.sel.clear(); renderTable(); };

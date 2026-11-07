@@ -6,6 +6,7 @@ test asserts on its scenario's JSON result line.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -175,7 +177,7 @@ class BrowserUITest(_BrowserCase):
         # the page sent the tag of its first load itself and got a 304 with the same tag
         self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100"$')
         self.assertEqual((devices[0]["status"], devices[0]["etag"]), (304, devices[0]["sent"]))
-        self.assertEqual([r["status"] for r in events], [304])
+        self.assertEqual([r["status"] for r in events], [200])  # the paged request has parameters, so no ETag
         self.assertEqual((d["rows_before"], d["rows_after"]), (16, 16))
         self.assertTrue(d["status_after"].startswith("polled"), d["status_after"])
         self.assertTrue(d["banner_hidden"])
@@ -638,6 +640,68 @@ class BrowserSourceEventsTest(_BrowserCase):
         self.assertEqual(sorted(d["kinds"]), ["k source_down", "k source_up"])
         self.assertFalse(d["who"])
         self.assertFalse(d["drawer_open_after_click"])
+
+
+class BrowserEventsViewTest(_BrowserCase):
+    """The events list: 60 per page with "Load more", a kind select, a date range and the export link."""
+
+    KINDS = ("ip", "hostname", "vlan")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base, db = start(cls, [sighting(n, h, net, on) for n, h, net, on, new in DEVICES if not new])
+        # 150 events, 50 on each of the three days before today (local noon + i seconds), kinds in turn
+        noon = datetime.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        with db.tx() as c:
+            for i in range(150):
+                ts = int((noon - datetime.timedelta(days=3 - i // 50)).timestamp()) + i
+                c.execute("INSERT INTO events (mac, kind, detail, ts) VALUES (?, ?, ?, ?)", (mac(1), cls.KINDS[i % 3], f"n{i}", ts))
+        cls.run_scenarios(base, ("eventsview",))
+
+    @staticmethod
+    def params(href: str) -> dict:
+        parts = urllib.parse.urlsplit(href)
+        return {"path": parts.path, **{k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items()}}
+
+    @staticmethod
+    def midnight(day: str, plus: int = 0) -> int:
+        y, m, d = map(int, day.split("-"))
+        return int((datetime.datetime(y, m, d) + datetime.timedelta(days=plus)).timestamp())
+
+    def test_paging_by_sixty(self) -> None:
+        d = self.result("eventsview")
+        self.assertEqual((d["first"], d["second"], d["third"]), (60, 120, 150))
+        self.assertFalse(d["more_hidden_first"])
+        self.assertTrue(d["more_hidden_end"])
+        self.assertEqual(d["unique_after_paging"], 150)
+        self.assertEqual(d["csv_plain"], "/api/events.csv")
+
+    def test_kind_select_offers_every_kind(self) -> None:
+        d = self.result("eventsview")
+        values = [o["value"] for o in d["kind_options"]]
+        self.assertEqual(values[0], "")
+        self.assertEqual(len(values), 16)  # "All" and the 15 kinds the server writes
+        for k in ("source_down", "source_up", "lease_type"):
+            self.assertIn(k, values)
+        self.assertIn({"value": "source_down", "text": "source down"}, d["kind_options"])
+
+    def test_kind_filter(self) -> None:
+        d = self.result("eventsview")
+        self.assertEqual(d["kind_rows"], 50)
+        self.assertTrue(d["kind_more_hidden"])
+        self.assertEqual(self.params(d["kind_csv"]), {"path": "/api/events.csv", "kind": "ip"})
+        self.assertEqual(d["kind_url"], "?ek=ip")
+
+    def test_date_range_is_one_local_day(self) -> None:
+        d = self.result("eventsview")
+        self.assertEqual(d["day_rows"], 50)
+        p = self.params(d["day_csv"])
+        self.assertEqual(p, {"path": "/api/events.csv", "since": str(self.midnight(d["day"])), "until": str(self.midnight(d["day"], 1))})
+        self.assertEqual(d["kind_day_rows"], 16)  # a changed filter starts again at the first page
+
+    def test_no_horizontal_scroll(self) -> None:
+        d = self.result("eventsview")
+        self.assertEqual((d["scroll_1400"], d["scroll_1280"], d["scroll_800"]), (0, 0, 0))
 
 
 class BrowserReadOnlyTest(_BrowserCase):

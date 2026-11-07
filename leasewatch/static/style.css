@@ -156,6 +156,11 @@ main.has-selbar { padding-bottom: 96px; }
 
 .events { margin-top: 26px; }
 .events h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.event-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.event-filters label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.event-filters input[type="date"] { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); color: var(--text); font: inherit; }
+.event-filters a.btn { text-decoration: none; color: var(--text); }
+.event-more { margin-top: 10px; text-align: center; }
 .event-list { list-style: none; margin: 0; padding: 0; background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); }
 .event-list li { display: grid; grid-template-columns: 150px 92px 1fr; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 13.5px; align-items: baseline; }
 .event-list li:last-child { border-bottom: 0; }

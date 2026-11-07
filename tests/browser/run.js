@@ -460,6 +460,37 @@ const scenarios = {
     return { count: rows.length, texts: rows.map(r => r.text), who: rows.some(r => r.who), kinds: rows.map(r => r.kind),
              drawer_open_after_click: await drawerOpen(page) };
   },
+  // events view: 150 seeded events (3 kinds, 3 days): paging by 60, the kind select, a one-day range, the export link
+  async eventsview(page) {
+    const rows = n => page.waitForFunction(c => document.querySelectorAll('#events li').length === c, {}, n);
+    const moreHidden = () => page.$eval('#evMore', b => b.classList.contains('hidden'));
+    const csv = () => page.$eval('#evCsv', a => a.getAttribute('href'));
+    const scroll = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    const res = {};
+    await rows(60);
+    res.first = 60; res.more_hidden_first = await moreHidden(); res.csv_plain = await csv();
+    res.kind_options = await page.$$eval('#evKind option', os => os.map(o => ({ value: o.value, text: o.textContent })));
+    await page.click('#evMore'); await rows(120); res.second = 120;
+    await page.click('#evMore'); await rows(150); res.third = 150;
+    res.more_hidden_end = await moreHidden();
+    res.unique_after_paging = await page.$$eval('#events li', ls => new Set(ls.map(l => l.textContent)).size);
+    await page.select('#evKind', 'ip'); await rows(50);
+    res.kind_rows = 50; res.kind_csv = await csv(); res.kind_more_hidden = await moreHidden();
+    res.kind_url = await page.evaluate(() => location.search);
+    await page.select('#evKind', ''); await rows(60);
+    const d = new Date(); d.setDate(d.getDate() - 2);
+    res.day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    for (const id of ['#evFrom', '#evTo']) await page.$eval(id, (el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); }, res.day);
+    await rows(50);
+    res.day_rows = 50; res.day_csv = await csv();
+    // a filter change after paging starts over at the first page
+    await page.select('#evKind', 'hostname'); await rows(16);
+    res.kind_day_rows = 16;
+    res.scroll_1400 = await scroll();
+    await page.setViewport({ width: 1280, height: 900 }); res.scroll_1280 = await scroll();
+    await page.setViewport({ width: 800, height: 900 }); res.scroll_800 = await scroll();
+    return res;
+  },
   // the page's 60 s reload, run now: the second /api/devices is a 304 and the table keeps its rows
   async etag(page) {
     const rows0 = (await rowNames(page)).length;

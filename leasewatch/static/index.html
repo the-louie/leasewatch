@@ -95,8 +95,16 @@
   </section>
 
   <section class="events">
-    <h2>Recent events</h2>
+    <h2>Events</h2>
+    <div class="event-filters">
+      <label>Kind <select id="evKind"><option value="">All kinds</option></select></label>
+      <label>From <input type="date" id="evFrom"></label>
+      <label>To <input type="date" id="evTo"></label>
+      <a class="btn" id="evCsv" href="/api/events.csv">Export CSV</a>
+      <span class="muted hidden" id="evRange" role="status">From is after To.</span>
+    </div>
     <ul id="events" class="event-list"></ul>
+    <div class="event-more"><button class="btn hidden" id="evMore" type="button">Load more</button></div>
   </section>
 
   <!-- inside main: the open drawer makes main inert, and the bar with it -->
