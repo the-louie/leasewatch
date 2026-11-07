@@ -25,6 +25,7 @@ leasewatch is a tool for a home or small-office LAN. It is meant to run behind a
 - **Responses:** every response, errors included, carries security headers and a strict `Content-Security-Policy` (own script and style only, no inline code, own origin only, no framing). The CSV export neutralises spreadsheet formula injection from untrusted fields such as DHCP hostnames.
 - **Secrets are never sent or logged.** API keys, passwords, SNMP keys, the webhook URL and the login password never appear in logs, error responses, API output or the page; errors from connectors and notification channels are redacted and carry a code or short text only. Connector secrets can be read from files (`<KEY>_FILE`). Requests to the firewall and the UniFi controller ignore HTTP proxies unless the instance sets `PROXY=1`.
 - **Container:** runs as the non-root user `10001:10001` with a read-only root file system; `/data` is the only writable volume (plus a tmpfs `/tmp`).
+- **Not an intrusion detector.** A new private (locally administered) MAC never sends a new-device mail, and one that sends the DHCP client-id or a distinctive hostname of a known device is merged into it (README, *Private MACs*). A device on the LAN can therefore hide in the list by copying another device's client-id or hostname.
 - **Third-party connectors** run with leasewatch's full privileges and see the whole environment. Load only code you trust.
 
 ## What the notifications send

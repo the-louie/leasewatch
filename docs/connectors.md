@@ -91,7 +91,7 @@ One device as one source saw it (an IP, a hostname, a network).
 | `network` | `str` | Human interface name (`LAN`, `IOT`); shown as the device's network (the `vlan` column). |
 | `iface` | `str` | Source-specific interface id (`opt3`). |
 | `lease_type` | `str` | `"static"`, `"dynamic"` or `""`. Only kind `"dhcp"` sets it. |
-| `client_id` | `str` | DHCP client-id or DUID if known. Reserved; not used yet. |
+| `client_id` | `str` | DHCP client-id or DUID if known. The host uses it to merge a new private (locally administered) MAC into a known device with the same client-id (see the README, *Private MACs*); at least 2 bytes count. |
 
 ### Attachment: where a device hangs
 

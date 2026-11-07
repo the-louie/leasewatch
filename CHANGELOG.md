@@ -5,7 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## 1.2.0 (unreleased)
 
 ### Added
-- UniFi connector keeps its login session between polls and logs in again only when the session expires; logout happens on close.
+- UniFi connector keeps its login session between polls and logs in again only when the session expires.
 - UniFi OS consoles supported (new PLATFORM setting: auto, classic, unifi_os; untested on hardware). UniFi connector version 1.1.
 - **Notification channels:** new devices can be sent through Mailgun, SMTP and a webhook, each on when its settings are complete (`/api/status` `meta.mail` and the start log line `mail on (mailgun, smtp, webhook)` mean any channel). Each batch goes to every channel; the queue is cleared when at least one delivered, and a channel that failed is logged and misses that batch. Mailgun behaves as before.
 - **SMTP:** `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS` (`starttls` default and required, `tls`, `none`), `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_VERIFY_TLS`. The certificate and host name are always checked unless `SMTP_VERIFY_TLS=0`; a password with `SMTP_TLS=none` is refused at startup; errors carry the SMTP code only.
@@ -16,13 +16,15 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - **contrib/leasewatch-dnsmasq:** connector type `dnsmasq_leases` reads the DHCPv4 leases from a dnsmasq leases file (Pi-hole, OpenWrt, Linux), mounted read-only.
 - **contrib/leasewatch-mikrotik:** connector type `mikrotik` reads the DHCPv4 leases and the ARP table from MikroTik RouterOS 7 through its REST API (read-only; untested on real hardware).
 - **OPNsense dnsmasq:** `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` reads the DHCPv4 leases of the dnsmasq DHCP server (`/api/dnsmasq/leases/search`, OPNsense 25.1.6+). IPv6 leases are skipped; reservations without an active lease are not listed. The privilege *Services: Dnsmasq DNS/DHCP: Settings* also grants write access: OPNsense has no read-only one.
-- **Private MACs:** a new locally administered (private) MAC that matches exactly one known device, by DHCP client-id or else by a distinctive DHCP hostname of a device seen in the last 30 days, is merged into it: its IP, hostname, port, Wi-Fi and *Seen by* rows land on that device, the alias is stored in the `aliases` table, and a `merged` event is written. Never at the first poll, never between two hardware MACs, never into a device on the wire in the same poll. A new private MAC, merged or not, sends no new-device mail.
+- **Private MACs:** a new locally administered (private) MAC that matches exactly one known device, by DHCP client-id or else by a distinctive DHCP hostname of a device seen in the last 30 days, is merged into it: its IP, hostname, port, Wi-Fi and *Seen by* rows land on that device, the alias is stored in the `aliases` table, and a `merged` event is written. Never at the first poll, never between two hardware MACs; a hostname match never merges into a device on the wire in the same poll (a client-id match does). A new private MAC, merged or not, sends no new-device mail.
 - **Private MACs in the page:** every device with a private (locally administered) MAC has a yellow-tinted border in the list and a 🕵️ next to its MAC with the hint "private address" (tooltip and screen-reader text); the device page says the address is private and lists the MACs merged into the device (*Merged addresses*: MAC, matched client-id or hostname, merged, last seen).
 - **API:** `private` on every device in `/api/devices`, `/api/devices/<mac>` and the POST answer; `aliases` (the merged MACs) in `/api/devices/<mac>`. CSV: a `private` column (1/0) before `note`.
 - **Archive:** "Archive" on the device page (POST `{"archived": true}`) takes a device out of the list; the status filter "Archived" shows archived devices and "Restore to list" puts one back. History, events, name, note and ack are kept; the cards and network chips do not count archived devices, and an archived device leaves the mail queue. A device that is online again after being offline returns to the list by itself with one `back` event, no `new` event and no mail; a static lease alone does not bring it back. Events `archived` and `restored`. `/api/devices` gives `archived_ts`; CSV: an `archived` column before `note`.
 - **Login (optional):** `AUTH_USER` and `AUTH_PASSWORD_HASH` (both or neither, checked at startup) turn on HTTP basic auth for every path, including `/static/`, the CSV export and `/healthz`. The Host check still comes first (421/400), then 401 with `WWW-Authenticate: Basic realm="leasewatch", charset="UTF-8"`. The password is stored only as a PBKDF2-SHA256 hash (`pbkdf2_sha256:<iterations>:<salt>:<hash>`) and compared in constant time; a correct login is remembered for 10 minutes, at most two password checks run at once (else 503 with `Retry-After: 5`), and failed logins are logged at most once a minute with a count and the client address only.
 - **`python -m leasewatch hash-password [--iterations N]`:** prints the `AUTH_PASSWORD_HASH` value; the password comes from a prompt (asked twice) or one line of stdin, never from the command line.
 - **`PRUNE_DAYS`** (default 0 = off): devices not online for that many days, with no name and not marked known, are archived once per poll (never at the first poll or while the baseline waits).
+- **`check` and `collect` commands:** `python -m leasewatch check [instance ...]` prints the loaded connector types, the config problems and each instance's check result; `collect <instance> [--json]` runs one check and collect and prints the records as leasewatch would merge them. Both mask hosts in error texts and exit 2 on a config or load problem.
+- **pip install:** `pyproject.toml`; `pip install .` (or `pip install '.[snmp]'` for the SNMP switch connector) installs the `leasewatch` command.
 - **SECURITY.md:** how to report a vulnerability, the supported versions and the security stance (login, Host check, CSP, what is never logged, what the notification channels send).
 
 ### Changed
@@ -48,68 +50,13 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Closing the device drawer (Escape, the backdrop, ✕) or opening another device while Name or Note has unsaved text asks "Discard unsaved changes?" first; Cancel keeps the drawer and the text.
 - Closing the device drawer while its Save is still running no longer asks "Discard unsaved changes?" for the text being saved; it asks only for text typed after Save.
 - The device drawer is modal for the keyboard: Tab and Shift+Tab cycle through its controls, and the page behind it (header, table, footer) takes no focus until it closes.
-- `check <name>`, `collect <name>` and `snmp-detect <name>` now exit 2 on a config problem that belongs to no instance (e.g. `LW_CONNECTOR__FW1_SECRET` with one underscore, an invalid name in `LW_CONNECTORS`) and on a load problem, as the server does.
-- `check` and `collect` keep the instance name and the client's `fw1 <path>:` label when the instance is named like its host; only the error text is host-masked. `check` now masks the host in problem texts too.
-- `collect` shows device data unmasked again (a switch's own redact no longer masks its host and user in records), and prints only the declared record fields.
-- `collect --json` no longer crashes on stats keys that are not strings or values whose `str()` raises, and never prints NaN/Infinity.
-- `check` and `collect` no longer hang on a `close()` that blocks after a timed-out probe, build each named instance only once, and tolerate a connector `redact()` that returns a non-string.
-- The `connector types:` start-log line escapes control characters from package metadata.
+- `snmp-detect <name>` now exits 2 on a config problem that belongs to no instance (e.g. `LW_CONNECTOR__FW1_SECRET` with one underscore, an invalid name in `LW_CONNECTORS`), as the server does.
 - While the baseline waits, a producer whose check keeps failing is still collected every poll once 10 minutes have passed, so the baseline can be taken.
-- A connector that calls sys.exit() while it is built only disables its instance; the service keeps running.
-- A connector can call device_names() in its constructor.
 - The 'changed' count in the poll log line is 0 while the baseline waits, which matches the events and history written.
-- Connector loader: a plugin whose describe() has malformed settings (including a min or max that is not an int), produces or roles is now refused as a broken type; Config() no longer stops with a traceback.
-- Connector loader: a deeply nested pyproject.toml or an oversized API group number is now reported against that one entry; it no longer drops every third-party type.
-- Connector loader: after a loader failure or Ctrl-C during plugin import, only the built-ins stay registered and no half-imported LW_CONNECTORS_DIR package stays in sys.modules; any other BaseException from a plugin import is now a plugin failure.
-- Connector loader: a type that is pip-installed and also mounted in LW_CONNECTORS_DIR is refused as 'provided twice … remove one', and the start stops (the mounted package would shadow the installed one); a shadowing or malformed declaration still counts in the duplicate check.
-- Connector loader: the group must be exactly leasewatch.connectors.v<N> (ASCII, no leading zero); type names with a trailing newline are refused; spaces around ':' in a LW_CONNECTORS_DIR entry point are accepted as pip accepts them.
-- Connector loader: clearer messages for a missing __init__.py, a package name repeated across LW_CONNECTORS_DIR entries, and unreadable distribution metadata (now names the distribution); the other-API warning is logged once per distribution, and dist names spelled 'lw_b'/'lw-b' count as one distribution.
-- registry() now also rebuilds when the working directory changes, so a relative LW_CONNECTORS_DIR follows os.chdir; unload drops submodules a plugin imported after the load.
-- Contract tests (`leasewatch.connectors.testing`): the no-network test also stops `socket.getnameinfo` and no longer errors on a platform without `socket.sendmsg` (Windows); a type name or setting key with a trailing newline now fails the describe test; an empty tuple for a record kind the type does not produce now passes the check-and-collect test.
-- docs/connectors.md: `make_host_mask()` and the contract test's host check skip a host shorter than 3 characters; this is now stated.
-- check and collect mask a URL or HOST host anywhere in an error or problem text, including before the first ": "; only the instance's own "connector <name> (<type>): " head stays readable.
-- check and collect mask a config: line that belongs to one instance with that instance's host only; a line that belongs to no instance is masked with every instance's host.
-- Device list: a refresh while a MAC or IP has keyboard focus keeps focus on it (it moved to the row, so Enter opened the drawer instead of copying).
-- Device list: the row count leaves archived devices out of its total ("15 of 15", was "15 of 16"); under "Archived" it counts only archived devices.
-- Copy MAC and IP: the "press Ctrl+C" hint of a keyboard copy goes when focus leaves the MAC or IP, not only when the pointer leaves; a second copy within 0.9 s shows "Copied" for its full 0.9 s.
-- Device drawer: Archive and Restore to list no longer show "saved" next to Save; typed Name or Note text is not saved by them and stays an unsaved edit.
-- Events: `archived`, `restored` and `merged` have a colour, like the other kinds.
-- check and collect no longer disable an instance because of a global load problem whose path contains LW_CONNECTOR__<NAME>__.
-- check and collect no longer crash with OverflowError on a disabled instance with a huge TIMEOUT.
-- collect: an int stat with more than 4300 digits, or an int or str subclass with a raising __str__ or __format__, no longer gives a traceback; keys that turn into the same text are all kept, as "1" and "1#2".
-- A connector plugin that calls sys.exit() in its constructor or validate() (also a generator validate()) now only disables its instance at server start and in `leasewatch check`; the process no longer exits with the plugin's code. The built connector is still closed, and its setting problems are still reported.
-- Connector loader: a package in LW_CONNECTORS_DIR that would shadow another module now stops the start even when its type is a duplicate or a built-in name.
-- Connector loader: a space inside a module name in an entry point value is refused instead of being removed.
-- Connector loader: describe() produces/roles may be a tuple or list of str, as the contract test accepts; a Setting key that is not a str makes the type broken instead of crashing Config().
-- Connector loader: a distribution name or LW_CONNECTORS_DIR entry with a newline can no longer forge a log line; two distributions without a Name are no longer merged into one.
-- Connector loader: unloading plugins no longer fails when another thread imports a module at the same time.
-- The new-device mail queue no longer drops a device after 24 h: it is kept until mailed, acknowledged or archived, so a clock step can no longer lose a mail.
-- A DHCP hostname that starts with a brand or model stem (galaxy, pixel, chromecast, iphone, ipad, android, ...) is generic and never merges a private MAC, e.g. `Galaxy-S21` or `Pixel-7`.
-- While a sighting producer has failed, no private-MAC merge is decided: a new private MAC is held back for up to 30 minutes and merges once its lease is back.
-- A device and its merged MAC on one switch: the edge port wins over a stale uplink entry whatever the walk order; a controller listing both places the device at its active client.
-- The merged DHCP client-id no longer depends on the order of otherwise equal lease rows.
-- PRUNE_DAYS no longer re-archives a device restored by hand until it has been online again.
-- Wi-Fi events: no 'joined' event for the first SSID of a client already on Wi-Fi, and no 'off Wi-Fi' or 'joined' events for a phone that walks out while the firewall's ARP still lists it; leaving to a shown cable is still an event. A switch that still holds the phone on an uplink (the access point's port) is no cable: the walk-out and the return write no `wifi` events.
-- GET and POST /api/devices/<mac> with a merged private (alias) MAC now act on the device it was merged into, instead of returning 404.
-- Auth: an Authorization header with non-ASCII bytes (for example a 0xA0 or 0x85 blank) now gets a 401 and counts as a failed attempt. Before, the server dropped the connection and printed a traceback.
-- Auth: failed logins held back by the once-a-minute log limit are now reported when the minute ends, even if no later attempt arrives.
-- hash-password: a password with a byte that is not UTF-8 now gives 'cannot read the password' under every locale (C.UTF-8 included), and a run with stdout closed exits 1 without a traceback.
 - Mailgun no longer follows a redirect: it would resend the API key to another host ("mailgun: HTTP 3xx (redirect not followed)").
-- SMTP_FROM must be a plain ASCII address without <>, and a list is refused. MAIL_TO entries must not use <>, and a trailing comma is accepted. SMTP_USER and SMTP_PASSWORD must be ASCII. All are checked at startup, not on every send.
-- An empty SMTP_VERIFY_TLS= means the default (verify). A non-integer SMTP_PORT warning names the port actually used.
-- WEBHOOK_SECRET=whsec_ with an empty key, or a secret that is not valid UTF-8, is refused at startup. A non-ASCII path or query in WEBHOOK_URL is refused at startup.
-- SMTP: recipients refused while another is accepted are logged as a warning (a count, no address).
-- ntfy messages are cut to 4096 bytes with "… and N more".
-- Clearer errors: "smtp: bad SMTP_USER or SMTP_PASSWORD", "webhook: bad WEBHOOK_SECRET", "mailgun: bad MAILGUN_DOMAIN or MAILGUN_API_BASE".
-- A bug in a notification channel is logged once with a redacted traceback. U+0085, U+2028 and U+2029 are removed from the mail subject and body lines.
-- UniFi OS: a csrfToken claim in the TOKEN cookie that is not plain visible ASCII (1-512 characters) is ignored, so it can no longer make every poll fail on a session that is kept.
-- UniFi: a 401 right after a fresh login is reported as 'unifi: HTTP 401' on every poll again. Such a login no longer triggers the 60 s re-login pacing or a false 'session expired' log line.
-- Login: failed attempts still held back for the next log line are logged when the service stops.
-- `SMTP_FROM` and `MAIL_TO` accept only plain `name@domain` addresses: a second `@`, `;`, `:`, quotes, parentheses, square brackets or a backslash (e.g. `a@example.com;b@example.com`, `mailto:…`) are refused at startup instead of failing every send.
-- `SMTP_PORT=-1` is no longer taken silently as the default port; it is logged as not a port, and the default is used.
-- ntfy: a message of exactly 4096 bytes is cut too (ntfy took it as an attachment).
-- Webhook: an invalid character in `WEBHOOK_URL` is reported as "webhook: bad WEBHOOK_URL" instead of "webhook: bad response".
-- A bug in a notification channel is logged with the exception type and the stack (file, line, function) only: no exception text, source lines or chained exceptions, which could carry device names or e-mail addresses.
+- `MAIL_TO` accepts only plain `name@domain` addresses: `<>`, a second `@`, `;`, `:`, quotes, parentheses, square brackets or a backslash are refused at startup instead of failing every send; a trailing comma is accepted.
+- Clearer Mailgun error: "mailgun: bad MAILGUN_DOMAIN or MAILGUN_API_BASE".
+- A bug in the mail sending is logged once with the exception type and the stack (file, line, function) only: no exception text, source lines or chained exceptions, which could carry device names or e-mail addresses. U+0085, U+2028 and U+2029 are removed from the mail subject and body lines.
 - With stdout closed (`>&-`), a command keeps the exit code it set (e.g. 2 for a usage error) instead of 1.
 - Device table: long "Connected via" text (Wi-Fi SSID @ AP with signal, switch port → device) is cut with an ellipsis and shown in full as a tooltip; the Type cell has a tooltip too, so the table no longer scrolls sideways at 1280–1920 px.
 

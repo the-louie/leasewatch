@@ -27,10 +27,10 @@ services:
       options: { max-size: "5m", max-file: "3" }
 
 # --- Variant: behind nginx-proxy -------------------------------------------
-# Remove the "ports:" block above and add this to the service:
-#     environment:
+# Remove the "ports:" block above, add these two lines under the service's existing "environment:":
 #       VIRTUAL_HOST: leases.example.lan
 #       VIRTUAL_PORT: "8080"
+# and add this to the service:
 #     networks:
 #       - nginx-proxy
 # and uncomment this at the top level:
