@@ -438,6 +438,15 @@ class Collector:
         self._pending_src.clear()
         self._pending_down.clear()
 
+    @staticmethod
+    def _count_poll(c: sqlite3.Connection, ok: bool, status: dict[str, str]) -> None:
+        """Bump the persistent poll counters (meta polls_ok/polls_failed, conn.<n>.failures) in the outcome transaction."""
+        keys = ["polls_ok" if ok else "polls_failed"] + [
+            k[:-3] + ".failures" for k, v in status.items()
+            if k.startswith("conn.") and k.endswith(".ok") and v == "0" and status.get(k[:-3] + ".enabled") == "1"]
+        c.executemany("INSERT INTO meta(key,value) VALUES(?,'1') ON CONFLICT(key) DO UPDATE SET "
+                      "value=CAST(COALESCE(CAST(value AS INTEGER),0)+1 AS TEXT)", [(k,) for k in keys])
+
     def _fail(self, msg: str, status: dict[str, str] | None = None) -> dict:
         now = int(time.time())
         with self.db.tx() as c:
@@ -446,6 +455,7 @@ class Collector:
             self.db.set_meta("last_error", msg, c)
             self.db.set_meta("last_error_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "0", c)
+            self._count_poll(c, False, status or {})
             self.db.set_meta("last_attempt_ts", str(now), c)  # a failed poll is still a poll: the loop is alive
             # the grace rule still applies while fw1 is unreachable: nothing stays "online" forever
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
@@ -638,6 +648,7 @@ class Collector:
             self.db.set_meta("last_poll_ts", str(now), c)
             self.db.set_meta("last_attempt_ts", str(now), c)
             self.db.set_meta("last_poll_ok", "1", c)
+            self._count_poll(c, True, enrich_status)
             self.db.set_meta("last_error", "", c)
             self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
             last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
