@@ -262,10 +262,12 @@ class Publisher:
         with self._closing_on_error():
             client.ping()
 
-    def close(self) -> None:
-        """Status offline, then DISCONNECT (so the broker drops the Will). Never raises."""
+    def close(self, timeout: float | None = None) -> None:
+        """Status offline, then DISCONNECT (so the broker drops the Will). Never raises. `timeout` caps each step."""
         if self.client is None:
             return
+        if timeout is not None:
+            self.client.timeout = min(self.client.timeout, timeout)
         if self.client.connected:
             try:
                 self.publish_status(False)

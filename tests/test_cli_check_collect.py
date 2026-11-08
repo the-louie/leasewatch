@@ -155,7 +155,8 @@ class TestCheck(CliBase):
                         lines[0])
         self.assertRegex(lines[1], r"^dhcp1 \(fakecli\): ok \(\d+ ms\)$")
         self.assertRegex(lines[2], r"^dhcp2 \(fakecli\): ok \(\d+ ms\)$")
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[3], "mqtt: off")
+        self.assertEqual(len(lines), 4)
         self.assertEqual(registry()["fakecli"].CLOSED, ["dhcp1", "dhcp2"])
         self.assertNoLeak(out, err)
 
@@ -399,7 +400,7 @@ class TestUnifiApiKey(CliBase):
     def test_check(self):
         rc, out, err = self.cli("check", "unifi")
         self.assertEqual(rc, 0, out + err)
-        self.assertRegex(out.splitlines()[-1], r"^unifi \(unifi\): ok \(\d+ ms\)$")
+        self.assertRegex(out.splitlines()[-2], r"^unifi \(unifi\): ok \(\d+ ms\)$")
         self.assertNotIn(self.key(), out + err)
 
     def test_collect_json(self):

@@ -663,7 +663,9 @@ class Handler(BaseHTTPRequestHandler):
         # attempt from before its start counts as none): by process age
         collector_stale = abs(now - attempt) > limit if attempt and attempt >= self.started else now - self.started > limit
         # only the configured channels: a channel removed from the config keeps its meta row
-        notify = {ch: m[f"notify.{ch}.ok"] == "1" for ch in cfg.mail_channels if f"notify.{ch}.ok" in m}
+        # mqtt also without MQTT_EVENTS: the presence publisher writes notify.mqtt.ok whenever MQTT_URL is set
+        chans = list(dict.fromkeys(cfg.mail_channels + (["mqtt"] if cfg.mqtt_on else [])))
+        notify = {ch: m[f"notify.{ch}.ok"] == "1" for ch in chans if f"notify.{ch}.ok" in m}
         return {
             "notify": notify,
             "last_attempt_ts": attempt or None, "last_attempt_age": abs(now - attempt) if attempt else None,

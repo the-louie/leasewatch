@@ -346,7 +346,8 @@ def check_cmd(argv: list[str]) -> int:
     from .connectors import broken_types, instances_context, refused_types
     ap = argparse.ArgumentParser(prog="python -m leasewatch check",
                                  description="Show the loaded connector types and config problems, then run validate() "
-                                             "and check() for each instance (collect() is never called).")
+                                             "and check() for each instance (collect() is never called), then the "
+                                             "MQTT settings (no connection to the broker is made).")
     ap.add_argument("instance", nargs="*", help="instance names (default: every instance in LW_CONNECTORS)")
     args = ap.parse_args(argv)
     cfg = Config()
@@ -395,6 +396,10 @@ def check_cmd(argv: list[str]) -> int:
         error = _probe_error(phase, out, timed_out, spec.timeout, mask)
         failed = failed or bool(error)
         _out(head + (f"check failed: {error}" if error else f"ok ({ms} ms)"))
+    if cfg.mqtt_on:  # settings only: check stays offline-safe toward the broker
+        _out(f"mqtt: {mqtt_target(cfg)} ({cfg.mqtt_devices}, discovery {'on' if cfg.mqtt_discovery_on else 'off'})")
+    else:
+        _out("mqtt: off")
     return 2 if problems or unknown else 1 if failed else 0
 
 
@@ -523,11 +528,23 @@ def collect_cmd(argv: list[str]) -> int:
     return rc
 
 
+def mqtt_target(cfg: Config) -> str:
+    """<scheme>://<host>:<port> of MQTT_URL (never a user name or password), or "invalid MQTT_URL"."""
+    host, port, tls = cfg.mqtt_endpoint
+    if not host:
+        return "invalid MQTT_URL"
+    return f"{'mqtts' if tls else 'mqtt'}://{f'[{host}]' if ':' in host else host}:{port}"
+
+
 def startup_line(cfg: Config, version: str) -> str:
-    """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail, who may write."""
+    """The INFO line at start: version, instances (name and type only; URLs and hosts stay out of the log), poll, mail,
+    the MQTT broker (scheme, host and port only), who may write."""
     conns = ", ".join(f"{s.name} ({s.type})" for s in cfg.instances)
     mail = f"on ({', '.join(cfg.mail_channels)})" if cfg.mail_enabled else "off"  # channel names only, no settings
     line = f"leasewatch {version}, connectors {conns or 'none'}; poll {cfg.poll_seconds} s; mail {mail}"
+    if cfg.mqtt_on:
+        discovery = "discovery" if cfg.mqtt_discovery_on else "no discovery"
+        line += f"; mqtt on ({mqtt_target(cfg)}, {discovery}, {cfg.mqtt_devices})"
     if cfg.read_only_on:  # READ_ONLY wins over WRITE_ALLOW
         return line + "; writes off"
     nets = [str(n.network_address) if n.prefixlen == n.max_prefixlen else str(n) for n in parse_networks(cfg.write_allow)[0]]

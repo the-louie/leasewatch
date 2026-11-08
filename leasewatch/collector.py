@@ -25,7 +25,9 @@ from .connectors.merge import (INSERT_COLUMNS, UPDATE_COLUMNS, ConnectorFailure,
                                is_private_mac, normalise_batch, to_fw1, merge as merge_batches)
 from .connectors.merge import merge_sightings as merge  # noqa: F401  (the per-MAC identity merge, kept importable here)
 from .fw1 import Fw1Client
-from . import notify
+from .mqtt import MqttError
+from .mqtt_pub import Publisher
+from . import __version__, notify
 
 log = logging.getLogger("leasewatch.collector")
 CLOSE_SECONDS = 5  # all connectors together, well inside the 30 s the container gets to stop
@@ -168,6 +170,10 @@ class Collector:
         self._alert_started = False  # the first alert pass of this process has read the pending events
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
+        # MQTT presence (MQTT_URL set): published after each good poll; its retry wait is the "mqtt" channel's backoff
+        self._mqtt = Publisher(cfg, db, __version__) if cfg.mqtt_on else None
+        self._mqtt_failed_polls = 0  # failed polls in a row; at SOURCE_DOWN_POLLS the status goes offline
+        self._mqtt_failing = False  # the broker could not be reached since the last publish that worked: warned once
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
         # source_down/source_up events (ts, kind, detail) and conn.<name>.down_since changes ("" deletes) not yet
         # committed: written by whichever outcome transaction comes next, dropped only after it committed
@@ -227,6 +233,8 @@ class Collector:
             return
         self._closed = True
         deadline = time.monotonic() + CLOSE_SECONDS
+        if self._mqtt is not None:  # first, so Home Assistant learns "offline" at once; at most half of CLOSE_SECONDS
+            self._mqtt.close(CLOSE_SECONDS / 2)
         late: list[str] = []
         busy: list[str] = []
         for name, conn in self._connectors.items():
@@ -866,6 +874,51 @@ class Collector:
                 continue
             self._notify_ok[name] = ok
 
+    def _mqtt_step(self, ok: bool) -> None:
+        """MQTT after a poll. A good poll (re)connects when the "mqtt" backoff is due and publishes what changed; a
+        failed poll publishes nothing, except status offline once at the SOURCE_DOWN_POLLS-th failed poll in a row (Home
+        Assistant then shows the trackers unavailable, not every device away). A broker error never fails the poll."""
+        pub = self._mqtt
+        if pub is None:
+            return
+        try:
+            if ok:
+                was_down = self._mqtt_failed_polls >= SOURCE_DOWN_POLLS
+                self._mqtt_failed_polls = 0
+                if not pub.connected:
+                    if not self._mail_backoff.due("mqtt"):
+                        return
+                    pub.connect()  # status online and a full publish
+                    was_down = False
+                elif was_down:  # the status was offline: everything again, then online
+                    pub.full = True
+                pub.publish_poll(self.db.devices(), self.db.stats(self.cfg.new_days))
+                if was_down:
+                    pub.publish_status(True)
+                pub.ping_if_idle()
+            else:
+                self._mqtt_failed_polls += 1
+                if not pub.connected:
+                    return
+                if self._mqtt_failed_polls == SOURCE_DOWN_POLLS:
+                    pub.publish_status(False)
+                pub.ping_if_idle()  # no message, but the session (and its Will) stays
+                return
+        except Exception as e:  # the publisher closed the client; the next due good poll reconnects and sends all
+            text = str(e) if isinstance(e, (OSError, MqttError)) else f"{type(e).__name__}: {e}"
+            self._mail_backoff.failed("mqtt", text)
+            wait = max(0, round(self._mail_backoff._get("mqtt").retry_at - self._mail_backoff._clock()))
+            log.log(logging.DEBUG if self._mqtt_failing else logging.WARNING, "mqtt: %s (retry in %d s)",
+                    text.removeprefix("mqtt: "), wait)
+            self._mqtt_failing = True
+            self._write_notify_state()
+            return
+        self._mail_backoff.delivered("mqtt")
+        if self._mqtt_failing:
+            log.info("mqtt: publishing again")
+            self._mqtt_failing = False
+        self._write_notify_state()
+
     def _sightings(self, producers: list[str]) -> tuple[dict[str, object], dict[str, str], dict[str, Batch]] | dict:
         """Collect the sighting producers: (every answer, status, the batches), or the failed poll when none answered."""
         # read again in run_once after the collection; here only to keep a pending baseline's failed check()s from backing off
@@ -970,6 +1023,7 @@ class Collector:
         producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
         collected = self._sightings(producers)
         if isinstance(collected, dict):  # the failed poll
+            self._mqtt_step(ok=False)
             return collected
         got, status, ok = collected
         sightings, raw_stats = self._raw_stats(ok)
@@ -979,6 +1033,7 @@ class Collector:
         prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
         waiting = self._baseline_gate(first_run, sightings, ok, producers, raw_stats, enrich_status)
         if isinstance(waiting, dict):  # the failed poll
+            self._mqtt_step(ok=False)
             return waiting
         batches = {n: got[n] for n in self._runs if n in got}
         state = self._merge_state(first_run, prev_ok, producers, waiting)
@@ -988,6 +1043,7 @@ class Collector:
             res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
         self._source_events_written()
         self._alert()
+        self._mqtt_step(ok=True)  # after the commit: the published state is what the page shows
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
             self._runs[n].answered = True
