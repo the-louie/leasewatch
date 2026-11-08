@@ -14,6 +14,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch import unifi
 from leasewatch.connectors import ConnectorError, HostContext
 from leasewatch.connectors.unifi import UnifiConnector, _UnifiCfg

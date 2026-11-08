@@ -1,5 +1,6 @@
 """The two control-character patterns differ on purpose: stored text keeps tab/newline, mail/webhook text does not."""
 import unittest
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.connectors.merge import _str
 from leasewatch.db import CONTROL_CHARS
 from leasewatch.notify import _LINE_UNSAFE

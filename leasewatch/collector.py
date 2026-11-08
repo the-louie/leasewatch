@@ -955,6 +955,12 @@ class Collector:
         last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
         if "reservations" in raw_stats:  # Kea reservations or dnsmasq hosts, when the backend reads them
             last_raw += f", {raw_stats['reservations']} reservations"
+        for key in ("ndp", "leases6"):  # IPv6 reads, present (0 included) when the setting is on
+            if key in raw_stats:
+                last_raw += f", {raw_stats[key]} {key}"
+        for flag, text in (("ndp_unavailable", "ndp"), ("kea6_unavailable", "kea6")):  # the read was refused or failed
+            if raw_stats.get(flag):
+                last_raw += f", {text} unavailable"
         self.db.set_meta("last_raw", last_raw, c)
         if first_run and not waiting:
             self.db.set_meta("baseline_ts", str(now), c)

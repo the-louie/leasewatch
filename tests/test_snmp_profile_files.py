@@ -2,6 +2,7 @@
 import json, os, pathlib, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch import snmp_profiles
 from leasewatch.snmp_profiles import ProfileError
 from leasewatch.switch import short_ifname

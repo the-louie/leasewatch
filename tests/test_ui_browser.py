@@ -797,7 +797,7 @@ class BrowserIp6Test(_BrowserCase):
     """The IPv6 line: under the IPv4 text in the IP column and in the phone meta line, in the drawer and in the search,
     for one device with an address and one without."""
     A, B = "02:00:00:00:60:01", "02:00:00:00:60:02"
-    V6 = "2001:db8::ff:fe00:1"
+    V6 = "2001:db8:1234:5600:211:22ff:fe33:4455"  # a real-length address: 37 characters
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -846,6 +846,11 @@ class BrowserIp6Test(_BrowserCase):
                 self.assertLessEqual(d["table_scroll"], 0, d)
                 self.assertLessEqual(d["page_scroll"], 0, d)
                 self.assertEqual(d["over"], [], d)
+
+    def test_focused_meta_address_survives_a_rebuild_and_enter_copies(self) -> None:
+        r = self.result("ipv6")
+        self.assertTrue(r["meta_focus"]["restored"], r["meta_focus"])
+        self.assertEqual(r["meta_enter"], {"copied": [self.V6], "open": False, "cls": True, "title": "Copied"}, r["meta_enter"])
 
 
 class BrowserSsidTest(_BrowserCase):

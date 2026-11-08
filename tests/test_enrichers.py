@@ -1,4 +1,5 @@
 import sys, unittest
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.switch import build_snapshot, short_ifname
 from leasewatch.unifi import parse_clients
 from leasewatch.fw1 import Fw1Client

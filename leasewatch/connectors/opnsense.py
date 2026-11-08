@@ -1,4 +1,5 @@
-"""OPNsense firewall as a connector: DHCPv4 leases (ISC, Kea or dnsmasq, plus Kea reservations) and the ARP table.
+"""OPNsense firewall as a connector: DHCPv4 leases (ISC, Kea or dnsmasq, plus Kea reservations) and the ARP table;
+with ipv6 on also the NDP table and DHCPv6 leases.
 
 A thin wrapper around fw1.Fw1Client; the client and its normalised fw1.Sighting stay the internal type for now.
 """
@@ -13,7 +14,7 @@ from . import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, S
 
 
 def to_sighting(s: Fw1Sighting, source: str, observed_at: int) -> Sighting:
-    """fw1's record in the connector shape: its "source" (dhcp/arp/ndp) is the kind, "online" the presence claim,
+    """fw1's record in the connector shape: its "source" (dhcp/dhcp6/arp/ndp) is the kind, "online" the presence claim,
     "vlan" the network name; source becomes the instance name."""
     return Sighting(mac=s.mac, source=source, kind=s.source, presence=s.online, observed_at=observed_at,
                     ip=s.ip, hostname=s.hostname, vendor=s.vendor, network=s.vlan, iface=s.iface, lease_type=s.lease_type,
@@ -33,7 +34,7 @@ class OpnsenseConnector(SettingsMixin):
             Setting("ignore_interfaces", default="wan,lo0", help="comma-separated identifiers, devices or descriptions"),
             Setting("proxy", default="0", help="honour http(s)_proxy for this connection"),
             Setting("ipv6", default="0",
-                    help="also read the NDP table (IPv6 neighbours) and DHCPv6 leases; needs the Diagnostics: NDP Table privilege"),
+                    help="also read the NDP table (IPv6 neighbours) and DHCPv6 leases; needs the Diagnostics: NDP Table privilege, and under Kea Services: DHCP: Kea(v6)"),
         ),
     )
 

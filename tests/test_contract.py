@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.connectors import Connector, HostContext, make_host_mask, mask_url_host
 from leasewatch.connectors.opnsense import OpnsenseConnector
 from leasewatch.connectors.snmp_switch import SnmpSwitchConnector

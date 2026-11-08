@@ -146,8 +146,10 @@ Before anything reads it, the host runs `merge.normalise_batch(name, batch)`. It
   `alias`); `kind` is lower-cased; flags given as text are read with the setting words (`"false"` is `False`);
   `observed_at` becomes an int or 0; `vlan`/`signal` an int in 64-bit range or `None`;
 - empties `ip` unless it is a dotted IPv4 address (IPv6, a leading zero as in `010.0.0.1` and junk become `""`), and
-  `ip6` unless it is an IPv6 address other than link-local (a `%scope` is dropped, the compressed form is stored;
-  link-local, IPv4, IPv4-mapped and junk become `""`). It logs one DEBUG line and does not count the record as dropped.
+  `ip6` unless it is a routable IPv6 address (a `%scope` is dropped, the compressed form is stored; link-local,
+  loopback, unspecified, multicast, site-local, IPv4-embedded (IPv4-mapped and IPv4-compatible) addresses and junk
+  become `""`). It logs one DEBUG line and does not count the record as dropped;
+- sets `presence` to `False` on `ndp` and `dhcp6` records, whatever the connector sent.
 
 Return correct types anyway: the contract tests check them.
 
@@ -156,7 +158,7 @@ Return correct types anyway: the contract tests check them.
 The full rules are in the docstring of `leasewatch/connectors/merge.py`. The parts that affect a connector:
 
 - **Only sightings create devices.** An attachment for a MAC that no sighting has ever listed does nothing.
-- **Online.** A device is online when any sighting has `presence=True` this poll, of any kind. Only that moves
+- **Online.** A device is online when any sighting has `presence=True` this poll, of any kind except `ndp` and `dhcp6`, whose presence the host sets to `False`. Only that moves
   `last_online`. After it is no longer seen, it stays online for `ONLINE_GRACE_MINUTES`.
 - **Ranking by `kind`.** A kind not in a list ranks after all listed ones (the contract tests allow only the six).
 
@@ -174,8 +176,9 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   unique-local (fc00::/7) before the rest; one a `dhcp6` sighting carries before one that is not; the MAC's own
   EUI-64 address before others; the lowest value last. The stored address is sticky: it stays while it is still among
   the candidates of the best class, or while no candidate is listed. An `ip6` change writes no history row and no
-  event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device. They must carry
-  `presence=False`: the host does not override the flag, so a `presence=True` there would make the device online.
+  event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device, and a device listed
+  only by them this poll keeps everything but `ip6` and `last_seen` (no event, no history row). The host reads their
+  presence as `False` whatever the connector sends; emit `presence=False` anyway so the record says what it means.
 - **Which kind to use.** A DHCP lease or reservation: `dhcp`, `presence=False` unless the server says the client
   is online. An ARP/neighbour table entry: `arp`, `presence=True`. A device a controller or access point reports as
   connected: `client`. A result of an active scan: `scan`. An IPv6 neighbour table entry: `ndp`, `presence=False`

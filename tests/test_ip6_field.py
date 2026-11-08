@@ -30,7 +30,8 @@ class Ip6Field(unittest.TestCase):
                 self.assertEqual(norm(given), want)
 
     def test_emptied(self):
-        for given in ("fe80::1%igb0", "fe80::1", "10.0.0.1", "::ffff:10.0.0.1", "junk", "2001:db8::g", None):
+        for given in ("fe80::1%igb0", "fe80::1", "10.0.0.1", "::ffff:10.0.0.1", "junk", "2001:db8::g", None,
+                      "::", "::1", "ff02::1", "ff05::2", "::10.0.0.1", "::ffff:ffff", "fec0::1"):
             with self.subTest(given=given):
                 self.assertEqual(norm(given), "")
 

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.db import Database, ImportResult
 
 A = "02:00:00:00:40:01"

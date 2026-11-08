@@ -86,7 +86,8 @@ class Sighting:
     when known (the host stores it in its normal form, see merge.norm_client_id). label: a human label from the
     source, e.g. a DHCP reservation description; a display name after the hostname, never an identity or merge key.
     ip6: the device's IPv6 address as the source gives it; the host normalises it to the compressed form, drops a
-    "%scope", and empties a link-local address or anything that is not IPv6."""
+    "%scope", and empties link-local, loopback, unspecified, multicast, site-local and IPv4-embedded addresses and
+    anything that is not IPv6."""
     mac: str
     source: str
     kind: str

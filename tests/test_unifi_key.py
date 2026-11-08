@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.unifi import parse_integration_clients
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "unifi_integration")

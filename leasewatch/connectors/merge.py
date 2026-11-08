@@ -22,7 +22,8 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
     lease_type            dhcp                          the chosen lease only
     ip6                   any kind                      GUA, ULA, other; one a dhcp6 sighting carries; the MAC's EUI-64
                                                         address; the lowest value. Sticky: the stored one stays while
-                                                        listed in the best class or while none is listed
+                                                        listed in the best class (prefix, DHCPv6, EUI-64) or while
+                                                        none is listed
 
 ndp and dhcp6 sightings only enrich: a MAC listed by them alone gets no row, and they never assert presence.
 
@@ -265,7 +266,7 @@ class Merged:
     lease_hostname: str = ""  # the chosen lease's own hostname (option 12), not a fallback from another kind
     label: str = ""  # see merge_sightings
     ip6: str = ""  # the best IPv6 candidate this poll (_ip6_key)
-    ip6s: tuple[str, ...] = ()  # the candidates in ip6's class (prefix, DHCPv6), best first: a stored one kept if listed
+    ip6s: tuple[str, ...] = ()  # candidates in ip6's class (prefix, DHCPv6, EUI-64), best first: a stored one kept if listed
 
 
 @dataclass(frozen=True)
@@ -337,7 +338,8 @@ def _ip6_key(mac: str, addr: str, dhcp6: bool) -> tuple[int, int, int, int]:
 
 
 def _pick_ip6(mac: str, ss: list[Fw1Sighting]) -> tuple[str, ...]:
-    """The IPv6 candidates of one MAC in the best class ((prefix, DHCPv6) equal to the best), best first."""
+    """The IPv6 candidates of one MAC in the best class ((prefix, DHCPv6, EUI-64) equal to the best), best first: a
+    stored temporary address gives way to the EUI-64 one once that is listed, two temporaries stay sticky."""
     found: dict[str, bool] = {}  # address -> carried by a dhcp6 sighting
     for s in ss:
         if s.ip6:
@@ -349,7 +351,7 @@ def _pick_ip6(mac: str, ss: list[Fw1Sighting]) -> tuple[str, ...]:
     keys = sorted((_ip6_key(mac, a, d), a) for a, d in found.items())
     if not keys:
         return ()
-    return tuple(a for k, a in keys if k[:2] == keys[0][0][:2])
+    return tuple(a for k, a in keys if k[:3] == keys[0][0][:3])
 
 
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
@@ -466,13 +468,16 @@ def _ipv4(s: str) -> str:
 
 
 def _ipv6(s: str) -> str:
-    """The compressed lower-case form of an IPv6 address (a trailing %scope dropped), or "" for link-local, an IPv4 or
-    IPv4-mapped value, and anything that does not parse."""
+    """The compressed lower-case form of an IPv6 address (a trailing %scope dropped), or "" for what names no device
+    on the network: link-local, loopback, unspecified, multicast, site-local (fec0::/10), IPv4-mapped or
+    IPv4-compatible (below 2**32), an IPv4 value, and anything that does not parse."""
     try:
         a = ipaddress.IPv6Address(s.split("%", 1)[0]) if s else None
     except ValueError:
         return ""
-    return "" if a is None or a.is_link_local or a.ipv4_mapped else str(a)
+    if a is None or a.is_unspecified or a.is_loopback or a.is_multicast or a.is_link_local or a.is_site_local:
+        return ""
+    return "" if a.ipv4_mapped or int(a) < 2**32 else str(a)
 
 
 def _flag(v: object) -> bool:
@@ -514,6 +519,7 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     valid MAC but a wrong-typed field is kept with its fields coerced (str fields: None -> "", else str() with lone
     surrogates replaced, tab/line breaks as spaces and control/bidi characters removed, then .strip() except ssid/ap/alias; kind lower-cased;
     client_id in its normal form (norm_client_id); ip "" unless a dotted IPv4 (rewritten by str(IPv4Address));
+    ip6 "" unless an IPv6 address that names a device (_ipv6; rewritten compressed, %scope dropped);
     flags -> bool, text by the config words; observed_at -> int or 0; vlan/signal -> int in int64 range or None).
     Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
     dropped = bad_ip = bad_ip6 = 0
@@ -559,7 +565,7 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     if bad_ip:
         log.debug("connector %s: %d sightings with an ip that is not IPv4, ip emptied", name, bad_ip)
     if bad_ip6:
-        log.debug("connector %s: %d sightings with an ip6 that is link-local or not IPv6, ip6 emptied", name, bad_ip6)
+        log.debug("connector %s: %d sightings with an ip6 that names no device or is not IPv6, ip6 emptied", name, bad_ip6)
     return Batch(sightings=sightings, attachments=attachments,
                  stats={**stats, "dropped": before + dropped})
 
@@ -788,6 +794,17 @@ def _watch_events(rows: dict[str, dict], before: dict[str, dict], res: MergeResu
 def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state: MergeState, now: int,
                 lease_blind: bool, grace_s: int, res: MergeResult, label_blind: bool = False) -> int:
     """A known device's row updated in place from this poll's record; returns 1 when it writes a history row."""
+    # sticky, no event or history: the stored address stays while still listed in the best class (a temporary
+    # address rotating beside it changes nothing) or while nothing is listed (NDP aged it out)
+    ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
+    if m.sources <= V6_KINDS:
+        # listed by NDP/DHCPv6 alone: enrichment only. ip6 and last_seen move, nothing else: no event, no history
+        # row, no lease-type clock (the record has no lease), and online is left to the grace rule in merge().
+        # sources records what listed it this poll, except on a split row waiting for its first poll, whose ''
+        # must stay so that first full listing still fills it silently
+        keep = not cur["sources"] and cur.get("split_from")
+        cur.update(ip6=ip6, last_seen=now, sources=cur["sources"] if keep else sources)
+        return 0
     ev = _change_events(cur, m)
     lease_type = _settle_lease_type(mac, cur, m, cfg, state, now, lease_blind, grace_s, ev)
     # a row made by a split has sources '' and split_from set until a poll lists it: its first listing fills the
@@ -813,9 +830,6 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
         changed = 1
     # not on the wire right now: stays online until the grace period after its last sighting has passed
     online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= now - grace_s)
-    # sticky, no event or history: the stored address stays while still listed in the best class (a temporary
-    # address rotating beside it changes nothing) or while nothing is listed (NDP aged it out)
-    ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
     cur.update(ip6=ip6, last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
                iface=iface, lease_type=lease_type, sources=sources, online=int(online),

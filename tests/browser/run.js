@@ -468,7 +468,7 @@ const scenarios = {
   },
   // the IPv6 line: row, phone meta line, drawer, search and copy, for one device with an address and one without
   async ipv6(page) {
-    const A = '02:00:00:00:60:01', B = '02:00:00:00:60:02', V6 = '2001:db8::ff:fe00:1';
+    const A = '02:00:00:00:60:01', B = '02:00:00:00:60:02', V6 = '2001:db8:1234:5600:211:22ff:fe33:4455';
     await page.waitForSelector(row(A));
     await page.evaluate(() => {
       window.__copied = [];
@@ -530,6 +530,20 @@ const scenarios = {
             .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}`) };
       }, [A, B]);
     }
+    // phone width, keyboard: the focused meta address survives the rebuild of the rows, and Enter on it copies
+    await page.setViewport({ width: 400, height: 900 });
+    const sel = `${row(A)} .dev-meta .ip6`;
+    await page.evaluate(() => { window.__copied = []; window.__rebuilt = 0;
+      new MutationObserver(() => window.__rebuilt++).observe(document.querySelector('#rows'), { childList: true }); });
+    await page.focus(sel);
+    await page.evaluate(() => { const s = document.querySelector('#fStatus'); s.dispatchEvent(new Event('change')); });
+    await page.waitForFunction(() => window.__rebuilt > 0);
+    res.meta_focus = await page.evaluate(s => ({ restored: document.activeElement === document.querySelector(s),
+      active: document.activeElement.className }), sel);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__copied.length === 1);
+    res.meta_enter = { copied: await page.evaluate(() => window.__copied.slice()), open: await drawerOpen(page),
+      cls: await page.$eval(sel, e => e.classList.contains('copied')), title: await page.$eval(sel, e => e.title) };
     return res;
   },
   // archive from the drawer hides the row; the "Archived" filter shows it; restore brings it back (changes server state)

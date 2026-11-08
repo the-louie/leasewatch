@@ -50,7 +50,7 @@ class Pick(Base):
         self.assertEqual(self.pick(ndp(ULA), ndp(TEMP)), TEMP)
 
     def test_ula_before_other(self):
-        self.assertEqual(self.pick(ndp("::1:2"), ndp(ULA)), ULA)
+        self.assertEqual(self.pick(ndp("100::1:2"), ndp(ULA)), ULA)  # 100::/64: neither GUA nor ULA
 
     def test_eui64_before_temporary(self):
         self.assertEqual(self.pick(ndp(TEMP), ndp(EUI)), EUI)
@@ -70,9 +70,13 @@ class Pick(Base):
 
 
 class Sticky(Base):
-    def test_stored_kept_while_in_best_class(self):
+    def test_eui64_replaces_stored_temporary(self):
         res = self.merge([row(A, ip6=TEMP)], [sight(), ndp(TEMP), ndp(EUI)])
-        self.assertEqual(res.rows[A]["ip6"], TEMP)
+        self.assertEqual(res.rows[A]["ip6"], EUI)
+
+    def test_stored_temporary_kept_beside_another_temporary(self):
+        res = self.merge([row(A, ip6=TEMP2)], [sight(), ndp(TEMP), ndp(TEMP2)])
+        self.assertEqual(res.rows[A]["ip6"], TEMP2)
 
     def test_temporary_rotation_keeps_eui64(self):
         res = self.merge([row(A, ip6=EUI)], [sight(), ndp(EUI), ndp(TEMP2)])
@@ -128,6 +132,32 @@ class Enrichment(Base):
         self.assertEqual(res.events, [])
         self.assertEqual(res.history, [])
         self.assertIn((A, "fw1", NOW, None), res.seen)
+
+    def test_known_device_listed_only_by_dhcp6_changes_nothing_else(self):
+        # its ARP entry and v4 lease dropped out while the DHCPv6 lease is still listed
+        prev = row(A, hostname="laptop", lease_type="dynamic", sources="arp,dhcp", watch=1, watch_online=1)
+        res = self.merge([prev], [dhcp6(EUI, hostname="laptop.example.lan", network="Other", iface="opt9")])
+        r = res.rows[A]
+        self.assertEqual((r["ip"], r["hostname"], r["lease_type"], r["vlan"], r["iface"]),
+                         ("10.0.0.5", "laptop", "dynamic", "Clients", "opt3"))
+        self.assertEqual(r["ip6"], EUI)
+        self.assertEqual(r["last_seen"], NOW)
+        self.assertEqual(r["last_online"], NOW - 60)
+        self.assertEqual(r["online"], 1)  # still within the grace after its last sighting
+        self.assertEqual([e for e in res.events if e[0] == A], [])
+        self.assertEqual([h for h in res.history if h[0] == A], [])
+
+    def test_known_device_listed_only_by_dhcp6_goes_offline_by_the_grace_rule(self):
+        old = NOW - 7200
+        prev = row(A, hostname="laptop", lease_type="dynamic", last_online=old, watch=1, watch_online=1)
+        res = self.merge([prev], [dhcp6(EUI, hostname="laptop.example.lan")])
+        self.assertEqual(res.rows[A]["online"], 0)
+        self.assertEqual([k for m, k, _ in res.events if m == A], ["offline"])
+        self.assertEqual(res.history, [])
+
+    def test_split_row_listed_only_by_ndp_keeps_its_marker(self):
+        res = self.merge([row(A, sources="", split_from=B)], [ndp(EUI)])
+        self.assertEqual((res.rows[A]["sources"], res.rows[A]["ip6"]), ("", EUI))
 
     def test_sources_name_the_v6_kinds(self):
         res = self.merge([row(A)], [sight(), ndp(EUI), dhcp6(TEMP)])

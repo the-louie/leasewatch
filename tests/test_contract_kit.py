@@ -8,6 +8,7 @@ import socket
 import unittest
 from unittest import mock
 
+import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext,
                                    Setting, Sighting, make_host_mask)
 from leasewatch.connectors.testing import ConnectorContractTests

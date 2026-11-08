@@ -362,7 +362,7 @@
     // rebuilding the rows drops keyboard focus: note the focused row (or its button or copy target) to focus its replacement
     const fa = tb.contains(document.activeElement) ? document.activeElement : null;
     const fmac = fa?.closest("tr")?.dataset.mac, fack = !!fa?.classList.contains("ack");
-    const fcp = fmac ? [".c-ip .cp", ".c-ip .cp.ip6", ".c-mac .cp", ".c-sel input"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
+    const fcp = fmac ? [".c-ip .cp", ".c-ip .cp.ip6", ".dev-meta .ip6", ".c-mac .cp", ".c-sel input"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
     tb.innerHTML = "";
     const tpl = $("#rowTpl").content;
     const frag = document.createDocumentFragment();

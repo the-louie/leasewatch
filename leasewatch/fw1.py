@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
 Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting;
-dnsmasq's IPv6 leases too when IPv6 is on), under Kea also the reservation search and, when IPv6 is on, the DHCPv6 lease search (privilege "Services: DHCP: Kea(v6)"), under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+dnsmasq's IPv6 leases too when IPv6 is on), under Kea also the reservation search and, when IPv6 is on, the DHCPv6 lease search (privilege "Services: DHCP: Kea(v6)"), under dnsmasq the static host search, and the ARP table, when IPv6 is on also the NDP table (privilege "Diagnostics: NDP Table"). The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
