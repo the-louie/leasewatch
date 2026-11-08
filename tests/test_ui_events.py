@@ -156,7 +156,7 @@ class EtagTests(Base):
             self.assertEqual(st, 200, q)
             self.assertTrue(json.loads(body)["events"])
             tags[q] = hd["etag"]
-            self.assertRegex(hd["etag"], r'^W/"[0-9a-f]{8}\.\d+\.[0-2]{3}\.[0-9a-f]{8}"$')
+            self.assertRegex(hd["etag"], r'^W/"[0-9a-f]{8}\.\d+\.\d+\.[0-2]{3}\.[0-9a-f]{8}"$')
             st, hd2, _ = self.get("/api/events" + q, b"If-None-Match: " + hd["etag"].encode() + b"\r\n")
             self.assertEqual((st, hd2["etag"]), (304, hd["etag"]), q)
         self.assertEqual(len(set(tags.values())), len(tags))

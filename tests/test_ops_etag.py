@@ -18,7 +18,7 @@ from leasewatch import web  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.fw1 import Sighting  # noqa: E402
 
-TAG = re.compile(r'^W/"[0-9a-f]{8}\.\d+\.[01][01][01]\.[0-9a-f]{1,8}"$')
+TAG = re.compile(r'^W/"[0-9a-f]{8}\.\d+\.\d+\.[01][01][01]\.[0-9a-f]{1,8}"$')
 
 
 class _Client:

@@ -172,10 +172,10 @@ class BrowserUITest(_BrowserCase):
         events = [r for r in d["responses"] if r["path"] == "/api/events"]
         self.assertEqual(len(devices), 1, d["responses"])
         # the page sent the tag of its first load itself and got a 304 with the same tag
-        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100\.[0-9a-f]+"$')
+        self.assertRegex(devices[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.\d+\.100\.[0-9a-f]+"$')
         self.assertEqual((devices[0]["status"], devices[0]["etag"]), (304, devices[0]["sent"]))
         self.assertEqual(len(events), 1, d["responses"])  # the query hash is in the tag: the events request revalidates too
-        self.assertRegex(events[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.100\.[0-9a-f]+"$')
+        self.assertRegex(events[0]["sent"] or "", r'^W/"[0-9a-f]{8}\.\d+\.\d+\.100\.[0-9a-f]+"$')
         self.assertEqual((events[0]["status"], events[0]["etag"]), (304, events[0]["sent"]))
         self.assertEqual((d["rows_before"], d["rows_after"]), (16, 16))
         self.assertTrue(d["status_after"].startswith("polled"), d["status_after"])

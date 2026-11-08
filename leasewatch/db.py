@@ -253,11 +253,16 @@ class Database:
         with self._lock:
             return self._c().execute(sql, params).fetchall()
 
-    def version(self) -> int:
-        """A number that moves with every row change made through this connection (every writer uses it): the
-        API's ETag. It starts again at 0 with a new connection, so the ETag adds a per-start id."""
+    def version(self) -> str:
+        """The API's ETag version: "<total_changes>.<data_version>". The first half moves with every row change made
+        through this connection (every writer in this process uses it) and starts again at 0 with a new connection,
+        so the ETag adds a per-start id. The second half is SQLite's `PRAGMA data_version`, which moves when ANOTHER
+        connection commits (import-csv, reset-baseline, a sqlite3 shell), a change total_changes never sees. A trivial
+        read comes first: the first sample on a fresh connection can be stale once."""
         with self._lock:
-            return self._c().total_changes
+            c = self._c()
+            c.execute("SELECT 1 FROM meta LIMIT 1").fetchall()
+            return f"{c.total_changes}.{c.execute('PRAGMA data_version').fetchone()[0]}"
 
     # --- meta ---------------------------------------------------------------
     def get_meta(self, key: str, default: str = "") -> str:

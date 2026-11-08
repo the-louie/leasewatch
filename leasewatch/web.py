@@ -453,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
         body, extra = self._encode(body)
         self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
 
-    def _etag(self, version: int, meta: dict, query: str = "0") -> str:
+    def _etag(self, version: str | int, meta: dict, query: str = "0") -> str:
         # the write bit: meta.can_write differs per client and login, so two clients must not share a tag (and a 304); the
         # stale and collector bits: the page shows a banner for each, so a flip must not be answered with a 304
         w = 2 if self.role == "ro" else int(self._can_write())  # 2: a read-only login, which the page words apart from a blocked address
