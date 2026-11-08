@@ -22,9 +22,17 @@ class CsvExportColumnTests(WebTestCase):
 
     def test_header_tail_and_older_columns_keep_their_positions(self) -> None:
         head, _, _ = self.export()
-        self.assertEqual(head[-3:], ["baseline", "acked_at", "split_from"])
+        self.assertEqual(head[-4:], ["baseline", "acked_at", "split_from", "ip6"])
         self.assertEqual(head[:len(BEFORE)], BEFORE)
-        self.assertEqual(len(head), len(BEFORE) + 3)
+        self.assertEqual(len(head), len(BEFORE) + 4)
+
+    def test_ip6_column_holds_the_address_or_nothing(self) -> None:
+        self.db.q("INSERT INTO devices (mac, first_seen, last_seen, ip6) VALUES (?, 100, 200, ?)", (ORIGIN, "2001:db8::1"))
+        head, by, _ = self.export()
+        i = head.index("ip6")
+        self.assertEqual(i, len(head) - 1)
+        self.assertEqual(by[ORIGIN][i], "2001:db8::1")
+        self.assertEqual(by[MAC1][i], "")  # a row from before ip6 existed
 
     def test_baseline_shows_1_and_a_newcomer_0(self) -> None:
         head, by, _ = self.export()
