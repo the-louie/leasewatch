@@ -60,7 +60,7 @@ _ETAG_ITEM = re.compile(r'\*|(?:W/)?"[^"]*"')
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
-               "archived", "note", "aliases"]
+               "archived", "note", "aliases", "watch"]
 _WIFI_CSV_HEADER = ["mac", "name", "vendor", "last_ip", "private", "archived", "first_seen", "last_seen", "hours_seen", "polls_seen", "last_ap"]
 
 
@@ -150,7 +150,8 @@ def _csv_row(d: dict) -> list:
             d["wifi_signal"] if d["wifi_signal"] is not None else "",
             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))),
             ts(d["archived_ts"]), cell(d["note"]),
-            cell(" ".join(d["aliases"]))]  # last, so no earlier column moves; a space, as Excel with a ; separator splits on ;
+            cell(" ".join(d["aliases"])),  # a space, as Excel with a ; separator splits on ;
+            d["watch"]]  # new columns go last, so no earlier column moves
 
 
 class _DeadlineRaw(io.RawIOBase):
@@ -702,12 +703,12 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):  # fullmatch: "$" alone lets a trailing "\n" in
                 return self._json({"error": "bad mac", "index": i}, 400)  # the value is not echoed back
         # exactly one of the two fields: a name or note for many devices at once is never meant
-        if "name" in body or "note" in body or ("acked" in body) == ("archived" in body):
+        if "name" in body or "note" in body or "watch" in body or ("acked" in body) == ("archived" in body):
             return self._error(400, "bulk takes acked or archived")
         fields = self._user_fields(body)  # the same type checks and texts as the single POST
         if fields is None:
             return
-        acked, _name, _note, archived = fields
+        acked, _name, _note, archived, _watch = fields
         if acked is None and archived is None:  # {"acked": null}
             return self._error(400, "bulk takes acked or archived")
         try:
@@ -751,11 +752,12 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def _user_fields(self, body: dict) -> tuple | None:
-        """(acked, name, note, archived) from the body, or None after the 400 for a wrong type."""
+        """(acked, name, note, archived, watch) from the body, or None after the 400 for a wrong type."""
         acked = body.get("acked")
         name = body.get("name")
         note = body.get("note")
         archived = body.get("archived")
+        watch = body.get("watch")
         if acked is not None and not isinstance(acked, bool):
             return self._error(400, "acked must be boolean")
         if name is not None and not isinstance(name, str):
@@ -764,6 +766,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "note must be a string")
         if archived is not None and not isinstance(archived, bool):
             return self._error(400, "archived must be boolean")
+        if watch is not None and not isinstance(watch, bool):
+            return self._error(400, "watch must be boolean")
         for field, s in (("name", name), ("note", note)):
             try:
                 if s is not None:
@@ -771,7 +775,7 @@ class Handler(BaseHTTPRequestHandler):
             except UnicodeEncodeError:  # lone surrogate ("\ud800") from JSON escapes: SQLite and the response encoder would fail on it
                 # the JSON itself is valid, so "bad json" would point the user at the wrong cause
                 return self._error(400, f"{field} must be valid Unicode text")
-        return acked, name, note, archived
+        return acked, name, note, archived, watch
 
 
 def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPRequestHandler]:

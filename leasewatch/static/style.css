@@ -123,6 +123,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .badge.new { background: var(--new-bg); color: var(--new); }
 .badge.vlan { background: color-mix(in srgb, var(--vc, var(--vlan0)) 14%, transparent); color: var(--vc, var(--vlan0)); }
 .badge.base { background: var(--bg3); color: var(--muted); font-weight: 500; }
+.badge.watch { background: var(--warn-bg); color: var(--warn); }
 .c-type { color: var(--muted); font-size: 13px; white-space: nowrap; }
 /* a long SSID @ AP or port → device is cut with an ellipsis (the cell's title has it all), so the table never scrolls sideways */
 .c-where { font-size: 13px; white-space: nowrap; color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
@@ -173,6 +174,7 @@ main.has-selbar { padding-bottom: 96px; }
 .event-list .t { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .event-list .k { font-weight: 600; }
 .k.new { color: var(--new); } .k.ip, .k.hostname, .k.vlan, .k.lease_type, .k.port, .k.wifi { color: var(--accent); } .k.back { color: var(--ok); } .k.acked { color: var(--ok); } .k.unacked { color: var(--warn); }
+.k.watched { color: var(--warn); } .k.unwatched { color: var(--muted); }
 .k.archived { color: var(--muted); } .k.restored { color: var(--ok); } .k.merged, .k.split { color: var(--accent); }
 .k.source_down { color: var(--danger); } .k.source_up { color: var(--ok); } .event-list .src { font-weight: 600; }
 .who { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; color: inherit; font-weight: 600; }

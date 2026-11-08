@@ -323,6 +323,7 @@
       nm.classList.toggle("unnamed", !d.name && !d.wifi_alias && !d.hostname && !d.label); // label() ranks the UniFi alias before the hostname
       if (fresh) nm.insertAdjacentHTML("beforeend", '<span class="badge new">NEW</span>');
       else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", '<span class="badge base">not yet known</span>');
+      if (d.watch) nm.insertAdjacentHTML("beforeend", '<span class="badge watch" title="watched">watch</span>');
       const sub = [];
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
@@ -639,6 +640,7 @@
           <button class="btn" id="fSave">Save</button>
           <button class="btn" id="fAck"></button>
           <button class="btn" id="fArch"></button>
+          <button class="btn" id="fWatch"></button>
           <span class="saved" id="fSaved"></span>`}
         </div>
       </div>
@@ -674,6 +676,9 @@
     const arch = $("#fArch"), archived = d.archived_ts != null;
     arch.textContent = archived ? "Restore to list" : "Archive";
     arch.onclick = () => setFields(d.mac, { archived: !archived });
+    // like Archive: posts only the watch state, at once
+    const watch = $("#fWatch");
+    if (watch) { watch.textContent = d.watch ? "Unwatch" : "Watch"; watch.onclick = () => setFields(d.mac, { watch: !d.watch }); }
   }
 
   // the device a split row came from, by its name when the list has it

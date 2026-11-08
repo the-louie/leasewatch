@@ -228,9 +228,9 @@ class BrowserUITest(_BrowserCase):
         d = self.result("trap")
         self.assertEqual(d["bg_before"], [False, False, False])
         self.assertEqual(d["bg_open"], [True, True, True])  # header, main, footer
-        # Tab from Name: Note, Save, the ack and archive buttons, then around to Close and Name again
-        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fSave", "fAck", "fArch", "dClose", "fName"])
-        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fArch", "fAck", "fSave", "fNote", "fName", "dClose"])
+        # Tab from Name: Note, Save, the ack, archive and watch buttons, then around to Close and Name again
+        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fSave", "fAck", "fArch", "fWatch", "dClose", "fName"])
+        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fWatch", "fArch", "fAck", "fSave", "fNote", "fName", "dClose"])
         self.assertTrue(all(t["in_drawer"] for t in d["tab"] + d["shift_tab"]))
         self.assertTrue(d["q_focus"]["in_drawer"], d["q_focus"])
         self.assertEqual(d["bg_closed"], [False, False, False])
@@ -303,6 +303,11 @@ class BrowserUITest(_BrowserCase):
         # the save rebuilt the table: Escape focuses the device's new row
         self.assertFalse(d["key_closed"]["open"])
         self.assertEqual(d["key_closed"]["focus"], {"id": None, "tag": "tr", "mac": mac(13)})
+        # Watch posts only {"watch": true}; the row shows the watch badge and the button turns into Unwatch
+        self.assertEqual(d["watch_label"], "Watch")
+        self.assertEqual(json.loads(d["watched"]["body"]), {"watch": True})
+        self.assertEqual(d["watched"]["badge"], "watch")
+        self.assertEqual(d["watched"]["server"], 1)
         # the row's "Mark known" acks without opening the drawer
         self.assertFalse(d["rowack_before"])
         self.assertTrue(d["rowack"]["server"])

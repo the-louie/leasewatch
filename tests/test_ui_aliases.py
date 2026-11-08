@@ -95,12 +95,12 @@ class ApiAliasTests(WebTestCase):
         rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
         head = rows[0]
         self.assertEqual(head, _CSV_HEADER)
-        self.assertEqual(head[-1], "aliases")
-        self.assertEqual(",".join(head[:-1]), OLD_HEADER)  # no existing column moved
+        self.assertEqual(head[-2:], ["aliases", "watch"])  # appended in that order, after every older column
+        self.assertEqual(",".join(head[:-2]), OLD_HEADER)  # no existing column moved
         by = {r[0]: r for r in rows[1:]}
-        self.assertEqual(len(by[DEV][-1].split(" ")), 2)
-        self.assertEqual(set(by[DEV][-1].split(" ")), {A1, A2})
-        self.assertEqual(by[PLAIN][-1], "")
+        self.assertEqual(len(by[DEV][-2].split(" ")), 2)
+        self.assertEqual(set(by[DEV][-2].split(" ")), {A1, A2})
+        self.assertEqual(by[PLAIN][-2], "")
 
 
 if __name__ == "__main__":

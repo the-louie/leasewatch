@@ -78,6 +78,8 @@ MIGRATIONS = [
     ("devices", "split_from", "TEXT"),
     # operator-written text from the DHCP source (a reservation's description); a display fallback, never an identity
     ("devices", "label", "TEXT NOT NULL DEFAULT ''"),
+    # 1 = the operator watches the device (the drawer's Watch toggle); 0 = not watched
+    ("devices", "watch", "INTEGER NOT NULL DEFAULT 0"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
@@ -394,12 +396,12 @@ class Database:
         return [dict(r) for r in self.q(sql, (*params, limit))]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
-                           archived: bool | None = None, *, actor: str = "") -> dict | None:
+                           archived: bool | None = None, watch: bool | None = None, *, actor: str = "") -> dict | None:
         with self.tx() as c:
             key = self._resolve(c, mac)
             if not key:
                 return None
-            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor)[0]
+            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor, watch)[0]
 
     def split_alias(self, device_mac: str, alias: str) -> tuple[dict, dict] | None:
         """Turn the alias MAC of a device back into a device of its own: (the device, the new row), or None when
@@ -465,7 +467,8 @@ class Database:
 
     @staticmethod
     def _apply_user_fields(c: sqlite3.Connection, mac: str, now: int, acked: bool | None, name: str | None,
-                           note: str | None, archived: bool | None, actor: str = "") -> tuple[dict, bool]:
+                           note: str | None, archived: bool | None, actor: str = "",
+                           watch: bool | None = None) -> tuple[dict, bool]:
         """Write the user fields of the existing device mac inside the caller's transaction: (the row, whether an
         acked/unacked or archived/restored event was written). Every event names the actor (who made the change);
         a rename or note change writes its own event, a note event holds the lengths and never the text."""
@@ -489,6 +492,9 @@ class Database:
             if archived:
                 sets.append("mail_queued=NULL")
         ack_change = acked is not None and bool(cur["acked"]) != bool(acked)
+        watch_change = watch is not None and bool(cur["watch"]) != watch
+        if watch_change:
+            sets.append("watch=?"); params.append(1 if watch else 0)
         if sets:
             params.append(mac)
             c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
@@ -498,6 +504,8 @@ class Database:
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "acked" if acked else "unacked", who))
             if arch_change:
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "archived" if archived else "restored", who))
+            if watch_change:
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "watched" if watch else "unwatched", who))
             # only a real change of the cleaned text is an event; the same value again writes nothing
             old_name, old_note = cur["name"] or "", cur["note"] or ""
             if new_name is not None and new_name != old_name:

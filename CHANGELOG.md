@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- **Watch:** a per-device `watch` flag. The device page has a Watch / Unwatch button next to Archive (saved at once; hidden for a client that may not write), a watched device has a `watch` badge in the list, `POST /api/devices/<mac>` takes `"watch": bool` (the bulk route refuses it), the device JSON carries `watch` (0 or 1), the CSV has a last column `watch`, and a change writes a `watched` or `unwatched` event with who did it.
 - `renamed` and `note` events: a changed name (`old -> new`, 40 characters each) or note (the lengths only, never the text) is written to the event log, with who did it. The same value again writes nothing.
 - `PRUNE_PRIVATE_DAYS` (0 or 2-3650, default 0 = use `PRUNE_DAYS`): rotating phone addresses (private MACs) that never merged, with no name, note, ack, split origin or merged address, are archived after that many days offline (never longer than `PRUNE_DAYS`); it works with `PRUNE_DAYS` off. The `archived` event reads `auto (private): not online for N days`.
 - `EVENT_DAYS` (1-3650, default 365) and `HISTORY_PER_DEVICE` (10-1000, default 200): how long events are kept, and how many history rows are kept and shown per device. A start warning appears when `EVENT_DAYS` is below `PRUNE_DAYS` or `PRUNE_PRIVATE_DAYS`: a device restored by hand is protected only while its `restored` event exists.

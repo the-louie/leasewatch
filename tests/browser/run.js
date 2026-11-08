@@ -128,10 +128,10 @@ const scenarios = {
     await waitOpen(page, MAC);
     res.bg_open = await bg();
     res.tab = [];
-    for (let i = 0; i < 6; i++) { await page.keyboard.press('Tab'); res.tab.push(await where()); }
+    for (let i = 0; i < 7; i++) { await page.keyboard.press('Tab'); res.tab.push(await where()); }
     await page.focus('#dClose');
     res.shift_tab = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 7; i++) {
       await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
       res.shift_tab.push(await where());
     }
@@ -941,6 +941,20 @@ const scenarios = {
     await page.keyboard.press('Escape');
     await waitClosed(page);
     res.key_closed = { open: await drawerOpen(page), focus: await focused(page) };
+    // Watch in the drawer posts only the watch state, and the row gets the watch badge
+    await page.click(`${row(KEY)} .c-dev`);
+    await waitOpen(page, KEY);
+    let watchBody = null;
+    const onReq = r => { if (r.method() === 'POST') watchBody = r.postData(); };
+    page.on('request', onReq);
+    res.watch_label = await page.$eval('#fWatch', e => e.textContent);
+    await page.click('#fWatch');
+    await page.waitForFunction(s => document.querySelector(s) && document.querySelector('#fWatch')?.textContent === 'Unwatch', {}, `${row(KEY)} .badge.watch`);
+    page.off('request', onReq);
+    res.watched = { body: watchBody, badge: await page.$eval(`${row(KEY)} .badge.watch`, e => e.textContent),
+                    server: (await serverDevice(page, KEY)).watch };
+    await page.keyboard.press('Escape');
+    await waitClosed(page);
     // ack from the row button: no drawer, the button goes away
     res.rowack_before = (await serverDevice(page, ROWACK)).acked;
     await page.click(`${row(ROWACK)} .ack`);
