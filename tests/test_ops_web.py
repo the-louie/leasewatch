@@ -12,6 +12,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_web_edge_cases as QW  # noqa: E402  (module import: its TestCase classes are not collected twice)
+from _fixtures import FakeClient  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch import web  # noqa: E402
 from leasewatch.fw1 import Sighting  # noqa: E402
@@ -119,17 +120,6 @@ class NotifyChannelTests(QW.Base):
         self.assertEqual(self.handler(path="/api/stats")._meta()["notify"], {"smtp": False})
 
 
-class FakeClient:
-    def __init__(self, sightings: list) -> None:
-        self.data = sightings
-
-    def arp_raw(self) -> list:
-        return []
-
-    def sightings(self, ignore: tuple = ()) -> tuple:
-        return list(self.data), {"leases": len(self.data), "arp": 0}
-
-
 class AttemptWrittenTests(QW.Base):
     def test_success_and_failure_write_the_attempt(self) -> None:
         client = FakeClient([Sighting(mac=QW.MAC, ip="10.0.1.5", hostname="desktop", vendor="Acme", vlan="HomeNet",
@@ -139,7 +129,7 @@ class AttemptWrittenTests(QW.Base):
         self.assertTrue(col.run_once()["ok"])
         self.assertGreaterEqual(int(self.db.get_meta("last_attempt_ts")), before)
         self.db.set_meta("last_attempt_ts", "1")
-        client.data = []  # no sightings after the baseline: still a good poll; force a failure instead
+        client.sightings_data = []  # no sightings after the baseline: still a good poll; force a failure instead
         col._fail("boom")
         self.assertGreaterEqual(int(self.db.get_meta("last_attempt_ts")), before)
         self.assertEqual(self.db.get_meta("last_poll_ok"), "0")

@@ -2,19 +2,10 @@ import os, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore, sources, swap_client
-from _fixtures import S
+from _fixtures import FakeClient, S
 from leasewatch.collector import Collector, merge
 from leasewatch.config import Config
 from leasewatch.db import Database
-from leasewatch.fw1 import Fw1Error
-
-
-class FakeClient:
-    def __init__(self, sightings): self.sightings_data = sightings; self.fail = False
-    def arp_raw(self): return []  # what the opnsense connector's check() calls; `fail` breaks collect() only
-    def sightings(self, ignore=()):
-        if self.fail: raise Fw1Error("boom")
-        return list(self.sightings_data), {"leases": 1, "arp": 1}
 
 
 def cfg_with(*names):

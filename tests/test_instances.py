@@ -14,12 +14,12 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore, sources, swap_client  # noqa: E402
+from _fixtures import FakeClient  # noqa: E402
 from leasewatch.collector import MAX_BACKOFF, SKIPPED, Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo,  # noqa: E402
                                    Setting, SettingsMixin, Sighting, registry)
 from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Fw1Error  # noqa: E402
 from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
 from leasewatch.web import serve  # noqa: E402
 
@@ -59,20 +59,6 @@ class FakeFw(Fake):
     INFO = replace(Fake.INFO, type="fakefw", produces=frozenset({"sighting"}))
 
 
-class FakeClient:
-    def __init__(self, rows):
-        self.rows = rows
-        self.fail = False
-
-    def arp_raw(self):
-        return []  # what the opnsense connector's check() calls; `fail` breaks collect() only
-
-    def sightings(self, ignore=()):
-        if self.fail:
-            raise Fw1Error("boom")
-        return list(self.rows), {"leases": 0, "arp": len(self.rows)}
-
-
 def arp(mac, ip):
     return Fw1Sighting(mac=mac, ip=ip, hostname="", vendor="", vlan="LAN", iface="lan", source="arp", lease_type="", online=True)
 
@@ -101,7 +87,8 @@ class Base(unittest.TestCase):
         cfg = self.cfg(env)
         db = Database(cfg.db_path)
         self.dbs.append(db)
-        self.client = FakeClient([arp(MAC, "10.0.0.5")] if rows is None else rows)
+        self.client = FakeClient([arp(MAC, "10.0.0.5")] if rows is None else rows,
+                                 stats=lambda data: {"leases": 0, "arp": len(data)})
         return Collector(cfg, db, self.client), db
 
 

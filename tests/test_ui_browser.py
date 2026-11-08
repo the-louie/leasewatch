@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 from _env import FW1_ENV, clean_env, restore, sources, swap_client  # noqa: E402
+from _fixtures import FakeClient  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
@@ -67,17 +68,6 @@ def sighting(n: int, host: str, net: str, online: bool) -> Sighting:
                     source="dhcp", lease_type="dynamic", online=online)
 
 
-class FakeClient:
-    def __init__(self, sightings: list) -> None:
-        self.data = sightings
-
-    def arp_raw(self) -> list:
-        return []
-
-    def sightings(self, ignore: tuple = ()) -> tuple:
-        return list(self.data), {"leases": len(self.data), "arp": 0}
-
-
 def setUpModule() -> None:
     if not shutil.which("node"):
         raise unittest.SkipTest("browser tests need node (not on PATH)")
@@ -103,7 +93,7 @@ def start(case: type, *polls: list, env: dict | None = None) -> tuple[str, Datab
     client = FakeClient([])
     collector = Collector(cfg, db, client)
     for sightings in polls:  # the first poll is the baseline
-        client.data += sightings
+        client.sightings_data += sightings
         collector.run_once()
     srv = serve(cfg, db, "9.9.9-test")
     thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
@@ -821,7 +811,7 @@ class BrowserGuestFlowTest(_BrowserCase):
             if i == 2:  # the private MAC is merged into X (the merge rules have their own tests)
                 db.q("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
                      (cls.ALIAS, cls.X, "client-id", "", t0, t0))
-            client.data = sightings
+            client.sightings_data = sightings
             wifi.clear(); wifi.update(wifi_now)
             with mock.patch("leasewatch.collector.time.time", lambda: t0 + 120 * i):
                 collector.run_once()

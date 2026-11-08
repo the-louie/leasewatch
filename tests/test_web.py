@@ -15,11 +15,10 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import S  # noqa: E402
+from _fixtures import FakeClient, S  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Fw1Error  # noqa: E402
 from leasewatch.connectors import InstanceSpec  # noqa: E402
 from leasewatch.web import MAX_BODY, serve  # noqa: E402
 
@@ -33,20 +32,6 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self';
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0",
        "SITE_NAME": SITE, "MAILGUN_KEY": "", "MAILGUN_DOMAIN": "", "MAIL_TO": "", "POLL_SECONDS": "120"}
-
-
-class FakeClient:
-    def __init__(self, sightings):
-        self.sightings_data = sightings
-        self.fail = False
-
-    def arp_raw(self):
-        return []  # what the opnsense connector's check() calls; `fail` breaks collect() only
-
-    def sightings(self, ignore=()):
-        if self.fail:
-            raise Fw1Error("boom")
-        return list(self.sightings_data), {"leases": 1, "arp": 1}
 
 
 class WebTestCase(unittest.TestCase):
