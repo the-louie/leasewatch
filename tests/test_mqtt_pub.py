@@ -91,15 +91,35 @@ class ConnectTests(PubCase):
         self.assertTrue(self.broker.wait_published(1))
         self.assertEqual(self.broker.published[0][:4], ("lw/status", b"online", 1, True))
         self.assertEqual(self.broker.will, ("lw/status", b"offline", 1, True))
-        self.assertEqual(self.broker.keepalive, 120)
+        self.assertEqual(self.broker.keepalive, 240)  # 2 x (POLL_SECONDS 60 + the connector's default timeout 60)
         self.assertEqual(self.broker.client_id, "leasewatch-example-home")
         self.assertEqual([s[:2] for s in self.broker.subscriptions], [("homeassistant/status", 1)])
+
+    def test_keepalive_covers_a_slow_poll(self) -> None:
+        os.environ.update(POLL_SECONDS="15", LW_CONNECTOR__FW1__TIMEOUT="60")
+        self.assertEqual(self.make().keepalive, 150)
+        os.environ.update(LW_CONNECTOR__FW1__TIMEOUT="3600", POLL_SECONDS="86400")
+        self.assertEqual(self.make().keepalive, 0xFFFF)
 
     def test_no_subscription_without_discovery(self) -> None:
         os.environ["MQTT_DISCOVERY"] = "0"
         p = self.make()
         p.connect()
         self.assertEqual(self.broker.subscriptions, [])
+
+
+class RefusedSubscriptionTests(PubCase):
+    broker_kw = {"refuse_subscribe": True}
+
+    def test_connects_without_the_birth_feature_and_warns_once(self) -> None:
+        with self.assertLogs("leasewatch.mqtt_pub", "WARNING") as logs:
+            self.pub.connect()
+            self.assertTrue(self.pub.connected)
+            self.assertEqual(len(self.poll()), 11)
+            self.pub.connect()  # a reconnect: no second warning
+            self.assertTrue(self.pub.connected)
+        self.assertEqual(logs.output, ["WARNING:leasewatch.mqtt_pub:mqtt: cannot subscribe to homeassistant/status, "
+                                       "discovery will not be re-sent when Home Assistant restarts"])
 
 
 class PollTests(PubCase):
@@ -120,7 +140,8 @@ class PollTests(PubCase):
         self.assertIsNone(json.loads(by_topic[f"lw/device/{ID_B}/attributes"][0])["last_online"])
         self.assertEqual(by_topic["lw/stats"], (STATS_JSON, 1, True))
         self.assertEqual(len(got), 11)  # 2 x (config, state, attributes), 4 sensor configs, stats
-        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")), [ID_A, ID_B])
+        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")),
+                         {"node": "leasewatch_example_home", "ids": [ID_A, ID_B]})
 
     def test_device_tracker_config_payload(self) -> None:
         got = {t: (p, q, r) for t, p, q, r in self.poll()}
@@ -172,11 +193,23 @@ class PollTests(PubCase):
         self.poll()
         self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)])
 
-    def test_online_change_publishes_only_state(self) -> None:
+    def test_online_change_publishes_state_and_attributes(self) -> None:
         self.poll()
         self.db.q("UPDATE devices SET online=0 WHERE mac=?", (MAC_A,))
-        self.assertEqual(self.poll(), [(f"lw/device/{ID_A}/state", b"not_home", 1, True),
-                                       ("lw/stats", STATS_JSON, 1, True)])
+        got = self.poll()
+        self.assertEqual([g[0] for g in got], [f"lw/device/{ID_A}/state", f"lw/device/{ID_A}/attributes", "lw/stats"])
+        self.assertEqual(got[0][1], b"not_home")
+        self.assertEqual(json.loads(got[1][1])["last_online"], "2023-11-14T22:13:20Z")
+
+    def test_moving_last_online_alone_sends_only_stats(self) -> None:
+        self.poll()
+        for n in range(1, 4):  # an online device seen again at every poll
+            self.db.q("UPDATE devices SET last_online=? WHERE mac=?", (1700000000 + 60 * n, MAC_A))
+            self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)], n)
+        self.db.q("UPDATE devices SET ip='10.0.0.9' WHERE mac=?", (MAC_A,))  # with another change: the current value
+        got = self.poll()
+        self.assertEqual([g[0] for g in got], [f"lw/device/{ID_A}/attributes", "lw/stats"])
+        self.assertEqual(json.loads(got[0][1])["last_online"], "2023-11-14T22:16:20Z")
 
     def test_ip_change_publishes_only_attributes(self) -> None:
         self.poll()
@@ -192,7 +225,7 @@ class PollTests(PubCase):
             (f"lw/device/{ID_B}/state", b"", 1, True), (f"lw/device/{ID_B}/attributes", b"", 1, True),
             (f"homeassistant/device_tracker/leasewatch_example_home/{ID_B}/config", b"", 1, True),
             ("lw/stats", STATS_JSON, 1, True)])
-        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")), [ID_A])
+        self.assertEqual(json.loads(self.db.get_meta("mqtt.published"))["ids"], [ID_A])
 
     def poll_until_more_than_stats(self) -> list[tuple[str, bytes, int, bool]]:
         for _ in range(100):  # the handler sends it within one tick; each poll reads what has arrived
@@ -261,7 +294,28 @@ class RestartTests(PubCase):
         self.assertEqual(stale, [
             ("lw/device/020000000099/state", b"", 1, True), ("lw/device/020000000099/attributes", b"", 1, True),
             ("homeassistant/device_tracker/leasewatch_example_home/020000000099/config", b"", 1, True)])
-        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")), [ID_A, ID_B])
+        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")),
+                         {"node": "leasewatch_example_home", "ids": [ID_A, ID_B]})
+
+    def test_site_name_change_clears_the_old_node_configs(self) -> None:
+        self.pub.connect()
+        self.poll()
+        self.pub.close()
+        os.environ["SITE_NAME"] = "Other Place"
+        p = self.make()  # a restart under another site name
+        p.connect()
+        got = self.poll(p)
+        old = [g for g in got if "/leasewatch_example_home/" in g[0]]
+        base = "homeassistant/%s/leasewatch_example_home"
+        self.assertEqual(sorted(g[0] for g in old), sorted(
+            [f"{base % 'device_tracker'}/{i}/config" for i in (ID_A, ID_B)]
+            + [f"{base % 'sensor'}/{k}/config" for k in ("devices", "online", "unacked", "new")]))
+        self.assertTrue(all(g[1:] == (b"", 1, True) for g in old))
+        self.assertEqual(len([g for g in got if "/leasewatch_other_place/" in g[0] and g[1]]), 6)
+        self.assertEqual(json.loads(self.db.get_meta("mqtt.published")),
+                         {"node": "leasewatch_other_place", "ids": [ID_A, ID_B]})
+        p.full = True  # a reconnect: the old node is not cleared again
+        self.assertEqual([g for g in self.poll(p) if "/leasewatch_example_home/" in g[0]], [])
 
 
 class StatusTests(PubCase):
@@ -282,10 +336,10 @@ class StatusTests(PubCase):
 
     def test_ping_if_idle(self) -> None:
         sent = self.pub.client.last_sent
-        self.clock.now = sent + 59  # keepalive 120: idle for less than 60 s
+        self.clock.now = sent + 119  # keepalive 240: idle for less than 120 s
         self.pub.ping_if_idle()
         self.assertEqual(self.broker.pings, 0)
-        self.clock.now = sent + 60
+        self.clock.now = sent + 120
         self.pub.ping_if_idle()
         self.assertTrue(self.broker.wait_for(lambda: self.broker.pings == 1))
         self.pub.ping_if_idle()  # the PINGREQ itself counts as sent

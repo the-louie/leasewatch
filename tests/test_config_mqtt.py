@@ -81,6 +81,24 @@ class MqttConfigTests(unittest.TestCase):
                 self.assertEqual(len(got), 1, got)
                 self.assertIn(text, got[0])
 
+    def test_ca_file_fifo_does_not_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            fifo = os.path.join(d, "ca.pem")
+            os.mkfifo(fifo)
+            got = self.problems(MQTT_CA_FILE=fifo)
+        self.assertEqual(got, ["MQTT_CA_FILE is not a regular file"])
+
+    def test_values_the_client_cannot_encode(self):
+        got = self.problems(MQTT_USER="lw", MQTT_PASSWORD="pa\udcffss")
+        self.assertEqual(got, ["MQTT_PASSWORD must be valid UTF-8 text"])
+        for bad in ("pa", "ss", "udcff"):
+            self.assertNotIn(bad, got[0].replace("MQTT_PASSWORD", "").replace("must be valid UTF-8 text", ""))
+        for k in ("MQTT_USER", "MQTT_PASSWORD"):
+            del os.environ[k]
+        got = self.problems(MQTT_TOPIC="a" * 70000)
+        self.assertEqual(got, ["MQTT_TOPIC is longer than 65535 bytes"])
+        self.assertEqual(self.problems(MQTT_TOPIC="hem/å"), [])
+
     def test_password_file(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
             f.write("s3cret\n")

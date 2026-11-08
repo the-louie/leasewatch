@@ -562,11 +562,24 @@ class Config:
         if parse_bool(self.mqtt_verify_tls) is None:
             problems.append("MQTT_VERIFY_TLS must be 1 or 0")
         if self.mqtt_ca_file:
+            # a FIFO would block the open for ever
+            if os.path.exists(self.mqtt_ca_file) and not os.path.isfile(self.mqtt_ca_file):
+                problems.append("MQTT_CA_FILE is not a regular file")
+            else:
+                try:
+                    with open(self.mqtt_ca_file, "rb"):
+                        pass
+                except OSError:
+                    problems.append("MQTT_CA_FILE cannot be read")
+        # the client sends these as UTF-8 with a 2-byte length
+        for key, value in (("MQTT_USER", self.mqtt_user), ("MQTT_PASSWORD", self.mqtt_password),
+                           ("MQTT_TOPIC", self.mqtt_topic), ("MQTT_DISCOVERY_PREFIX", self.mqtt_discovery_prefix),
+                           ("MQTT_CLIENT_ID", self.mqtt_client_id)):
             try:
-                with open(self.mqtt_ca_file, "rb"):
-                    pass
-            except OSError:
-                problems.append("MQTT_CA_FILE cannot be read")
+                if len(value.encode("utf-8")) > 65535:
+                    problems.append(f"{key} is longer than 65535 bytes")
+            except UnicodeEncodeError:  # a byte the environment could not decode, kept as a surrogate
+                problems.append(f"{key} must be valid UTF-8 text")
         for key, value in (("MQTT_TOPIC", self.mqtt_topic), ("MQTT_DISCOVERY_PREFIX", self.mqtt_discovery_prefix)):
             if (not value or any(c in value for c in "+#\0") or value[0] in "$/" or value.endswith("/")):
                 problems.append(f"{key} must be a topic without +, # or a leading $ or /, and no trailing /")

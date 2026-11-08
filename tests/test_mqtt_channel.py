@@ -73,17 +73,41 @@ class MqttChannelTests(ChannelCase):
         self.assertEqual(json.loads(payload)["event"], "watch")
         self.assertEqual(payload, webhook_json_body(self.cfg, msg))
 
-    def test_not_connected_fails_and_backs_off(self):
+    def test_not_connected_is_deferred_without_a_backoff_failure(self):
         backoff = Backoff(base=120)
         msg = build_message(self.cfg, [ROW])
         with self.assertRaises(MqttChannelError) as cm:
-            notify.send(self.cfg, msg, backoff)
+            MqttChannel(self.cfg).send(msg)
         self.assertEqual(str(cm.exception), "mqtt: not connected")
+        self.assertIsInstance(cm.exception, notify.NotifyDeferred)
+        with self.assertRaises(notify.NotifyDeferred):  # not tried: the queue stays
+            notify.send(self.cfg, msg, backoff)
+        # the "mqtt" backoff is the publisher's reconnect wait: an event it could not try must not push it back
+        self.assertNotIn("mqtt", backoff.states())
+        self.assertTrue(backoff.due("mqtt"))
+        self.assertEqual(self.broker.connections, 0)  # no connection of its own
+
+    def test_publish_failure_counts_on_the_backoff(self):
+        backoff = Backoff(base=120)
+        self.pub.connect()
+        self.broker.withhold_puback = True
+        self.pub.client.timeout = 0.3
+        with self.assertRaises(MqttChannelError), self.assertLogs("leasewatch.notify", "WARNING"):
+            notify.send(self.cfg, build_message(self.cfg, [ROW]), backoff)
         self.assertIs(backoff.states()["mqtt"], False)
         self.assertEqual(backoff.retry_in("mqtt"), 120)
-        self.assertEqual(self.broker.connections, 0)  # no connection of its own
-        with self.assertRaises(notify.NotifyDeferred):  # waiting out the backoff
-            notify.send(self.cfg, msg, backoff)
+
+    def test_not_connected_with_another_channel_delivering(self):
+        os.environ.update(WEBHOOK_URL="https://hook.example.lan/x")
+        cfg = Config()
+        calls = []
+        orig = notify.WebhookChannel.send
+        notify.WebhookChannel.send = lambda _self, msg: calls.append(msg)
+        self.addCleanup(setattr, notify.WebhookChannel, "send", orig)
+        backoff = Backoff(base=120)
+        self.assertEqual(notify.send(cfg, build_message(cfg, [ROW]), backoff), ["webhook"])
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("mqtt", backoff.states())
 
     def test_publish_error_is_wrapped(self):
         self.pub.connect()
@@ -114,7 +138,7 @@ class PasswordNotLoggedTests(ChannelCase):
         with self.assertLogs("leasewatch", level="DEBUG") as logs:
             with self.assertRaises(MqttError):
                 self.pub.connect()
-            with self.assertRaises(MqttChannelError):
+            with self.assertRaises(notify.NotifyDeferred):  # not connected: not tried
                 notify.send(self.cfg, msg, Backoff())
         self.assertTrue(logs.output)
         self.assertNotIn(PASSWORD, "\n".join(logs.output))

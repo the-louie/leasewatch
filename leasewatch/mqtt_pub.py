@@ -4,8 +4,10 @@ off, the configs from an earlier run are cleared once. A birth message from Home
 
 The collector calls publish_poll() after each good poll. Only what changed since the last publish goes out (all of it
 after a (re)connect); a device that leaves the selection has its retained messages cleared. The ids that have retained
-messages on the broker are kept in meta `mqtt.published`, so a device that left the selection while the process was
-down is still cleared after the restart.
+messages on the broker are kept in meta `mqtt.published` with the discovery node they were published under
+({"node", "ids"}; a plain list is read as the current node), so a device that left the selection while the process was
+down is still cleared after the restart, and a changed SITE_NAME clears the old node's configs. A change of
+last_online alone sends no attributes.
 
 Every MqttError propagates to the caller after the connection is closed (connected is False) and the next poll is
 marked to publish everything again; the caller reconnects.
@@ -63,12 +65,17 @@ class Publisher:
         self.version = version
         self.clock = clock
         self.base = cfg.mqtt_topic
-        self.keepalive = min(2 * cfg.poll_seconds, 0xFFFF)
+        # two polls, each as long as the slowest connector may take: a slow poll must not let the broker fire the Will
+        slowest = max((s.timeout for s in cfg.instances), default=60)
+        self.keepalive = min(2 * (cfg.poll_seconds + slowest), 0xFFFF)
         self.client: Client | None = None
         self.full = True
         self.birth_seen = False
-        self.last: dict[str, tuple[str, str, str]] = {}  # id -> (state, attributes JSON, config JSON) as last published
+        self.subscribe_warned = False  # the refused birth subscription was logged (once per process)
+        # id -> (state, attributes JSON without last_online, config JSON) as last published
+        self.last: dict[str, tuple[str, str, str]] = {}
         self.published: set[str] = set()  # ids that may have retained messages on the broker
+        self.stored_node = node_id(cfg)  # the node whose configs the stored ids have on the broker
 
     @property
     def connected(self) -> bool:
@@ -104,19 +111,35 @@ class Publisher:
         self.client = Client(host, port, tls=self._tls(), client_id=self.cfg.mqtt_client_id_effective,
                              user=self.cfg.mqtt_user, password=self.cfg.mqtt_password, keepalive=self.keepalive,
                              will=(status, b"offline", 1, True), timeout=self.timeout, clock=self.clock)
+        node = node_id(self.cfg)
         try:
             stored = json.loads(self.db.get_meta(META_PUBLISHED, "[]"))
         except ValueError:
             stored = []
-        if not isinstance(stored, list):
-            stored = []
+        if isinstance(stored, list):  # the 1.5.0 form: a list of ids, under the current node
+            stored = {"node": node, "ids": stored}
+        if not isinstance(stored, dict):
+            stored = {}
+        ids = stored.get("ids")
+        ids = ids if isinstance(ids, list) else []
+        old = stored.get("node")
+        self.stored_node = old if isinstance(old, str) and re.fullmatch(r"leasewatch(_[a-z0-9_]+)?", old) else node
         # leftovers: ids with retained messages that the first publish_poll clears when they are not selected
-        self.published = {i for i in stored if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)} | set(self.last)
+        self.published = {i for i in ids if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)} | set(self.last)
         with self._closing_on_error():
             self.client.connect()
             self.client.publish(status, "online", qos=1, retain=True)
             if self.cfg.mqtt_discovery_on:
-                self.client.subscribe(f"{self.cfg.mqtt_discovery_prefix}/status", qos=1)
+                birth = f"{self.cfg.mqtt_discovery_prefix}/status"
+                try:
+                    self.client.subscribe(birth, qos=1)
+                except MqttError:
+                    if not self.client.connected:  # the connection failed, not the subscription
+                        raise
+                    if not self.subscribe_warned:  # e.g. a write-only ACL: publish without the birth feature
+                        log.warning("mqtt: cannot subscribe to %s, discovery will not be re-sent when Home Assistant "
+                                    "restarts", birth)
+                        self.subscribe_warned = True
         self.full = True
 
     def selected(self, rows: list[dict]) -> list[dict]:
@@ -137,17 +160,20 @@ class Publisher:
                 out.append(r)
         return out
 
-    def _attributes(self, r: dict) -> str:
+    def _attributes(self, r: dict, last_online: bool = True) -> str:
+        """The attributes JSON; without last_online (which moves every poll for an online device) for the diff."""
         base = self.cfg.public_url.rstrip("/")
         mac = r["mac"].lower()
         tags = r.get("tags") or ""
-        return _json({
+        attrs = {
             "ip": r.get("ip") or "", "ip6": r.get("ip6") or "", "hostname": r.get("hostname") or "",
             "name": r.get("name") or "", "vlan": r.get("vlan") or "", "switch_port": r.get("sw_port") or "",
             "wifi_ssid": r.get("wifi_ssid") or "", "tags": [t for t in tags.split(",") if t],
-            "last_online": _iso_utc(r.get("last_online")), "url": f"{base}/?device={mac}" if base else None,
-            "mac": mac,
-        })
+            "url": f"{base}/?device={mac}" if base else None, "mac": mac,
+        }
+        if last_online:
+            attrs["last_online"] = _iso_utc(r.get("last_online"))
+        return _json(attrs)
 
     def _device_config(self, r: dict, i: str) -> str:
         b, node = self.base, node_id(self.cfg)
@@ -192,6 +218,7 @@ class Publisher:
         b = self.base
         sent = removed = 0
         before = set(self.published)
+        moved = False  # the old node's configs were cleared: the stored node changes
         try:
             with self._closing_on_error():
                 birth = f"{self.cfg.mqtt_discovery_prefix}/status"
@@ -202,7 +229,16 @@ class Publisher:
                     self.full = True
                     self.birth_seen = False
                 discovery = self.cfg.mqtt_discovery_on
-                config_base = f"{self.cfg.mqtt_discovery_prefix}/device_tracker/{node_id(self.cfg)}"
+                prefix, node = self.cfg.mqtt_discovery_prefix, node_id(self.cfg)
+                config_base = f"{prefix}/device_tracker/{node}"
+                if self.full and self.stored_node != node:  # SITE_NAME changed: the old node's configs go
+                    old = self.stored_node
+                    for i in sorted(self.published):
+                        client.publish(f"{prefix}/device_tracker/{old}/{i}/config", b"", qos=1, retain=True)
+                    for key in SENSORS:
+                        client.publish(f"{prefix}/sensor/{old}/{key}/config", b"", qos=1, retain=True)
+                    self.stored_node = node
+                    moved = True
                 want: dict[str, dict] = {device_id(r["mac"]): r for r in self.selected(rows)}
                 cleared = self.db.get_meta(META_CLEARED, "0") == "1" if self.full else True
                 if self.full and not discovery and not cleared:
@@ -212,18 +248,18 @@ class Publisher:
                         client.publish(self._sensor_topic(key), b"", qos=1, retain=True)
                 for i, r in want.items():
                     state = "home" if r.get("online") else "not_home"
-                    attrs = self._attributes(r)
+                    attrs = self._attributes(r, last_online=False)
                     conf = self._device_config(r, i) if discovery else ""
-                    old = None if self.full else self.last.get(i)
-                    if old is not None and old == (state, attrs, conf):
+                    prev = None if self.full else self.last.get(i)
+                    if prev is not None and prev == (state, attrs, conf):
                         continue
                     self.published.add(i)
-                    if conf and (old is None or old[2] != conf):
+                    if conf and (prev is None or prev[2] != conf):
                         client.publish(f"{config_base}/{i}/config", conf, qos=1, retain=True)
-                    if old is None or old[0] != state:
+                    if prev is None or prev[0] != state:
                         client.publish(f"{b}/device/{i}/state", state, qos=1, retain=True)
-                    if old is None or old[1] != attrs:
-                        client.publish(f"{b}/device/{i}/attributes", attrs, qos=1, retain=True)
+                    if prev is None or prev[0] != state or prev[1] != attrs:  # with the current last_online
+                        client.publish(f"{b}/device/{i}/attributes", self._attributes(r), qos=1, retain=True)
                     self.last[i] = (state, attrs, conf)
                     sent += 1
                 if self.full and discovery:
@@ -242,9 +278,9 @@ class Publisher:
                 if self.full and discovery == cleared:  # off and not yet cleared, or on after a cleared run
                     self.db.set_meta(META_CLEARED, "0" if discovery else "1")
         finally:
-            if self.published != before:
+            if self.published != before or moved:
                 try:
-                    self.db.set_meta(META_PUBLISHED, _json(sorted(self.published)))
+                    self.db.set_meta(META_PUBLISHED, _json({"node": self.stored_node, "ids": sorted(self.published)}))
                 except sqlite3.Error as e:
                     log.warning("mqtt: could not store the published devices (%s)", e)
         self.full = False

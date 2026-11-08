@@ -47,7 +47,8 @@ MailError = NotifyError  # the 1.1 name
 
 
 class NotifyDeferred(NotifyError):
-    """Every channel is waiting out its backoff: nothing was called, the queue stays."""
+    """Every channel is waiting out its backoff: nothing was called, the queue stays. A channel raises it (a subclass)
+    when it could not try at all (the "mqtt" channel without a connection): send() then records no failure for it."""
 
 
 class MailgunError(NotifyError):
@@ -391,6 +392,11 @@ class MqttChannelError(NotifyError):
     pass
 
 
+class MqttNotConnected(MqttChannelError, NotifyDeferred):
+    """The publisher holds no connection: the channel was not tried. No failure is recorded on the "mqtt" backoff,
+    which is the publisher's own reconnect wait."""
+
+
 _shared_client: Callable[[], Client | None] = lambda: None  # noqa: E731
 
 
@@ -403,8 +409,9 @@ def set_shared_client(provider: Callable[[], Client | None]) -> None:
 
 class MqttChannel:
     """The webhook's JSON body, published on <MQTT_TOPIC>/event (QoS 1, not retained) through the connection the
-    presence publisher holds. Without a connected client it fails ("mqtt: not connected"): the Backoff waits and the
-    publisher reconnects on its own poll step."""
+    presence publisher holds. Without a connected client it is not tried (MqttNotConnected, "mqtt: not connected"):
+    the message stays queued and the publisher reconnects on its own poll step. A publish that fails counts as a
+    failure on the "mqtt" backoff."""
     name = "mqtt"
 
     def __init__(self, cfg: Config, client: Callable[[], Client | None] | None = None) -> None:
@@ -414,7 +421,7 @@ class MqttChannel:
     def send(self, msg: Message) -> None:
         client = (self._client or _shared_client)()
         if client is None or not client.connected:
-            raise MqttChannelError("mqtt: not connected")
+            raise MqttNotConnected("mqtt: not connected")
         try:
             client.publish(f"{self.cfg.mqtt_topic}/event", webhook_json_body(self.cfg, msg), qos=1, retain=False)
         except MqttError as e:
@@ -495,8 +502,9 @@ def send(cfg: Config, msg: Message, backoff: Backoff | None = None, what: str = 
     the message in the log lines ("new devices"; a message without devices is logged by `what` alone).
 
     With a backoff, a channel that waits out its backoff is not called and counts as failed for this batch (it misses
-    it, as a channel that failed). When every channel waits, NotifyDeferred is raised and nothing was called. One
-    backoff shared by every kind of message: a channel that failed for one waits for all."""
+    it, as a channel that failed). A channel that raises NotifyDeferred could not try (no connection): it misses the
+    batch too, but no failure is recorded. When no channel was tried, NotifyDeferred is raised. One backoff shared by
+    every kind of message: a channel that failed for one waits for all."""
     chans = channels(cfg)
     if not chans:
         raise NotifyError("no notification channel configured")
@@ -512,6 +520,8 @@ def send(cfg: Config, msg: Message, backoff: Backoff | None = None, what: str = 
                 again = backoff.delivered(ch.name)
                 if again:
                     log.info("%s delivers again after %d failed attempt(s)", ch.name, again)
+        except NotifyDeferred as e:  # not tried: no failure on the backoff
+            log.debug("%s skipped: %s", ch.name, e)
         except NotifyError as e:
             errors.append((ch.name, e))
         except Exception as e:  # a bug in one channel must not cost the others their delivery
@@ -541,7 +551,7 @@ def send(cfg: Config, msg: Message, backoff: Backoff | None = None, what: str = 
                 log.debug("%s failed again (%s): %s", name, failed_what, e)
     if not ok:
         if not errors:
-            raise NotifyDeferred("every channel is waiting out its backoff")
+            raise NotifyDeferred("no channel was tried: each waits out its backoff or has no connection")
         if len(errors) == 1:
             raise errors[0][1]
         raise NotifyError("; ".join(str(e) for _, e in errors))

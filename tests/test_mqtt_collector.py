@@ -11,6 +11,7 @@ import logging
 import os
 import socket
 import threading
+import time
 
 import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from _case import EnvTmpCase
@@ -19,7 +20,7 @@ from _fixtures import FakeClient, S
 from _mqttfake import FakeBroker
 from leasewatch import notify
 from leasewatch.__main__ import check_cmd, startup_line
-from leasewatch.collector import SOURCE_DOWN_POLLS, Collector
+from leasewatch.collector import ALERT_MARK, SOURCE_DOWN_POLLS, Collector
 from leasewatch.config import Config
 from leasewatch.db import Database
 from leasewatch.web import serve
@@ -180,6 +181,86 @@ class PollTests(MqttCollectorCase):
         self.assertTrue(col.run_once()["ok"])
         self.assertEqual(self.db.get_meta("notify.mqtt.ok"), "")
         self.assertEqual(self.broker.connections, 0)
+
+
+class EventsTests(MqttCollectorCase):
+    """MQTT_EVENTS=1 with MQTT as the only channel: events go to <topic>/event through the publisher's connection."""
+    ENV = {**MqttCollectorCase.ENV, "MQTT_EVENTS": "1", "MAIL_ON_SOURCE": "1", "MAIL_ON_WATCH": "1"}
+
+    @staticmethod
+    def events(sent: list[tuple[str, bytes]]) -> list[dict]:
+        return [json.loads(p) for t, p in sent if t == "lw/event"]
+
+    def source_down(self) -> int:
+        """A source_down event written while the process runs (or was down); its id."""
+        self.db.q("INSERT INTO events(ts, mac, kind, detail) VALUES (?,?,?,?)",
+                  (int(time.time()), "", "source_down", "fw1: timeout"))
+        return int(self.db.q("SELECT MAX(id) FROM events")[0][0])
+
+    def assert_reconnected_with_alert(self, sent: list[tuple[str, bytes]], event_id: int) -> None:
+        self.assertEqual(self.broker.connections, 2)
+        self.assertTrue(self.col._mqtt.connected)
+        topics = [t for t, _ in sent]
+        self.assertEqual(sent[0], ("lw/status", b"online"))
+        self.assertEqual(len([t for t in topics if t.endswith("/state")]), len(MACS))  # the full republish
+        self.assertEqual([e["event"] for e in self.events(sent)], ["source_down"])
+        self.assertGreater(topics.index("lw/event"), topics.index("lw/stats"))  # after the presence publish
+        self.assertGreaterEqual(int(self.db.get_meta(ALERT_MARK)), event_id)
+        self.assertEqual(self.db.get_meta("notify.mqtt.ok"), "1")
+
+    def test_dropped_connection_reconnects_before_the_pending_alert(self) -> None:
+        self.poll()  # connects; the alert mark is set
+        self.col._mqtt.client.close()
+        self.assertTrue(self.broker.wait_gone())
+        event_id = self.source_down()
+        res, sent = self.poll()  # the "mqtt" backoff never failed: due at once
+        self.assertTrue(res["ok"])
+        self.assert_reconnected_with_alert(sent, event_id)
+
+    def test_restart_with_a_pending_alert(self) -> None:
+        self.poll()
+        self.col.close()
+        self.assertTrue(self.broker.wait_gone())
+        event_id = self.source_down()
+        self.col = self.make()  # the same database
+        res, sent = self.poll()
+        self.assertTrue(res["ok"])
+        self.assert_reconnected_with_alert(sent, event_id)
+
+    def test_new_device_mail_is_cleared_by_the_mqtt_delivery(self) -> None:
+        self.poll()  # the baseline
+        mac = "00:00:5e:00:53:2a"  # a global MAC: a private one is never mailed
+        self.fw.sightings_data.append(S(mac, "10.0.0.42", "newhost", online=False))
+        res, sent = self.poll()
+        (ev,) = self.events(sent)
+        self.assertEqual((ev["event"], [d["mac"] for d in ev["devices"]]), ("new_devices", [mac]))
+        self.assertIsNone(self.db.q("SELECT mail_queued FROM devices WHERE mac=?", (mac,))[0][0])
+
+    def test_watch_alert_moves_the_mark(self) -> None:
+        self.poll()
+        self.db.q("UPDATE devices SET watch=1 WHERE mac=?", (MACS[0],))
+        self.fw.sightings_data[0] = S(MACS[0], "10.0.0.99", "host0", online=False)
+        res, sent = self.poll()
+        (ev,) = self.events(sent)
+        self.assertEqual(ev["event"], "watch")
+        top = self.db.q("SELECT MAX(id) FROM events WHERE mac=? AND kind='ip'", (MACS[0],))[0][0]
+        self.assertIsNotNone(top)
+        self.assertGreaterEqual(int(self.db.get_meta(ALERT_MARK)), top)
+
+
+class EventsOffTests(MqttCollectorCase):
+    ENV = {**MqttCollectorCase.ENV, "MQTT_EVENTS": "0", "MAIL_ON_SOURCE": "1"}
+
+    def test_no_event_but_presence(self) -> None:
+        self.poll()
+        mac = "00:00:5e:00:53:2b"
+        self.fw.sightings_data.append(S(mac, "10.0.0.43", "newhost", online=False))
+        self.db.q("INSERT INTO events(ts, mac, kind, detail) VALUES (?,?,?,?)",
+                  (int(time.time()), "", "source_down", "fw1: timeout"))
+        res, sent = self.poll()
+        topics = [t for t, _ in sent]
+        self.assertNotIn("lw/event", [p[0] for p in self.broker.published])
+        self.assertIn("lw/device/00005e00532b/state", topics)
 
 
 class LineTests(EnvTmpCase):
