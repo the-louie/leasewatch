@@ -93,6 +93,17 @@ const scenarios = {
     }
     return { chips, per, rows_after: (await rowNames(page)).length };
   },
+  // English is already in the HTML: the applier changes nothing there
+  async lang_apply(page, base) {
+    await page.goto(`${base}?lang=en`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    return await page.evaluate(() => ({ html_lang: document.documentElement.lang,
+      sub: document.querySelector('[data-i18n="nav.sub"]').textContent,
+      refresh: document.querySelector('[data-i18n="foot.refresh"]').textContent,
+      option: document.querySelector('#fStatus [data-i18n="opt.offline"]').textContent,
+      tpl_title: document.querySelector('#rowTpl').content.querySelector('.c-mac .cp').title,
+      row_title: document.querySelector('#rows .c-mac .cp').title }));
+  },
   // ?lang= is not a filter: a filter click and Clear filters keep it in the address
   async lang_param(page, base) {
     await page.goto(`${base}?lang=en`, { waitUntil: 'domcontentloaded' });

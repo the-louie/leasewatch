@@ -14,137 +14,137 @@
     <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 1 18 0 9 9 0 0 1-18 0Zm9-5v5l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <div>
       <h1>{{SITE_NAME}}</h1>
-      <p class="sub">Who is on the network, newest first</p>
+      <p class="sub" data-i18n="nav.sub">Who is on the network, newest first</p>
     </div>
   </div>
-  <div class="status" id="status" title="Collector status">
-    <span class="dot" id="statusDot"></span><span id="statusText">loading…</span>
+  <div class="status" id="status" title="Collector status" data-i18n-attr="title:aria.collector_status">
+    <span class="dot" id="statusDot"></span><span id="statusText" data-i18n="nav.loading">loading…</span>
   </div>
-  <button class="icon-btn" id="themeBtn" title="Toggle light/dark" aria-label="Toggle theme">◐</button>
+  <button class="icon-btn" id="themeBtn" title="Toggle light/dark" aria-label="Toggle theme" data-i18n-attr="title:aria.theme_title,aria-label:aria.theme">◐</button>
 </header>
 
 <div class="banner hidden" id="banner" role="alert"></div>
 
 <main>
-  <section class="cards" id="cards" aria-label="Summary">
-    <button class="card" data-filter="all" aria-pressed="false"><span class="num" id="cTotal">–</span><span class="lbl">devices</span></button>
-    <button class="card" data-filter="online" aria-pressed="false"><span class="num" id="cOnline">–</span><span class="lbl">online now</span></button>
+  <section class="cards" id="cards" aria-label="Summary" data-i18n-attr="aria-label:aria.summary">
+    <button class="card" data-filter="all" aria-pressed="false"><span class="num" id="cTotal">–</span><span class="lbl" data-i18n="card.devices">devices</span></button>
+    <button class="card" data-filter="online" aria-pressed="false"><span class="num" id="cOnline">–</span><span class="lbl" data-i18n="card.online">online now</span></button>
     <button class="card accent" data-filter="new" aria-pressed="false"><span class="num" id="cNew">–</span><span class="lbl">new (<span id="newDays">7</span> d)</span></button>
-    <button class="card warn" data-filter="unacked" aria-pressed="false"><span class="num" id="cUnacked">–</span><span class="lbl">not yet known</span></button>
-    <button class="card warn hidden" id="cardBaseline" data-filter="baseline" aria-pressed="false"><span class="num" id="cBaseline">–</span><span class="lbl">baseline to check</span></button>
-    <div class="card chart" role="img" aria-label="New devices per day, last 30 days">
-      <div class="chart-title"><span>new devices · 30 days</span><span class="chart-sum" id="barsSum"></span></div>
+    <button class="card warn" data-filter="unacked" aria-pressed="false"><span class="num" id="cUnacked">–</span><span class="lbl" data-i18n="card.unacked">not yet known</span></button>
+    <button class="card warn hidden" id="cardBaseline" data-filter="baseline" aria-pressed="false"><span class="num" id="cBaseline">–</span><span class="lbl" data-i18n="card.baseline">baseline to check</span></button>
+    <div class="card chart" role="img" aria-label="New devices per day, last 30 days" data-i18n-attr="aria-label:aria.new_chart">
+      <div class="chart-title"><span data-i18n="card.chart_title">new devices · 30 days</span><span class="chart-sum" id="barsSum"></span></div>
       <div class="bars" id="bars"></div>
-      <div class="chart-axis"><span>30 d ago</span><span>today</span></div>
+      <div class="chart-axis"><span data-i18n="card.axis_start">30 d ago</span><span data-i18n="card.axis_end">today</span></div>
     </div>
   </section>
 
-  <section class="vlans" id="vlans" aria-label="Networks"></section>
-  <section class="vlans ssids hidden" id="ssids" aria-label="Wi-Fi networks"><button class="chip toggle hidden" id="ssidNow" type="button" aria-pressed="false" title="Only the devices online on this Wi-Fi network now">now only</button></section>
-  <section class="vlans tags hidden" id="tags" aria-label="Tags"></section>
+  <section class="vlans" id="vlans" aria-label="Networks" data-i18n-attr="aria-label:aria.networks"></section>
+  <section class="vlans ssids hidden" id="ssids" aria-label="Wi-Fi networks" data-i18n-attr="aria-label:aria.wifi"><button class="chip toggle hidden" id="ssidNow" type="button" aria-pressed="false" title="Only the devices online on this Wi-Fi network now" data-i18n="tool.now_only" data-i18n-attr="title:aria.ssid_now">now only</button></section>
+  <section class="vlans tags hidden" id="tags" aria-label="Tags" data-i18n-attr="aria-label:aria.tags"></section>
 
   <section class="toolbar">
     <div class="search">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      <input id="q" type="search" aria-label="Search devices" placeholder="Search name, hostname, IP, MAC, vendor…" autocomplete="off">
+      <input id="q" type="search" aria-label="Search devices" placeholder="Search name, hostname, IP, MAC, vendor…" autocomplete="off" data-i18n-attr="aria-label:aria.search,placeholder:ph.search">
       <kbd class="key" aria-hidden="true">/</kbd>
     </div>
-    <select id="fStatus" aria-label="Status filter">
-      <option value="all">All devices</option>
-      <option value="new">New</option>
-      <option value="unacked">Not yet known</option>
-      <option value="baseline">Baseline, not checked</option>
-      <option value="online">Online</option>
-      <option value="offline">Offline</option>
-      <option value="dynamic">DHCP dynamic</option>
-      <option value="static">DHCP static</option>
-      <option value="arp">Not via DHCP</option>
-      <option value="wifi">Wi-Fi</option>
-      <option value="wired">Wired</option>
-      <option value="archived">Archived</option>
+    <select id="fStatus" aria-label="Status filter" data-i18n-attr="aria-label:aria.status_filter">
+      <option value="all" data-i18n="opt.all">All devices</option>
+      <option value="new" data-i18n="opt.new">New</option>
+      <option value="unacked" data-i18n="opt.unacked">Not yet known</option>
+      <option value="baseline" data-i18n="opt.baseline">Baseline, not checked</option>
+      <option value="online" data-i18n="opt.online">Online</option>
+      <option value="offline" data-i18n="opt.offline">Offline</option>
+      <option value="dynamic" data-i18n="opt.dynamic">DHCP dynamic</option>
+      <option value="static" data-i18n="opt.static">DHCP static</option>
+      <option value="arp" data-i18n="opt.arp">Not via DHCP</option>
+      <option value="wifi" data-i18n="opt.wifi">Wi-Fi</option>
+      <option value="wired" data-i18n="opt.wired">Wired</option>
+      <option value="archived" data-i18n="opt.archived">Archived</option>
     </select>
-    <select id="sort" aria-label="Sort">
-      <option value="first_desc">Newest first</option>
-      <option value="last_desc">Last online</option>
-      <option value="name">Name</option>
-      <option value="ip">IP address</option>
-      <option value="vlan">Network</option>
-      <option value="vendor">Vendor</option>
+    <select id="sort" aria-label="Sort" data-i18n-attr="aria-label:aria.sort">
+      <option value="first_desc" data-i18n="opt.first_desc">Newest first</option>
+      <option value="last_desc" data-i18n="th.last">Last online</option>
+      <option value="name" data-i18n="opt.name">Name</option>
+      <option value="ip" data-i18n="opt.ip">IP address</option>
+      <option value="vlan" data-i18n="th.vlan">Network</option>
+      <option value="vendor" data-i18n="opt.vendor">Vendor</option>
     </select>
     <span class="count" id="count"></span>
-    <button class="btn hidden" id="selBtn" type="button" aria-pressed="false" title="Select rows to mark known, archive or restore several at once">Select</button>
-    <a class="btn ghost" href="/api/devices.csv" download>Export CSV</a>
+    <button class="btn hidden" id="selBtn" type="button" aria-pressed="false" title="Select rows to mark known, archive or restore several at once" data-i18n="tool.select" data-i18n-attr="title:aria.select_title">Select</button>
+    <a class="btn ghost" href="/api/devices.csv" download data-i18n="tool.export_csv">Export CSV</a>
   </section>
 
   <section class="table-wrap">
     <table id="tbl">
       <thead><tr>
-        <th class="c-sel" scope="col"><input type="checkbox" id="selAll" aria-label="Select all visible"></th>
-        <th class="c-dot" scope="col"><span class="sr">online</span></th>
-        <th class="c-dev" scope="col">Device</th>
-        <th class="c-ip" scope="col">IP</th>
-        <th class="c-mac" scope="col">MAC</th>
-        <th class="c-vlan" scope="col">Network</th>
-        <th class="c-type" scope="col">Type</th>
-        <th class="c-where" scope="col">Connected via</th>
-        <th class="c-first" id="thFirst" scope="col">First seen</th>
-        <th class="c-last" id="thLast" scope="col">Last online</th>
-        <th class="c-act" scope="col"><span class="sr">actions</span></th>
+        <th class="c-sel" scope="col"><input type="checkbox" id="selAll" aria-label="Select all visible" data-i18n-attr="aria-label:aria.select_all"></th>
+        <th class="c-dot" scope="col"><span class="sr" data-i18n="th.online">online</span></th>
+        <th class="c-dev" scope="col" data-i18n="th.device">Device</th>
+        <th class="c-ip" scope="col" data-i18n="th.ip">IP</th>
+        <th class="c-mac" scope="col" data-i18n="th.mac">MAC</th>
+        <th class="c-vlan" scope="col" data-i18n="th.vlan">Network</th>
+        <th class="c-type" scope="col" data-i18n="th.type">Type</th>
+        <th class="c-where" scope="col" data-i18n="th.where">Connected via</th>
+        <th class="c-first" id="thFirst" scope="col" data-i18n="th.first">First seen</th>
+        <th class="c-last" id="thLast" scope="col" data-i18n="th.last">Last online</th>
+        <th class="c-act" scope="col"><span class="sr" data-i18n="th.actions">actions</span></th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
-    <div class="empty hidden" id="empty"><p id="emptyText">Nothing matches.</p><button class="btn" id="emptyClear">Clear filters</button></div>
+    <div class="empty hidden" id="empty"><p id="emptyText" data-i18n="empty.text">Nothing matches.</p><button class="btn" id="emptyClear" data-i18n="empty.clear">Clear filters</button></div>
   </section>
 
   <section class="events">
-    <h2>Events</h2>
+    <h2 data-i18n="nav.events">Events</h2>
     <div class="event-filters">
-      <label>Kind <select id="evKind"><option value="">All kinds</option></select></label>
-      <label>From <input type="date" id="evFrom"></label>
-      <label>To <input type="date" id="evTo"></label>
-      <a class="btn" id="evCsv" href="/api/events.csv">Export CSV</a>
-      <span class="muted hidden" id="evRange" role="status">From is after To.</span>
+      <label><span data-i18n="tool.kind">Kind</span> <select id="evKind"><option value="" data-i18n="opt.all_kinds">All kinds</option></select></label>
+      <label><span data-i18n="tool.from">From</span> <input type="date" id="evFrom"></label>
+      <label><span data-i18n="tool.to">To</span> <input type="date" id="evTo"></label>
+      <a class="btn" id="evCsv" href="/api/events.csv" data-i18n="tool.export_csv">Export CSV</a>
+      <span class="muted hidden" id="evRange" role="status" data-i18n="tool.range_error">From is after To.</span>
     </div>
     <ul id="events" class="event-list"></ul>
-    <div class="event-more"><button class="btn hidden" id="evMore" type="button">Load more</button></div>
+    <div class="event-more"><button class="btn hidden" id="evMore" type="button" data-i18n="tool.load_more">Load more</button></div>
   </section>
 
   <!-- inside main: the open drawer makes main inert, and the bar with it -->
-  <div id="selbar" class="selbar hidden" role="region" aria-label="Selection">
+  <div id="selbar" class="selbar hidden" role="region" aria-label="Selection" data-i18n-attr="aria-label:aria.selection">
     <span class="selcount" id="selCount" aria-live="polite"></span>
-    <button class="btn small ack" id="selAck" type="button">Mark known</button>
-    <button class="btn small" id="selArchive" type="button">Archive</button>
-    <button class="btn small" id="selRestore" type="button">Restore to list</button>
-    <button class="btn small ghost" id="selClear" type="button">Clear</button>
+    <button class="btn small ack" id="selAck" type="button" data-i18n="sel.mark_known">Mark known</button>
+    <button class="btn small" id="selArchive" type="button" data-i18n="sel.archive">Archive</button>
+    <button class="btn small" id="selRestore" type="button" data-i18n="sel.restore">Restore to list</button>
+    <button class="btn small ghost" id="selClear" type="button" data-i18n="sel.clear">Clear</button>
   </div>
 </main>
 
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle" aria-hidden="true" inert>
   <div class="drawer-head">
-    <h2 id="dTitle">Device</h2>
-    <button class="icon-btn" id="dClose" aria-label="Close">✕</button>
+    <h2 id="dTitle" data-i18n="th.device">Device</h2>
+    <button class="icon-btn" id="dClose" aria-label="Close" data-i18n-attr="aria-label:aria.close">✕</button>
   </div>
   <div class="drawer-body" id="dBody"></div>
 </aside>
 <div class="scrim" id="scrim"></div>
 
 <footer>
-  <span>{{SITE_NAME}} {{VERSION}} · refreshes every minute</span>
+  <span>{{SITE_NAME}} {{VERSION}} · <span data-i18n="foot.refresh">refreshes every minute</span></span>
 </footer>
 
 <template id="rowTpl">
   <tr class="row" tabindex="0">
     <td class="c-sel"><input type="checkbox" class="sel"></td>
     <td class="c-dot"><span class="online-dot"></span></td>
-    <td class="c-dev"><div class="dev-name"><span class="nm"></span></div><div class="dev-tags"></div><div class="dev-sub"></div><div class="dev-meta"><span class="mono ip"></span><span class="mono ip6 hidden" role="button" tabindex="0" title="Click to copy"></span><span class="badge vlan"></span><span class="muted where"></span><span class="muted last"></span></div></td>
-    <td class="c-ip mono"><span class="cp" role="button" tabindex="0" title="Click to copy"></span><span class="cp ip6 mono hidden" role="button" tabindex="0" title="Click to copy"></span></td>
-    <td class="c-mac mono"><span class="cp" role="button" tabindex="0" title="Click to copy"></span><span class="priv hidden" title="private address"><span aria-hidden="true">&#x1F575;&#xFE0F;</span></span></td>
+    <td class="c-dev"><div class="dev-name"><span class="nm"></span></div><div class="dev-tags"></div><div class="dev-sub"></div><div class="dev-meta"><span class="mono ip"></span><span class="mono ip6 hidden" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span><span class="badge vlan"></span><span class="muted where"></span><span class="muted last"></span></div></td>
+    <td class="c-ip mono"><span class="cp" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span><span class="cp ip6 mono hidden" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span></td>
+    <td class="c-mac mono"><span class="cp" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span><span class="priv hidden" title="private address" data-i18n-attr="title:row.private"><span aria-hidden="true">&#x1F575;&#xFE0F;</span></span></td>
     <td class="c-vlan"><span class="badge vlan"></span></td>
     <td class="c-type"></td>
     <td class="c-where"></td>
     <td class="c-first"></td>
     <td class="c-last"></td>
-    <td class="c-act"><button class="btn small ack" title="Acknowledge: I know this device" aria-label="Acknowledge">Mark known</button></td>
+    <td class="c-act"><button class="btn small ack" title="Acknowledge: I know this device" aria-label="Acknowledge" data-i18n="sel.mark_known" data-i18n-attr="title:row.ack_title,aria-label:row.ack_aria">Mark known</button></td>
   </tr>
 </template>
 

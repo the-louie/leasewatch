@@ -26,6 +26,19 @@
     return String(v).replace(/\{(\w+)\}/g, (m, x) => (p && p[x] !== undefined ? String(p[x]) : m));
   }
 
+  // the marked static strings (data-i18n: the text, data-i18n-attr: "attr:key,attr:key") in the page's language; English is
+  // already in the HTML, so it does nothing there. Run once, before the first render: a re-render clones the translated template
+  function applyI18n(root) {
+    if (lang === "en") return;
+    for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
+    for (const el of root.querySelectorAll("[data-i18n-attr]")) {
+      for (const pair of el.dataset.i18nAttr.split(",")) {
+        const i = pair.indexOf(":");
+        if (i > 0) el.setAttribute(pair.slice(0, i).trim(), t(pair.slice(i + 1).trim()));
+      }
+    }
+  }
+
   const state = {
     devices: [], meta: null, stats: null, events: [],
     evNext: null, // id to pass as before= for the next events page (null: the list is complete)
@@ -938,6 +951,7 @@
   const store = { get: k => { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} } };
   const theme = store.get("theme"); if (theme) document.documentElement.dataset.theme = theme;
   if (document.documentElement.lang !== lang) document.documentElement.lang = lang;
+  applyI18n(document); applyI18n($("#rowTpl").content);
   $("#themeBtn").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; store.set("theme", next); };
 
   readUrl(); load().then(openDeepLink);
