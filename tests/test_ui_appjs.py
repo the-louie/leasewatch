@@ -122,13 +122,12 @@ def _extract(src: str, name: str) -> str:
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
         "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
-        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t"]
+        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t", "RAW_RE", "rawText"]
 
 # the page globals the language code reads, a block outside the rest: a test's own "const location" or
-# "const navigator" shadows them instead of clashing. Mutable, so a test can change them and call pickLang() again
-PAGE = r"""
-const window = { LW_STRINGS: { en: { "app.copied": "Copied", "app.click_to_copy": "Click to copy",
-  "app.copy_hint": "selected: press Ctrl+C to copy", "count.devices": { one: "{n} device", other: "{n} devices" } }, sv: {} } };
+# "const navigator" shadows them instead of clashing. Mutable, so a test can change them and call pickLang() again.
+# window.LW_STRINGS is the real string table, so the tests that pin English text read what the page shows
+PAGE = "const window = {};\n" + _read("leasewatch", "static", "i18n.js") + r"""
 const location = { pathname: "/", search: "" };
 const navigator = { languages: ["en-US"] };
 """
@@ -464,6 +463,48 @@ out.v = [t("count.devices", { n: 1 }), t("count.devices", { n: 0 }), t("count.de
 out.v = [t("app.copied"), t("count.devices", { n: 2 })];
 """)
         self.assertEqual(out["v"], ["app.copied", "count.devices"])
+
+    # the collector's counts are rebuilt from the table: every part, only the two base parts, and a text of another shape
+    def test_last_raw_parts(self) -> None:
+        out = _run([], r"""//--
+out.v = [rawText("2 leases, 1 arp, 3 reservations, 4 ndp, 0 leases6, ndp unavailable, kea6 unavailable"),
+         rawText("0 leases, 12 arp"), rawText("2 leases, 1 arp, 0 ndp, kea6 unavailable"), rawText("arp 5"), rawText(""),
+         rawText("2 leases, 1 arp, junk")];
+""")
+        self.assertEqual(out["v"], [
+            "2 leases, 1 ARP entries, 3 reservations, 4 NDP entries, 0 DHCPv6 leases, NDP table unavailable, "
+            "DHCPv6 leases unavailable",
+            "0 leases, 12 ARP entries", "2 leases, 1 ARP entries, 0 NDP entries, DHCPv6 leases unavailable", "arp 5", "",
+            "2 leases, 1 arp, junk"])
+
+    # the status line, the counts and the chip titles in English: a plural count says "1 device", not "1 devices"
+    def test_english_counts_and_status(self) -> None:
+        out = _run(["renderStatus", "renderVlans", "syncUrl", "urlRetry"], r"""const showBanner = () => {}; const renderTable = () => {};
+const history = { replaceState() {} };
+//--
+const now = Math.round(Date.now() / 1000);
+state.meta = { now, stale: false, last_poll_ts: now, last_poll_ok: true, last_error: "", poll_seconds: 60, last_raw: "3 leases, 2 arp", new_days: 7, connectors: [] };
+state.stats = { vlans: [{ vlan: "LAN", online: 1, n: 1 }, { vlan: "IOT", online: 0, n: 2 }], all_vlans: ["LAN", "IOT"] };
+const made = []; document.createElement = () => { const e = new El("BUTTON"); made.push(e); return e; };
+$("#vlans").appendChild = () => {};
+renderStatus(); renderVlans();
+out.txt = $("#statusText").innerHTML; out.title = $("#status").title; out.lbl = $('.card[data-filter="new"] .lbl').textContent;
+out.chips = made.map(c => c.title);
+out.time = [rel(now - 10), rel(now - 600), rel(now - 7200), rel(now - 86400 * 3), durText(30), durText(600), durText(5400), durText(86400 * 2 + 7200)];
+""")
+        self.assertEqual(out["txt"], "polled just now · 3 leases, 2 ARP entries")
+        self.assertEqual(out["title"], "Polls every 60s")
+        self.assertEqual(out["lbl"], "new (7 d)")
+        self.assertEqual(out["chips"], ["1 online of 1 device", "0 online of 2 devices"])
+        self.assertEqual(out["time"], ["just now", "10 min ago", "2 h ago", "3 d ago", "< 1 min", "10 min", "1.5 h", "2 d 2 h"])
+
+    # Swedish (no Swedish strings yet, so the English text) writes the decimal with a comma
+    def test_duration_decimal_follows_the_language(self) -> None:
+        out = _run([], r"""location.search = "?lang=sv";
+//--
+out.v = [lang, durText(5400), durText(36000)];
+""")
+        self.assertEqual(out["v"], ["sv", "1,5 h", "10,0 h"])
 
     # a ?lang= from the address stays through a filter change and a clear; it is not a filter
     def test_lang_param_survives_url_writes(self) -> None:

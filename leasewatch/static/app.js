@@ -81,29 +81,30 @@
   const rel = ts => {
     if (!ts) return "–";
     const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
-    if (s < 45) return "just now";
+    if (s < 45) return t("time.just_now");
     // the unit is picked on the rounded value, so 3590 s reads "1 h ago", not "60 min ago"
-    const m = Math.round(s / 60); if (m < 60) return `${m} min ago`;
-    const h = Math.round(s / 3600); if (h < 48) return `${h} h ago`;
-    const n = Math.round(s / 86400); if (n < 30) return `${n} d ago`;
+    const m = Math.round(s / 60); if (m < 60) return t("time.min_ago", { n: m });
+    const h = Math.round(s / 3600); if (h < 48) return t("time.h_ago", { n: h });
+    const n = Math.round(s / 86400); if (n < 30) return t("time.d_ago", { n });
     const d = new Date(ts * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   };
   // a length of time in seconds: "< 1 min", "40 min", "3.5 h", "4 d 2 h". The unit is picked on the rounded value, so
   // 3570 s reads "1.0 h", not "60 min", and 172799 s reads "2 d 0 h", not "48.0 h"
   const durText = s => {
     s = Math.max(0, Math.round(s || 0));
-    if (s < 60) return "< 1 min";
-    const m = Math.round(s / 60); if (m < 60) return `${m} min`;
-    const t = Math.round(s / 360) / 10; if (t < 48) return `${t.toFixed(1)} h`;
-    const h = Math.round(s / 3600); return `${Math.floor(h / 24)} d ${h % 24} h`;
+    if (s < 60) return t("time.less_min");
+    const m = Math.round(s / 60); if (m < 60) return t("time.min", { n: m });
+    // one decimal in the page's language: "3.5" in English, "3,5" in Swedish
+    const x = Math.round(s / 360) / 10; if (x < 48) return t("time.hours", { n: x.toLocaleString(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+    const h = Math.round(s / 3600); return t("time.days_hours", { d: Math.floor(h / 24), h: h % 24 });
   };
   const pad3 = x => String(x).padStart(3, "0");
   const ipKey = ip => (ip || "").split(".").map(pad3).join(".");
   // a device without an address sorts after every real one, as an empty vendor does
-  const ipCmp = (a, b) => (!a.ip - !b.ip) || ipKey(a.ip).localeCompare(ipKey(b.ip));
+  const ipCmp = (a, b) => (!a.ip - !b.ip) || ipKey(a.ip).localeCompare(ipKey(b.ip), lang);
   const isNew = d => !d.baseline && state.meta && (state.meta.now - d.first_seen) < state.meta.new_days * 86400;
   const label = d => d.name || d.wifi_alias || d.hostname || d.label || d.vendor || d.mac;
-  const typeText = d => d.lease_type === "static" ? "DHCP static" : d.lease_type === "dynamic" ? "DHCP" : "fixed address";
+  const typeText = d => d.lease_type === "static" ? t("type.static") : d.lease_type === "dynamic" ? t("type.dynamic") : t("type.arp");
   const sourcesText = s => String(s || "").split(",").filter(Boolean).map(x => x.toUpperCase()).join(" + ");
   // a controller client can come without an SSID (hidden network, mid-association): its AP and signal still place it.
   // merge clears the port when a device goes on Wi-Fi, so an SSID-less row with a port is one a switch placed since
@@ -167,18 +168,33 @@
       state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) { if (bad) clearEvents(); else mergeFirstPage(e); }
       state.renderError = null;
       try { renderStatus(); renderCards(); renderVlans(); renderSsids(); renderTags(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
-      catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
+      catch (err) { console.error(err); state.renderError = err.message; showBanner(t("err.page", { msg: err.message })); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
       // a ?device= link not opened yet (the first load failed): this render has the list and meta it needs
       if (state.deepLink) await openDeepLink();
     } catch (err) {
       if (seq !== state.loadSeq) return;
-      state.apiDown = true; showBanner(`Cannot reach the leasewatch API: ${err.message}`); $("#statusDot").className = "dot bad";
+      state.apiDown = true; showBanner(t("err.api", { msg: err.message })); $("#statusDot").className = "dot bad";
       // the poll age and the connector dots are from the last good reply: do not keep showing them as current
-      $("#statusText").textContent = "API unreachable"; $("#status").title = "";
+      $("#statusText").textContent = t("status.api_unreachable"); $("#status").title = "";
     }
   }
 
   function showBanner(msg) { const b = $("#banner"); if (!msg) { b.classList.add("hidden"); return; } b.textContent = msg; b.classList.remove("hidden"); }
+
+  // the collector's counts ("N leases, N arp[, N reservations][, N ndp][, N leases6][, ndp unavailable][, kea6 unavailable]")
+  // in the page's language; a text of any other shape is shown as sent
+  const RAW_RE = /^(\d+) leases, (\d+) arp(?:, (\d+) reservations)?(?:, (\d+) ndp)?(?:, (\d+) leases6)?(, ndp unavailable)?(, kea6 unavailable)?$/;
+  function rawText(raw) {
+    const m = RAW_RE.exec(raw || "");
+    if (!m) return raw || "";
+    const parts = [t("status.leases", { n: +m[1] }), t("status.arp", { n: +m[2] })];
+    if (m[3] !== undefined) parts.push(t("status.reservations", { n: +m[3] }));
+    if (m[4] !== undefined) parts.push(t("status.ndp", { n: +m[4] }));
+    if (m[5] !== undefined) parts.push(t("status.leases6", { n: +m[5] }));
+    if (m[6]) parts.push(t("status.ndp_unavailable"));
+    if (m[7]) parts.push(t("status.kea6_unavailable"));
+    return parts.join(", ");
+  }
 
   function renderStatus() {
     const m = state.meta, dot = $("#statusDot"), txt = $("#statusText");
@@ -187,7 +203,7 @@
     const stale = m.stale || (Date.now() / 1000 - m.last_poll_ts) > m.poll_seconds * 3 + 60;
     const ok = m.last_poll_ok && !stale;
     dot.className = "dot " + (ok ? "ok" : "bad");
-    txt.innerHTML = m.last_poll_ts ? `polled ${esc(rel(m.last_poll_ts))} · ${esc(m.last_raw.replace("arp", "ARP entries"))}` : "no poll yet";
+    txt.innerHTML = m.last_poll_ts ? esc(t("status.polled", { ago: rel(m.last_poll_ts), raw: rawText(m.last_raw) })) : esc(t("status.no_poll"));
     // one dot per connector instance, text = its display label, tooltip = its instance name; a server without
     // label (1.1 before labels) gives the name
     // an instance disabled at start (invalid settings) gets no dot: it never polls, and the start log names the problem
@@ -197,17 +213,18 @@
       // read in the failing ones, so its old "ok" is shown grey, not green
       // a last good poll in the future (the clock stepped back) says nothing: then the instance's own result is shown
       const old = !m.last_poll_ok && s.ts && m.last_poll_ts && s.ts <= m.last_poll_ts && !(m.last_poll_ts > m.now);
-      const tip = old ? `${name}: not read since ${rel(s.ts)}` : s.ok ? `${name}: OK` : `${name}: ${s.error}`;
+      const tip = old ? t("status.not_read", { name, ago: rel(s.ts) }) : s.ok ? t("status.ok", { name }) : `${name}: ${s.error}`;
       txt.insertAdjacentHTML("beforeend", `<span class="src" title="${esc(tip)}"><span class="dot ${old ? "" : s.ok ? "ok" : "bad"}"></span>${esc(label)}</span>`);
     }
-    $("#status").title = m.last_error ? `Last error: ${m.last_error}` : `Polls every ${m.poll_seconds}s`;
-    if (m.collector_stale && m.last_attempt_ts && m.now < m.last_attempt_ts) showBanner("The clock moved back; polls resume after the next interval");
-    else if (m.collector_stale) showBanner(`Collector has not run a poll since ${m.last_attempt_ts ? rel(m.last_attempt_ts) : "start"}; restart the service`);
-    else if (!m.last_poll_ok && m.last_error) showBanner(`Collector cannot read the firewall: ${m.last_error} (last good data ${rel(m.last_poll_ts)})`);
-    else if (stale) showBanner(`Data is stale: last successful poll ${rel(m.last_poll_ts)}.`);
-    else if (state.renderError) showBanner(`Page error: ${state.renderError}`);
+    $("#status").title = m.last_error ? t("status.last_error", { msg: m.last_error }) : t("status.polls_every", { n: m.poll_seconds });
+    if (m.collector_stale && m.last_attempt_ts && m.now < m.last_attempt_ts) showBanner(t("status.clock_back"));
+    else if (m.collector_stale) showBanner(m.last_attempt_ts ? t("status.collector_stale", { ago: rel(m.last_attempt_ts) }) : t("status.collector_stale_start"));
+    else if (!m.last_poll_ok && m.last_error) showBanner(t("status.firewall", { msg: m.last_error, ago: rel(m.last_poll_ts) }));
+    else if (stale) showBanner(t("status.stale", { ago: rel(m.last_poll_ts) }));
+    else if (state.renderError) showBanner(t("err.page", { msg: state.renderError }));
     else showBanner("");
-    $("#newDays").textContent = m.new_days;
+    // the whole label, so a language can place the number where it needs it
+    $('.card[data-filter="new"] .lbl').textContent = t("card.new_days", { n: m.new_days });
   }
 
   function renderCards() {
@@ -226,8 +243,8 @@
     const perDay = {}; for (const t of s.new_recent || []) { let k = dayKey(new Date(t * 1000)); k = k < keys[0] ? keys[0] : k > keys[30] ? keys[30] : k; perDay[k] = (perDay[k] || 0) + 1; }
     let max = 1;
     const days = keys.map(k => { const n = perDay[k] || 0; max = Math.max(max, n); return [k, n]; });
-    for (const [k, n] of days) { const b = document.createElement("span"); b.style.height = n ? `${Math.max(18, Math.round(n / max * 100))}%` : "2px"; b.title = `${k}: ${n} new`; if (n) b.classList.add("has"); bars.appendChild(b); }
-    $("#barsSum").textContent = `${days.reduce((a, [, n]) => a + n, 0)} in 30 d`;
+    for (const [k, n] of days) { const b = document.createElement("span"); b.style.height = n ? `${Math.max(18, Math.round(n / max * 100))}%` : "2px"; b.title = t("card.bar_title", { day: k, n }); if (n) b.classList.add("has"); bars.appendChild(b); }
+    $("#barsSum").textContent = t("card.sum", { n: days.reduce((a, [, n]) => a + n, 0) });
   }
 
   function renderVlans() {
@@ -240,7 +257,7 @@
       c.setAttribute("aria-pressed", state.vlan === v.vlan); c.dataset.vlan = v.vlan ?? "";
       c.innerHTML = `<span class="sw" data-vc="${esc(vlanColor(v.vlan))}"></span>${esc(v.vlan || "?")} <span class="n">${v.online}/${v.n}</span>`;
       paintVc(c);
-      c.title = `${v.online} online of ${v.n} devices`;
+      c.title = t("chip.vlan_title", { online: v.online, devices: t("count.devices", { n: v.n }) });
       c.onclick = () => { state.vlan = state.vlan === v.vlan ? null : v.vlan; renderVlans(); renderTable(); syncUrl(); };
       box.appendChild(c);
       if (had != null && had === c.dataset.vlan) c.focus();
@@ -256,12 +273,13 @@
     // a filter from the address on an SSID the stats no longer list keeps a chip, so it can be clicked off
     if (state.ssid !== null && !list.some(s => s.ssid === state.ssid)) list.push({ ssid: state.ssid, devices_now: 0, devices_ever: 0 });
     box.classList.toggle("hidden", !list.length);
-    const since = state.meta?.wifi_presence_since ? ` since ${abs(state.meta.wifi_presence_since).slice(0, 10)}` : "";
+    const since = state.meta?.wifi_presence_since ? abs(state.meta.wifi_presence_since).slice(0, 10) : "";
     for (const s of list) {
       const on = state.ssid === s.ssid, c = document.createElement("button");
       c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.ssid = s.ssid;
       c.innerHTML = `<span class="ssid">${esc(s.ssid)}</span> <span class="n">${esc(s.devices_now)}/${esc(s.devices_ever)}</span>`;
-      c.title = `${s.devices_now} online now on ${s.ssid}, ${s.devices_ever} devices seen on it${since}`;
+      const p = { now: s.devices_now, ssid: s.ssid, devices: t("count.devices", { n: s.devices_ever }), day: since };
+      c.title = since ? t("chip.ssid_title_since", p) : t("chip.ssid_title", p);
       c.onclick = () => { state.ssid = on ? null : s.ssid; if (on) state.ssidNow = false; renderSsids(); renderTable(); syncUrl(); };
       box.insertBefore(c, now);
       if (had != null && had === s.ssid) c.focus();
@@ -301,25 +319,25 @@
     const heading = text => { const h = document.createElement("span"); h.className = "grp"; h.textContent = text; box.appendChild(h); };
     const grouped = list.some(t => ownerOf(t.tag) !== null);
     const chips = [];
-    if (grouped && plain.length) heading("Tags");
+    if (grouped && plain.length) heading(t("chip.tags"));
     plain.forEach(chip);
-    if (owners.length) { if (grouped) heading("Owner"); owners.forEach(chip); }
-    function chip(t) {
-      const on = state.tag === t.tag, c = document.createElement("button"), who = ownerOf(t.tag);
-      c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.tag = t.tag;
-      c.innerHTML = `<span class="tg">${esc(who ?? t.tag)}</span> <span class="n">${esc(t.online)}/${esc(t.n)}</span>`;
-      c.title = `${t.online} online of ${t.n} devices tagged ${t.tag}`;
-      c.onclick = () => { state.tag = on ? null : t.tag; renderTags(); renderTable(); syncUrl(); };
+    if (owners.length) { if (grouped) heading(t("chip.owner")); owners.forEach(chip); }
+    function chip(tg) {
+      const on = state.tag === tg.tag, c = document.createElement("button"), who = ownerOf(tg.tag);
+      c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.tag = tg.tag;
+      c.innerHTML = `<span class="tg">${esc(who ?? tg.tag)}</span> <span class="n">${esc(tg.online)}/${esc(tg.n)}</span>`;
+      c.title = t("chip.tag_title", { online: tg.online, devices: t("count.devices", { n: tg.n }), tag: tg.tag });
+      c.onclick = () => { state.tag = on ? null : tg.tag; renderTags(); renderTable(); syncUrl(); };
       box.appendChild(c);
-      if (had != null && had === t.tag) c.focus();
+      if (had != null && had === tg.tag) c.focus();
       chips.push(c);
     }
     let more = null;
     if (shown.length < list.length) {
       const next = list.find(t => !shown.includes(t)).tag; // not list[shown.length]: an active tag from beyond the cap is in shown
       more = document.createElement("button");
-      more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = `+${list.length - shown.length} more`;
-      more.title = "Show every tag";
+      more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = t("chip.more", { n: list.length - shown.length });
+      more.title = t("chip.show_all");
       // the button goes with the click: the focus moves to the first chip it brought in
       more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box).find(c => c.dataset.tag === next)?.focus(); };
       box.appendChild(more);
@@ -355,7 +373,7 @@
       return true;
     });
     // the unnamed network after the named ones, as a missing IP or vendor sorts last
-    const byVlanIp = (a, b) => (!a.vlan - !b.vlan) || (a.vlan || "").localeCompare(b.vlan || "") || ipCmp(a, b);
+    const byVlanIp = (a, b) => (!a.vlan - !b.vlan) || (a.vlan || "").localeCompare(b.vlan || "", lang) || ipCmp(a, b);
     const ssidFirst = d => ssidRow(d)?.first_seen || 0;
     const cmp = {
       // real newcomers first (newest on top), then the baseline devices grouped by network and address; under an SSID
@@ -363,10 +381,10 @@
       first_desc: state.ssid !== null ? (a, b) => (ssidFirst(b) - ssidFirst(a)) || byVlanIp(a, b) : (a, b) => (a.baseline - b.baseline) || (a.baseline ? byVlanIp(a, b) : (b.first_seen - a.first_seen) || byVlanIp(a, b)),
       // under an SSID filter the order follows the "Last on SSID" column: online on that network now, then its last_seen
       last_desc: state.ssid !== null ? (a, b) => (onSsidNow(b) - onSsidNow(a)) || ((ssidRow(b)?.last_seen || 0) - (ssidRow(a)?.last_seen || 0)) || byVlanIp(a, b) : (a, b) => (b.online - a.online) || ((b.last_online || 0) - (a.last_online || 0)) || byVlanIp(a, b),
-      name: (a, b) => label(a).localeCompare(label(b), undefined, { sensitivity: "base" }) || byVlanIp(a, b),
+      name: (a, b) => label(a).localeCompare(label(b), lang, { sensitivity: "base" }) || byVlanIp(a, b),
       ip: ipCmp,
       vlan: byVlanIp,
-      vendor: (a, b) => (a.vendor ? 0 : 1) - (b.vendor ? 0 : 1) || (a.vendor || "").localeCompare(b.vendor || "") || label(a).localeCompare(label(b)),
+      vendor: (a, b) => (a.vendor ? 0 : 1) - (b.vendor ? 0 : 1) || (a.vendor || "").localeCompare(b.vendor || "", lang) || label(a).localeCompare(label(b), lang),
     }[state.sort] || byVlanIp;
     return list.sort(cmp);
   }
@@ -381,14 +399,14 @@
     const canWrite = !!state.meta && state.meta.can_write !== false;
     if (!canWrite && state.selecting) { state.selecting = false; state.sel.clear(); }
     const sb = $("#selBtn"); sb.classList.toggle("hidden", !canWrite);
-    sb.setAttribute("aria-pressed", String(state.selecting)); sb.textContent = state.selecting ? "Done" : "Select";
+    sb.setAttribute("aria-pressed", String(state.selecting)); sb.textContent = state.selecting ? t("tool.done") : t("tool.select");
     $("#tbl").classList.toggle("selecting", state.selecting);
     $("#tbl").classList.toggle("ssidfilter", state.ssid !== null);
     // the count, the header box and the bar's buttons, after any change of the ticked rows
     const paintSel = () => {
       const n = state.sel.size, all = $("#selAll"), arch = state.status === "archived";
       all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length;
-      $("#selCount").textContent = `${n} selected`;
+      $("#selCount").textContent = t("sel.count", { n });
       $("#selAck").classList.toggle("hidden", !list.some(d => state.sel.has(d.mac) && !d.acked));
       $("#selArchive").classList.toggle("hidden", arch); $("#selRestore").classList.toggle("hidden", !arch);
       const bar = state.selecting && n > 0;
@@ -407,34 +425,34 @@
       const fresh = isNew(d) && !d.acked;
       if (fresh) tr.classList.add("is-new");
       const dot = $(".online-dot", tr); dot.classList.toggle("on", !!d.online);
-      dot.title = d.online ? "online" : (d.last_online ? `offline, last online ${rel(d.last_online)}` : "offline, not seen online since leasewatch started");
+      dot.title = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
       const nm = $(".dev-name", tr), lbl = label(d);
       $(".nm", nm).textContent = lbl;
       // a real checkbox: Tab reaches it and Space toggles it natively (the row's own keys ignore it); a click anywhere
       // in the cell toggles it, for a larger target, and never opens the drawer
       const cb = $(".c-sel input", tr);
-      cb.checked = state.sel.has(d.mac); cb.setAttribute("aria-label", `Select ${lbl}`);
+      cb.checked = state.sel.has(d.mac); cb.setAttribute("aria-label", t("row.select_aria", { name: lbl }));
       cb.onchange = () => { if (cb.checked) state.sel.add(d.mac); else state.sel.delete(d.mac); paintSel(); };
       $(".c-sel", tr).onclick = ev => { ev.stopPropagation(); if (ev.target !== cb) cb.click(); };
       nm.classList.toggle("unnamed", !d.name && !d.wifi_alias && !d.hostname && !d.label); // label() ranks the UniFi alias before the hostname
-      if (fresh) nm.insertAdjacentHTML("beforeend", '<span class="badge new">NEW</span>');
-      else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", '<span class="badge base">not yet known</span>');
-      if (d.watch) nm.insertAdjacentHTML("beforeend", '<span class="badge watch" title="watched">watch</span>');
+      if (fresh) nm.insertAdjacentHTML("beforeend", `<span class="badge new">${esc(t("row.new"))}</span>`);
+      else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", `<span class="badge base">${esc(t("row.not_known"))}</span>`);
+      if (d.watch) nm.insertAdjacentHTML("beforeend", `<span class="badge watch" title="${esc(t("row.watched"))}">${esc(t("row.watch"))}</span>`);
       // the tags on their own line under the name, which wraps: an owner: tag shows the owner after a person glyph
-      $(".dev-tags", tr).innerHTML = tagsOf(d).map(t => {
-        const who = ownerOf(t);
-        return `<span class="badge tag${who ? " owner" : ""}" data-tag="${esc(t)}" title="tag ${esc(t)}">${who ? `<span class="ico" aria-hidden="true">\u{1F464}</span>${esc(who)}` : esc(t)}</span>`;
+      $(".dev-tags", tr).innerHTML = tagsOf(d).map(tg => {
+        const who = ownerOf(tg);
+        return `<span class="badge tag${who ? " owner" : ""}" data-tag="${esc(tg)}" title="${esc(t("row.tag_title", { tag: tg }))}">${who ? `<span class="ico" aria-hidden="true">\u{1F464}</span>${esc(who)}` : esc(tg)}</span>`;
       }).join("");
       const sub = [];
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
       if (!sub.length && !d.name && !d.wifi_alias && !d.hostname && !d.label) sub.push(`<span class="host">${esc(d.mac)}</span>`);
       // a private address says so in words at every width; the sleuth shows here only where the MAC column is hidden
-      if (d.private) sub.unshift('<span class="priv-hint"><span class="ico" aria-hidden="true">\u{1F575}\u{FE0F}</span>private address</span>');
+      if (d.private) sub.unshift('<span class="priv-hint"><span class="ico" aria-hidden="true">\u{1F575}\u{FE0F}</span>' + esc(t("row.private")) + "</span>");
       $(".dev-sub", tr).innerHTML = sub.join(" · ");
       $(".dev-meta .ip", tr).textContent = d.ip || "–";
       const vm = $(".dev-meta .badge", tr); vm.textContent = d.vlan || "?"; vm.style.setProperty("--vc", vlanColor(d.vlan));
-      $(".dev-meta .last", tr).textContent = d.online ? "online" : (d.last_online ? `last ${rel(d.last_online)}` : "offline");
+      $(".dev-meta .last", tr).textContent = d.online ? t("row.online") : (d.last_online ? t("row.last", { ago: rel(d.last_online) }) : t("row.offline"));
       $(".dev-meta .where", tr).textContent = onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || "?"}` : d.sw_port ? `${d.sw_port}${d.sw_via ? " → " + d.sw_via : ""}` : "";
       const wh = $(".c-where", tr); wh.innerHTML = whereHtml(d, false); wh.title = wh.textContent.replace(/\s+/g, " ").trim(); // the full text, signal included, when the cell is cut
       // the IPv6 address: a second line in the IP column and a span in the phone meta line, only when the device has one
@@ -447,17 +465,17 @@
       if (d.private) { tr.classList.add("is-private"); $(".c-mac .priv", tr).classList.remove("hidden"); }
       const vb = $(".c-vlan .badge", tr); vb.textContent = d.vlan || "?"; vb.style.setProperty("--vc", vlanColor(d.vlan));
       const ty = $(".c-type", tr); ty.textContent = ty.title = typeText(d);
-      const fs = $(".c-first", tr); fs.textContent = d.baseline ? "since the start" : rel(d.first_seen); fs.title = d.baseline ? `Already present when leasewatch started (${abs(state.meta.baseline_ts)})` : abs(d.first_seen);
+      const fs = $(".c-first", tr); fs.textContent = d.baseline ? t("row.since_start") : rel(d.first_seen); fs.title = d.baseline ? t("row.baseline_title", { when: abs(state.meta.baseline_ts) }) : abs(d.first_seen);
       if (isNew(d)) fs.classList.add("recent");
-      const ls = $(".c-last", tr); ls.textContent = d.online ? "now" : (d.last_online ? rel(d.last_online) : "not since the start"); ls.title = d.last_online ? `last online ${abs(d.last_online)} · last listed by the firewall ${abs(d.last_seen)}` : `listed by the firewall but not seen on the wire since leasewatch started; last listed ${abs(d.last_seen)}`;
+      const ls = $(".c-last", tr); ls.textContent = d.online ? t("row.now") : (d.last_online ? rel(d.last_online) : t("row.not_since_start")); ls.title = d.last_online ? t("row.last_title", { when: abs(d.last_online), seen: abs(d.last_seen) }) : t("row.listed_title", { seen: abs(d.last_seen) });
       if (state.ssid !== null) {
         // the SSID filter turns the two time columns into that network's: when the device first and last was on it
-        const p = ssidRow(d), dur = p ? `${durText(p.seconds_seen)} on ${state.ssid}` : "";
-        fs.textContent = p ? rel(p.first_seen) : "–"; fs.title = p ? `first on ${state.ssid} ${abs(p.first_seen)}` : "";
-        ls.textContent = onSsidNow(d) ? "now" : p ? rel(p.last_seen) : "–"; ls.title = p ? `last on ${state.ssid} ${abs(p.last_seen)} · ${dur}` : "";
+        const p = ssidRow(d), ssid = state.ssid, dur = p ? t("row.ssid_dur", { dur: durText(p.seconds_seen), ssid }) : "";
+        fs.textContent = p ? rel(p.first_seen) : "–"; fs.title = p ? t("row.first_on", { ssid, when: abs(p.first_seen) }) : "";
+        ls.textContent = onSsidNow(d) ? t("row.now") : p ? rel(p.last_seen) : "–"; ls.title = p ? `${t("row.last_on", { ssid, when: abs(p.last_seen) })} · ${dur}` : "";
         if (dur) $(".dev-meta .last", tr).textContent += ` · ${dur}`;
         // between 561 and 900 px both time columns and .dev-meta are hidden: the sub line carries that network's last time
-        if (p) $(".dev-sub", tr).insertAdjacentHTML("beforeend", `<span class="ssid-last">${esc(onSsidNow(d) ? "on" : "last on")} ${esc(state.ssid)} ${esc(onSsidNow(d) ? "now" : rel(p.last_seen))} · ${esc(durText(p.seconds_seen))}</span>`);
+        if (p) $(".dev-sub", tr).insertAdjacentHTML("beforeend", `<span class="ssid-last">${esc(onSsidNow(d) ? t("row.on_now", { ssid }) : t("row.last_on", { ssid, when: rel(p.last_seen) }))} · ${esc(durText(p.seconds_seen))}</span>`);
       }
       const ack = $(".ack", tr);
       // can_write false: the server refuses this client's changes (READ_ONLY, or outside WRITE_ALLOW)
@@ -472,11 +490,11 @@
     if (fmac) { const tr = $$("#rows tr").find(t => t.dataset.mac === fmac); ((fack && tr && $(".ack", tr)) || (fcp && tr && $(fcp, tr)) || tr)?.focus({ preventScroll: true }); } // the reader may have scrolled away from it
     // the total is the devices this filter could show: archived ones only under "Archived", as the cards leave them out
     const total = state.devices.filter(d => (d.archived_ts != null) === (state.status === "archived")).length;
-    $("#count").textContent = `${list.length} of ${total}`;
+    $("#count").textContent = t("count.of", { n: list.length, total });
     $("#empty").classList.toggle("hidden", list.length > 0);
-    $("#thFirst").textContent = state.ssid !== null ? "First on SSID" : "First seen";
-    $("#thLast").textContent = state.ssid !== null ? "Last on SSID" : "Last online";
-    $("#emptyText").textContent = state.q || state.vlan !== null || state.ssid !== null || state.tag !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
+    $("#thFirst").textContent = state.ssid !== null ? t("th.first_ssid") : t("th.first");
+    $("#thLast").textContent = state.ssid !== null ? t("th.last_ssid") : t("th.last");
+    $("#emptyText").textContent = state.q || state.vlan !== null || state.ssid !== null || state.tag !== null ? t("empty.text") : state.status === "unacked" ? t("empty.unacked") : state.status === "baseline" ? t("empty.baseline") : state.status === "new" ? t("empty.new", { n: state.meta?.new_days ?? 7 }) : t("empty.text");
     $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.ssid !== null || state.tag !== null || state.status !== "all"));
   }
 
@@ -486,7 +504,7 @@
     el.textContent = text;
     const rest = el.title || t("app.click_to_copy"); // the title back after "Copied" or the Ctrl+C hint
     let timer = 0; // a second copy restarts the "Copied" time: an earlier copy's timer would end it early
-    const done = () => { clearTimeout(timer); el.classList.add("copied"); el.title = t("app.copied"); timer = setTimeout(() => { el.classList.remove("copied"); el.title = rest; }, 900); };
+    const done = () => { clearTimeout(timer); el.classList.add("copied"); el.title = el.dataset.copied = t("app.copied"); timer = setTimeout(() => { el.classList.remove("copied"); el.title = rest; }, 900); };
     // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
     // select the text so Ctrl+C copies it, and try the old copy command
     const fallback = () => {
@@ -816,7 +834,7 @@
         await refreshDrawer(mac, true);
         const s = $("#fSaved"); if (s) { s.textContent = "split"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); }
       }
-    } catch (e) { showBanner(`Split failed: ${e.message}`); }
+    } catch (e) { showBanner(t("err.split_failed", { msg: e.message })); }
   }
 
   // form: the drawer's Name input the save was started from (none for a table-row ack)
@@ -836,13 +854,14 @@
       if (form && form === $("#fName") && state.form?.mac === mac) state.form = { mac, ...applyForm(fields, state.form) };
       await load();
       if (state.open === mac && (form || g?.focus)) { await refreshDrawer(mac, true); if (!form) return; const s = $("#fSaved"); if (s) { s.textContent = "saved"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); } }
-    } catch (e) { showBanner(`Save failed: ${e.message}`); }
+    } catch (e) { showBanner(t("err.save_failed", { msg: e.message })); }
   }
 
   // the ticked rows in requests of up to BULK_MAX (the server's limit), one after another; the server applies each one
   // all or nothing. At the first failure the rest stay as they are and the banner says how far it got
   const BULK_MAX = 200;
-  async function bulkSet(fields, verb) {
+  // partial: the banner text when only some requests went through, from {done, total, msg}
+  async function bulkSet(fields, partial) {
     if (state.bulkBusy || !state.sel.size) return;
     state.bulkBusy = true;
     const macs = [...state.sel];
@@ -858,7 +877,7 @@
     finally { state.bulkBusy = false; }
     await load();
     // after the load: its status line would clear a banner shown before it
-    if (err) showBanner(done ? `${verb} ${done} of ${macs.length}; the rest were not changed: ${err.message}` : `Save failed: ${err.message}`);
+    if (err) showBanner(done ? partial({ done, total: macs.length, msg: err.message }) : t("err.save_failed", { msg: err.message }));
   }
 
   // ---------- url state ----------
@@ -932,9 +951,9 @@
   $("#selBtn").onclick = () => { state.selecting = !state.selecting; state.sel.clear(); renderTable(); };
   $("#selAll").onchange = e => { state.sel = new Set(e.target.checked ? filtered().map(d => d.mac) : []); renderTable(); };
   $("#selClear").onclick = () => { state.sel.clear(); renderTable(); };
-  $("#selAck").onclick = () => bulkSet({ acked: true }, "Marked");
-  $("#selArchive").onclick = () => bulkSet({ archived: true }, "Archived");
-  $("#selRestore").onclick = () => bulkSet({ archived: false }, "Restored");
+  $("#selAck").onclick = () => bulkSet({ acked: true }, p => t("err.bulk_marked", p));
+  $("#selArchive").onclick = () => bulkSet({ archived: true }, p => t("err.bulk_archived", p));
+  $("#selRestore").onclick = () => bulkSet({ archived: false }, p => t("err.bulk_restored", p));
   $("#dClose").onclick = closeDrawer; $("#scrim").onclick = closeDrawer;
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && document.activeElement === $("#q") && state.q) { state.q = ""; $("#q").value = ""; searchNow(); return; }

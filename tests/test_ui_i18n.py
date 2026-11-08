@@ -1,5 +1,6 @@
 """The marked strings in index.html and the English table in i18n.js say the same thing, and no key is dead."""
 import json
+import re
 import subprocess
 import unittest
 from html.parser import HTMLParser
@@ -48,6 +49,11 @@ def english() -> dict:
     return json.loads(r.stdout)
 
 
+def app_keys() -> list[str]:
+    """The keys app.js passes to t() as a literal."""
+    return re.findall(r"\bt\(\"([^\"]+)\"", (STATIC / "app.js").read_text(encoding="utf-8"))
+
+
 class I18nDriftTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -72,9 +78,14 @@ class I18nDriftTest(unittest.TestCase):
             self.assertEqual(" ".join(value.split()), self.en[key], f"{key} ({name})")
 
     def test_no_dead_keys(self) -> None:
-        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs}
+        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs} | set(app_keys())
         dead = [k for k in self.en if k.startswith(AREAS) and k not in used]
         self.assertEqual(dead, [])
+
+    def test_app_keys_exist_in_english(self) -> None:
+        keys = app_keys()
+        self.assertGreater(len(keys), 50)
+        self.assertEqual([k for k in keys if k not in self.en], [])
 
     def test_swedish_is_still_empty(self) -> None:
         self.assertEqual(self.strings["sv"], {})

@@ -730,7 +730,7 @@ class BrowserTagsTest(_BrowserCase):
         # the owner chip shows the name only, under its own heading; data-tag and the title keep the full tag
         self.assertEqual([(c["tag"], c["text"], c["n"], c["pressed"]) for c in d["chips"]],
                          [("iot", "iot", "1/1", "false"), ("owner:alex", "alex", "1/1", "false")])
-        self.assertEqual(d["chips"][1]["title"], "1 online of 1 devices tagged owner:alex")
+        self.assertEqual(d["chips"][1]["title"], "1 online of 1 device tagged owner:alex")
         self.assertEqual(d["grp"], [{"text": "Tags", "tag": "span", "tabindex": None},
                                     {"text": "Owner", "tag": "span", "tabindex": None}])
 
