@@ -1,0 +1,44 @@
+{
+  "offset": 0,
+  "limit": 200,
+  "count": 3,
+  "totalCount": 3,
+  "data": [
+    {
+      "id": "00000000-0000-4000-8000-000000000011",
+      "macAddress": "02:00:00:00:00:11",
+      "ipAddress": "10.0.0.11",
+      "name": "ap-hall",
+      "model": "U7-Pro",
+      "state": "ONLINE",
+      "features": ["accessPoint"],
+      "interfaces": {"radios": [{"frequencyGHz": "2.4"}, {"frequencyGHz": "5"}]},
+      "firmwareUpdatable": false,
+      "supported": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000012",
+      "macAddress": "02:00:00:00:00:12",
+      "ipAddress": "10.0.0.12",
+      "name": "sw-rack",
+      "model": "USW-24-PoE",
+      "state": "ONLINE",
+      "features": ["switching"],
+      "interfaces": {"ports": [{"idx": 1, "state": "UP"}]},
+      "firmwareUpdatable": true,
+      "supported": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000013",
+      "macAddress": "02:00:00:00:00:13",
+      "ipAddress": "10.0.0.1",
+      "name": "gw-main",
+      "model": "UDM-Pro",
+      "state": "ONLINE",
+      "features": ["gateway"],
+      "interfaces": {"ports": [{"idx": 1, "state": "UP"}]},
+      "firmwareUpdatable": false,
+      "supported": true
+    }
+  ]
+}

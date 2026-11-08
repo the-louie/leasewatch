@@ -1,0 +1,38 @@
+{
+  "offset": 0,
+  "limit": 200,
+  "count": 3,
+  "totalCount": 6,
+  "data": [
+    {
+      "id": "00000000-0000-4000-8000-000000000021",
+      "name": "alex-laptop",
+      "type": "WIRELESS",
+      "access": {"type": "DEFAULT"},
+      "connectedAt": "2026-11-01T08:00:00Z",
+      "ipAddress": "10.0.1.21",
+      "macAddress": "02:00:00:00:00:21",
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000011"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000022",
+      "name": "02:00:00:00:00:22",
+      "type": "WIRELESS",
+      "access": {"type": "DEFAULT"},
+      "connectedAt": "2026-11-02T09:30:00Z",
+      "ipAddress": "10.0.1.22",
+      "macAddress": "02:00:00:00:00:22",
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000011"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000023",
+      "name": "printer",
+      "type": "WIRED",
+      "access": {"type": "DEFAULT"},
+      "connectedAt": "2026-10-20T07:15:00Z",
+      "ipAddress": "10.0.1.23",
+      "macAddress": "02:00:00:00:00:23",
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000012"
+    }
+  ]
+}

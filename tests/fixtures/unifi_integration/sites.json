@@ -1,0 +1,10 @@
+{
+  "offset": 0,
+  "limit": 25,
+  "count": 2,
+  "totalCount": 2,
+  "data": [
+    {"id": "00000000-0000-4000-8000-000000000001", "internalReference": "default", "name": "Default"},
+    {"id": "00000000-0000-4000-8000-000000000002", "internalReference": "lab", "name": "lab"}
+  ]
+}

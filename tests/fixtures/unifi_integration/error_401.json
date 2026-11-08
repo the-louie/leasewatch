@@ -1,0 +1,9 @@
+{
+  "statusCode": 401,
+  "statusName": "UNAUTHORIZED",
+  "code": "api.authentication.missing-credentials",
+  "message": "Missing credentials",
+  "timestamp": "2026-11-08T10:00:00.000Z",
+  "requestPath": "/integration/v1/sites",
+  "requestId": "00000000-0000-4000-8000-0000000000e1"
+}

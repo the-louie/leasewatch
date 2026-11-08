@@ -1,0 +1,42 @@
+{
+  "offset": 0,
+  "limit": 200,
+  "count": 4,
+  "totalCount": 4,
+  "data": [
+    {
+      "id": "00000000-0000-4000-8000-000000000031",
+      "name": "future-thing",
+      "type": "MATTER",
+      "access": {"type": "DEFAULT"},
+      "ipAddress": "10.0.2.31"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000032",
+      "name": "int-mac",
+      "type": "WIRELESS",
+      "access": {"type": "DEFAULT"},
+      "ipAddress": "10.0.2.32",
+      "macAddress": 12345,
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000011"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000033",
+      "name": ["x"],
+      "type": "WIRELESS",
+      "access": {"type": "DEFAULT"},
+      "ipAddress": "10.0.2.33",
+      "macAddress": "02:00:00:00:00:33",
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000011"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000034",
+      "name": "good-phone",
+      "type": "WIRELESS",
+      "access": {"type": "DEFAULT"},
+      "ipAddress": "10.0.2.34",
+      "macAddress": "02:00:00:00:00:34",
+      "uplinkDeviceId": "00000000-0000-4000-8000-000000000011"
+    }
+  ]
+}
