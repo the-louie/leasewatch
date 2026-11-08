@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- `EVENT_DAYS` (1-3650, default 365) and `HISTORY_PER_DEVICE` (10-1000, default 200): how long events are kept, and how many history rows are kept and shown per device. A start warning appears when `EVENT_DAYS` is below `PRUNE_DAYS`: a device restored by hand is protected only while its `restored` event exists.
 - `LOG_FORMAT=plain|json|auto`: JSON log lines for log drivers; under journald the timestamp is left out (journald adds its own).
 
 ## 1.3.0 (2026-11-07)

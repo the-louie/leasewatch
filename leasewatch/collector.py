@@ -136,6 +136,10 @@ class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
+        if cfg.prune_days > 0 and cfg.event_days < cfg.prune_days:
+            # a restore by hand holds against PRUNE_DAYS only while its `restored` event exists
+            log.warning("EVENT_DAYS=%d is below PRUNE_DAYS=%d: a device restored by hand is protected for %d days only",
+                        cfg.event_days, cfg.prune_days, cfg.event_days)
         self._lock = threading.Lock()  # guards _Run.result/_Run.phase/_Run.gen between the worker threads and run_once
         specs = cfg.instances
         # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
@@ -554,10 +558,10 @@ class Collector:
         # by id (insertion order), not ts: after the clock steps back the row just written would be the oldest
         # a fold target is capped too: the moved rows count even when the device got no row this poll
         for mac in dict.fromkeys([mac for mac, _ in res.history] + [dev for _, dev, _, _ in folds]):
-            c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, HISTORY_PER_MAC))
+            c.execute("DELETE FROM history WHERE mac=? AND id NOT IN (SELECT id FROM history WHERE mac=? ORDER BY id DESC LIMIT ?)", (mac, mac, self.cfg.history_per_device))
         if ref is None:
             ref = self._prune_reference(c, now)
-        c.execute("DELETE FROM events WHERE ts<?", (ref - EVENT_DAYS * 86400,))
+        c.execute("DELETE FROM events WHERE ts<?", (ref - self.cfg.event_days * 86400,))
         # 0 = off: nothing is written above, and what is stored is deleted
         c.execute("DELETE FROM wifi_presence WHERE last_seen<?", (ref - days * 86400,) if days > 0 else (2**62,))
 

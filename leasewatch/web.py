@@ -769,6 +769,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPRequestHandler]:
     """A Handler subclass bound to this config, database and version; its `verifier` is None when auth is off."""
+    db.history_cap = cfg.history_per_device
     verifier = None
     if cfg.auth_enabled:
         parsed = auth.parse_hash(cfg.auth_password_hash)

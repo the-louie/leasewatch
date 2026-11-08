@@ -117,6 +117,8 @@ class UnknownDevices(LookupError):
 
 
 class Database:
+    history_cap = 200  # rows history() returns by default (the drawer); the web handler sets HISTORY_PER_DEVICE
+
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.RLock()
@@ -348,7 +350,8 @@ class Database:
     def seen(self, mac: str) -> list[dict]:
         return [dict(r) for r in self.q("SELECT source, last_seen, last_present FROM seen WHERE mac=? ORDER BY last_seen DESC, source", (mac,))]
 
-    def history(self, mac: str, limit: int = 200) -> list[dict]:
+    def history(self, mac: str, limit: int | None = None) -> list[dict]:
+        limit = self.history_cap if limit is None else limit
         return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]
 
     def events(self, mac: str | None = None, limit: int = 200, kinds: list[str] | None = None, since: int | None = None,
