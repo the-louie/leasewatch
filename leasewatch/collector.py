@@ -306,8 +306,22 @@ class Collector:
         every poll and not backed off."""
         out: dict[str, object] = {}
         status: dict[str, str] = {}
+        started = self._start(names, time.monotonic())
+        for run in started:
+            res, phase, out_obj, ms = self._join(run)
+            if phase == "collect":
+                run.checked = True  # check() passed (or was not due): a failing collect() does not re-run it
+            if isinstance(out_obj, Batch):
+                self._took_batch(run, out_obj, ms, out, status)
+            else:
+                self._failed(run, res, phase, out_obj, ms, baseline_pending, status)
+        self._status(names, out, started, status)
+        return out, status
+
+    def _start(self, names: list[str], now: float) -> list[_Run]:
+        """Start a collection thread for each instance that is due: not disabled, not still running, not backed
+        off. Returns the runs that started."""
         started: list[_Run] = []
-        now = time.monotonic()
         for n in names:
             run = self._runs[n]
             if run.disabled:
@@ -334,56 +348,74 @@ class Collector:
                 self._outcome(run, "cannot start a collection thread", e)
                 continue
             started.append(run)
-        for run in started:
-            run.thread.join(max(0.0, run.started + run.timeout - time.monotonic()))
-            with self._lock:
-                res = run.result
-                hung_in = run.phase
-                if res is None:
-                    run.gen += 1  # abandoned: whatever the thread returns later belongs to no poll
+        return started
+
+    def _join(self, run: _Run) -> tuple[object, str, object, int | float]:
+        """Wait for one run until its deadline: (result or None, phase, Batch/exception/other, ms). A run that has
+        not returned by then is abandoned."""
+        run.thread.join(max(0.0, run.started + run.timeout - time.monotonic()))
+        with self._lock:
+            res = run.result
+            hung_in = run.phase
             if res is None:
-                # a check() that hangs gets the check backoff, like a check() that fails
-                phase, out_obj, ms = hung_in or "collect", None, run.timeout * 1000
-            else:
-                phase, out_obj, ms = res
-            if phase == "collect":
-                run.checked = True  # check() passed (or was not due): a failing collect() does not re-run it
-            if isinstance(out_obj, Batch):
-                self._outcome(run, "", None)
-                # source filled, MACs normalised before anyone reads it (the uplink names, counts, the merge)
-                out[run.name] = out_obj = normalise_batch(run.name, out_obj)
-                status[f"conn.{run.name}.ms"] = str(ms)
-                status[f"conn.{run.name}.count"] = str(len(out_obj.sightings) + len(out_obj.attachments))
-                strategy = out_obj.stats.get("strategy")
-                if isinstance(strategy, str):  # the switch's FDB strategy, shown so a per-VLAN fallback is visible
-                    status[f"conn.{run.name}.strategy"] = strategy
-                continue
-            exc = out_obj if isinstance(out_obj, BaseException) else None
-            if res is None:
-                error = f"timed out after {run.timeout} s"
-            elif exc is not None:
-                error = error_text(exc, self._ctx.redact)
-            else:
-                error = "collect() did not return a Batch"
-            if phase == "check" and baseline_pending and not run.answered:
-                # the baseline waits for this one, so a source that comes up late must be seen at the next
-                # poll, not after up to MAX_BACKOFF; the backoff is not doubled and starts once the baseline is taken
-                run.retry_at = time.monotonic() + self.cfg.poll_seconds
-                # but collect() still takes over once MAX_BACKOFF has passed: a check() that keeps failing while
-                # collect() works would otherwise never answer and hold the baseline back for good
-                run.waited += self.cfg.poll_seconds
-                if run.waited >= MAX_BACKOFF:
-                    run.checked = True
-                error = f"check failed: {error}"
-            elif phase == "check":
-                # retry check() after POLL_SECONDS, doubling up to MAX_BACKOFF; after that wait, collect() every poll
-                run.retry_at = time.monotonic() + min(run.backoff, MAX_BACKOFF)
-                if run.backoff >= MAX_BACKOFF:
-                    run.checked = True
-                run.backoff *= 2
-                error = f"check failed: {error}"
-            self._outcome(run, error, exc)
-            status[f"conn.{run.name}.ms"] = str(ms)
+                run.gen += 1  # abandoned: whatever the thread returns later belongs to no poll
+        if res is None:
+            # a check() that hangs gets the check backoff, like a check() that fails
+            phase, out_obj, ms = hung_in or "collect", None, run.timeout * 1000
+        else:
+            phase, out_obj, ms = res
+        return res, phase, out_obj, ms
+
+    def _took_batch(self, run: _Run, batch: Batch, ms: object, out: dict[str, object], status: dict[str, str]) -> None:
+        """Record a run that returned a Batch: the normalised batch into out, its ms, count and strategy into
+        status."""
+        self._outcome(run, "", None)
+        # source filled, MACs normalised before anyone reads it (the uplink names, counts, the merge)
+        out[run.name] = batch = normalise_batch(run.name, batch)
+        status[f"conn.{run.name}.ms"] = str(ms)
+        status[f"conn.{run.name}.count"] = str(len(batch.sightings) + len(batch.attachments))
+        strategy = batch.stats.get("strategy")
+        if isinstance(strategy, str):  # the switch's FDB strategy, shown so a per-VLAN fallback is visible
+            status[f"conn.{run.name}.strategy"] = strategy
+
+    def _failed(self, run: _Run, res: object, phase: str, out_obj: object, ms: object, baseline_pending: bool,
+                status: dict[str, str]) -> None:
+        """Record a run that did not return a Batch: timed out, raised or returned something else. A failed check()
+        gets the check backoff."""
+        exc = out_obj if isinstance(out_obj, BaseException) else None
+        if res is None:
+            error = f"timed out after {run.timeout} s"
+        elif exc is not None:
+            error = error_text(exc, self._ctx.redact)
+        else:
+            error = "collect() did not return a Batch"
+        if phase == "check":
+            self._check_backoff(run, baseline_pending)
+            error = f"check failed: {error}"
+        self._outcome(run, error, exc)
+        status[f"conn.{run.name}.ms"] = str(ms)
+
+    def _check_backoff(self, run: _Run, baseline_pending: bool) -> None:
+        """Set when a failed check() is retried."""
+        if baseline_pending and not run.answered:
+            # the baseline waits for this one, so a source that comes up late must be seen at the next
+            # poll, not after up to MAX_BACKOFF; the backoff is not doubled and starts once the baseline is taken
+            run.retry_at = time.monotonic() + self.cfg.poll_seconds
+            # but collect() still takes over once MAX_BACKOFF has passed: a check() that keeps failing while
+            # collect() works would otherwise never answer and hold the baseline back for good
+            run.waited += self.cfg.poll_seconds
+            if run.waited >= MAX_BACKOFF:
+                run.checked = True
+        else:
+            # retry check() after POLL_SECONDS, doubling up to MAX_BACKOFF; after that wait, collect() every poll
+            run.retry_at = time.monotonic() + min(run.backoff, MAX_BACKOFF)
+            if run.backoff >= MAX_BACKOFF:
+                run.checked = True
+            run.backoff *= 2
+
+    def _status(self, names: list[str], out: dict[str, object], started: list[_Run], status: dict[str, str]) -> None:
+        """Write the per-instance status rows, add a ConnectorFailure for each enabled instance without a Batch and
+        count its failed spell."""
         ts = str(int(time.time()))
         counting = self.db.get_meta("first_run_done", "") == "1"
         for n in names:
@@ -406,7 +438,6 @@ class Collector:
                 status[f"conn.{n}.strategy"] = ""
             if not run.disabled:
                 self._source_spell(run, ok, error, int(ts), counting)
-        return out, status
 
     def _source_spell(self, run: _Run, ok: bool, error: str, now: int, counting: bool) -> None:
         """Count failed polls of one instance; queue source_down on the SOURCE_DOWN_POLLS-th in a row (back-dated to
