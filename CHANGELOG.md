@@ -8,6 +8,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - the device table no longer scrolls sideways at 400 px (the meta line wraps below 560 px).
 
 ### Added
+- UniFi: `AUTH=apikey` with `API_KEY` (Integration API on UniFi OS consoles, Network 9.3+): a revocable key instead of a login. No SSID, signal, radio or channel in that mode (the host clears them); built from the public spec, untested on hardware.
 - **Pinned base image:** the Dockerfile pins the base image by digest, and Dependabot proposes the weekly refresh of the base image (docker), the GitHub actions and the pip ranges.
 - **Hash-locked install:** the image installs the Python packages from `requirements.lock` (`--require-hashes`, wheels only; amd64 and arm64); [docs/image-build.md](docs/image-build.md) explains how to refresh it.
 - **Published image:** a `v*` tag publishes the image to `ghcr.io/the-louie/leasewatch` (tags `<version>`, `<major>.<minor>` and `latest`; linux/amd64 and linux/arm64, with provenance) after the tests and the Docker build pass; the package is made public by the owner after the first publish.
