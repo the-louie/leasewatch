@@ -7,7 +7,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "leasewatch" / "static"
-AREAS = ("nav.", "card.", "tool.", "opt.", "th.", "empty.", "sel.", "foot.", "row.", "aria.", "ph.")
+AREAS = ("nav.", "card.", "tool.", "opt.", "th.", "empty.", "sel.", "foot.", "row.", "aria.", "ph.", "drawer.", "err.", "ev.",
+         "evgroup.", "kind.")
 VOID = {"input", "br", "img", "meta", "link", "hr"}
 
 
@@ -54,6 +55,13 @@ def app_keys() -> list[str]:
     return re.findall(r"\bt\(\"([^\"]+)\"", (STATIC / "app.js").read_text(encoding="utf-8"))
 
 
+def kind_keys() -> list[str]:
+    """The kind.* keys kindText() builds: one per kind the events filter offers."""
+    src = (STATIC / "app.js").read_text(encoding="utf-8")
+    block = re.search(r"const EV_KINDS = (.*?);\n", src, re.S).group(1)
+    return ["kind." + k for k in re.findall(r"\"([a-z_]+)\"", block)]
+
+
 class I18nDriftTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -78,13 +86,18 @@ class I18nDriftTest(unittest.TestCase):
             self.assertEqual(" ".join(value.split()), self.en[key], f"{key} ({name})")
 
     def test_no_dead_keys(self) -> None:
-        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs} | set(app_keys())
+        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs} | set(app_keys()) | set(kind_keys())
         dead = [k for k in self.en if k.startswith(AREAS) and k not in used]
         self.assertEqual(dead, [])
 
     def test_app_keys_exist_in_english(self) -> None:
         keys = app_keys()
         self.assertGreater(len(keys), 50)
+        self.assertEqual([k for k in keys if k not in self.en], [])
+
+    def test_every_filter_kind_has_a_label(self) -> None:
+        keys = kind_keys()
+        self.assertEqual(len(keys), 23)
         self.assertEqual([k for k in keys if k not in self.en], [])
 
     def test_swedish_is_still_empty(self) -> None:

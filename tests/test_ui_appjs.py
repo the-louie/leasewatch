@@ -122,7 +122,7 @@ def _extract(src: str, name: str) -> str:
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
         "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
-        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t", "RAW_RE", "rawText"]
+        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t", "RAW_RE", "rawText", "apiErrorText"]
 
 # the page globals the language code reads, a block outside the rest: a test's own "const location" or
 # "const navigator" shadows them instead of clashing. Mutable, so a test can change them and call pickLang() again.
@@ -211,13 +211,49 @@ class AppJsTests(unittest.TestCase):
 
     # every kind the events filter offers has a label (no raw kind name falls through) and a colour
     def test_kind_text_knows_every_filter_kind(self) -> None:
-        out = _run(["EV_KINDS"], "//--\nout.kinds = EV_KINDS.flatMap(g => g[1]);")
+        out = _run(["EV_KINDS"], "//--\nout.kinds = EV_KINDS.flatMap(g => g[1]); out.labels = out.kinds.map(k => t(\"kind.\" + k));")
         self.assertEqual(len(out["kinds"]), 23)
-        css, src = _read("leasewatch", "static", "style.css"), _extract(_read("leasewatch", "static", "app.js"), "kindText")
-        for k in out["kinds"]:
+        css = _read("leasewatch", "static", "style.css")
+        for k, text in zip(out["kinds"], out["labels"]):
             with self.subTest(kind=k):
-                self.assertRegex(src, rf"\b{k}: \"")  # a label entry, not the fallback to the raw kind
+                self.assertNotEqual(text, "kind." + k)  # a label entry, not the fallback to the key
                 self.assertRegex(css, rf"\.k\.{k}\b")
+
+    # a kind in the table reads as its label; one the table lacks (a newer server) shows as sent, not as its key
+    def test_kind_text_known_and_unknown(self) -> None:
+        out = _run(["EV_KINDS"], "//--\nout.v = [kindText(\"new\"), kindText(\"lease_type\"), kindText(\"teleported\")]; out.groups = EV_KINDS.map(g => g[0]);")
+        self.assertEqual(out["v"], ["new device", "lease type", "teleported"])
+        self.assertEqual(out["groups"], ["Devices", "Presence", "Changes", "Review", "Sources"])
+
+    # the three server refusals a user can meet are worded from the table; any other message is shown as sent
+    def test_api_error_texts(self) -> None:
+        out = _run(["api"], r"""
+let reply = null;
+const fetch = async () => ({ ok: false, status: 403, json: async () => ({ error: reply }) });
+//--
+out.v = [];
+for (const m of ["read-only", "writes are not allowed from this address", "not found", "tag too long"]) {
+  reply = m; out.v.push(await api("/api/devices/02:00:00:00:00:01", { method: "POST" }).then(() => "resolved", e => e.message));
+}
+""")
+        self.assertEqual(out["v"], ["Read-only: changes are off on this server", "Read-only: changes are off for this address",
+                                    "not found", "tag too long"])
+
+    # the drawer's labels come from the table: a language that has one shows it
+    def test_drawer_label_through_the_table(self) -> None:
+        out = _run(["refreshDrawer", "seenHtml", "drawerActions", "splitFromLabel"], r"""location.search = "?lang=sv";
+window.LW_STRINGS.sv = { "drawer.hostname": "Värdnamn", "drawer.seen_by": "Sedd av" };
+const api = async () => ({ device: { mac: "02:00:00:00:00:01", hostname: "h", sources: "lease", first_seen: 1 }, history: [], events: [],
+  seen: [{ source: "fw1", last_seen: 1 }] });
+const CSS = { escape: s => s };
+//--
+state.meta = { now: 2, new_days: 7, can_write: true };
+await refreshDrawer("02:00:00:00:00:01", false);
+out.kv = body.kv.innerHTML;
+""")
+        self.assertIn("<dt>Värdnamn</dt>", out["kv"])
+        self.assertIn("<dt>Sedd av</dt>", out["kv"])
+        self.assertIn("<dt>Vendor</dt>", out["kv"])  # a key Swedish lacks falls back to English
 
     # an SSID-less Wi-Fi row that a switch has since placed on a port is wired, as before;
     # a live SSID-less client (no stored port) still shows as Wi-Fi
@@ -976,8 +1012,8 @@ out.ids2 = state.events.map(x => x.id); out.paged2 = state.evPaged;
     # a read-only login is worded apart from a blocked address; the generic .note rule leaves the event label alone
     def test_read_only_login_line_and_note_scope(self) -> None:
         src, css = _read("leasewatch", "static", "app.js"), _read("leasewatch", "static", "style.css")
-        self.assertIn('state.meta.role === "ro" ? "Read-only login: this user can look but not change anything"', src)
-        self.assertIn("Read-only: changes are off for this address", src)
+        self.assertIn('state.meta.role === "ro" ? t("drawer.ro_login")', src)
+        self.assertIn('t("err.not_allowed_from_address")', src)
         self.assertNotRegex(css, r"(^|[},\s])\.note\s*[,{]")  # a bare .note would style <span class="k note"> too
         self.assertRegex(css, r"\.k\.renamed, \.k\.note, \.k\.tags\s*\{[^}]*color:")
 

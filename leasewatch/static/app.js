@@ -120,11 +120,14 @@
     // long (drawer): name the switch too, as two switches can have a port of the same name. A controller never places
     // a port (it lists a wired client without one), so a controller as loc_source does not name the port's switch
     const ctl = state.meta?.connectors?.find(c => c.name === d.loc_source)?.type === "unifi";
-    if (d.sw_port) return `<span class="w">${esc(d.sw_port)}</span>${d.sw_via ? ` <span class="muted">→ ${esc(d.sw_via)}</span>` : ""}${long && d.loc_source && !ctl ? ` <span class="muted">on ${esc(connLabel(d.loc_source))}</span>` : ""}`;
+    if (d.sw_port) return `<span class="w">${esc(d.sw_port)}</span>${d.sw_via ? ` <span class="muted">→ ${esc(d.sw_via)}</span>` : ""}${long && d.loc_source && !ctl ? ` <span class="muted">${esc(t("drawer.on_switch", { name: connLabel(d.loc_source) }))}</span>` : ""}`;
     return "";
   };
   const whereText = d => onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || ""}` : d.sw_port ? `${d.sw_port} ${d.sw_via || ""}` : "";
 
+  // the server's error messages a user can meet, in the page's language; any other message is shown as sent
+  const apiErrorText = m => m === "read-only" ? t("err.read_only") : m === "writes are not allowed from this address" ? t("err.not_allowed_from_address")
+    : m === "not found" ? t("err.not_found") : m;
   async function api(path, opts) {
     // a stalled reply (a proxy holding the connection) must not hang a poll or a save for the browser's minutes-long limit
     // built by hand, not with AbortSignal.timeout (missing before Chrome 103, Firefox 100, Safari 16) or AbortSignal.any
@@ -136,7 +139,7 @@
       relay = () => ctl.abort(own.reason);
       if (own.aborted) relay(); else own.addEventListener("abort", relay);
     }
-    const timer = setTimeout(() => ctl.abort(new DOMException("signal timed out", "TimeoutError")), 30000), signal = ctl.signal;
+    const timer = setTimeout(() => ctl.abort(new DOMException(t("err.timeout"), "TimeoutError")), 30000), signal = ctl.signal;
     const keep = !opts?.method && ["/api/devices", "/api/events"].includes(path.split("?")[0]), prev = keep ? state.revalidated.get(path) : null;
     const headers = prev ? { ...opts?.headers, "If-None-Match": prev.etag } : opts?.headers;
     try {
@@ -146,10 +149,10 @@
         if (prev.data.meta) prev.data.meta.now = Date.now() / 1000 + state.skew;
         return prev.data;
       }
-      if (!r.ok) { let m = `${r.status}`; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
+      if (!r.ok) { let m = `${r.status}`; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(apiErrorText(m)); }
       // a 2xx that is not JSON is some proxy's page (login, maintenance): say so instead of quoting its body
       let data;
-      try { data = await r.json(); } catch (e) { if (e.name === "SyntaxError") throw new Error(`${r.status}: reply is not JSON`); throw e; }
+      try { data = await r.json(); } catch (e) { if (e.name === "SyntaxError") throw new Error(t("err.not_json", { status: r.status })); throw e; }
       if (keep) { const etag = r.headers.get("ETag"); if (etag) state.revalidated.set(path, { etag, data }); else state.revalidated.delete(path); }
       return data;
     } finally {
@@ -523,17 +526,17 @@
     const ul = $("#events"); ul.innerHTML = "";
     renderEventControls();
     if (!state.events.length) {
-      const none = state.evKind || state.evFrom || state.evTo ? "No events match these filters." : "No events yet. New devices, address changes and acknowledgements show up here.";
+      const none = state.evKind || state.evFrom || state.evTo ? t("ev.none_filtered") : t("ev.none");
       ul.innerHTML = `<li><span class="t">–</span><span></span><span class="muted">${esc(none)}</span></li>`; return;
     }
     for (const e of state.events) {
       const li = document.createElement("li");
-      const t = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span>`;
+      const head = `<span class="t" title="${esc(abs(e.ts))}">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span>`;
       if (e.kind === "source_down" || e.kind === "source_up") {
         // a connector instance, not a device (mac ""): "<instance>: <text>", named as plain text with no drawer to open
         const d = String(e.detail || ""), i = d.indexOf(": ");
         const inst = i < 0 ? d : d.slice(0, i), text = i < 0 ? "" : d.slice(i + 2);
-        li.innerHTML = `${t}<span><span class="src">${esc(connLabel(inst))}</span> <span class="muted">${esc(text)}</span></span>`;
+        li.innerHTML = `${head}<span><span class="src">${esc(connLabel(inst))}</span> <span class="muted">${esc(text)}</span></span>`;
         ul.appendChild(li);
         continue;
       }
@@ -546,7 +549,7 @@
         if (e.vlan && detail.endsWith(net)) detail = detail.slice(0, -net.length);
         if (e.hostname && who === e.hostname) detail = ` ${detail} `.replace(` ${who} `, " ").trim();
       }
-      li.innerHTML = `${t}<span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" data-vc="${esc(vlanColor(e.vlan))}" title="current network of the device">${esc(e.vlan)}</span>` : ""}</span>`;
+      li.innerHTML = `${head}<span><button class="who" data-mac="${esc(e.mac)}">${esc(who)}</button> <span class="muted">${esc(detail)}</span>${e.vlan ? ` <span class="badge vlan" data-vc="${esc(vlanColor(e.vlan))}" title="${esc(t("ev.vlan_title"))}">${esc(e.vlan)}</span>` : ""}</span>`;
       paintVc(li);
       $(".who", li).onclick = () => openDrawer(e.mac);
       ul.appendChild(li);
@@ -554,9 +557,9 @@
   }
   // ---------- events list: filters, paging ----------
   const EV_PAGE = 60;
-  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged", "split"]], ["Presence", ["offline", "online"]],
-    ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
-    ["Review", ["acked", "unacked", "renamed", "note", "tags", "watched", "unwatched"]], ["Sources", ["source_down", "source_up"]]];
+  const EV_KINDS = [[t("evgroup.devices"), ["new", "back", "archived", "restored", "merged", "split"]], [t("evgroup.presence"), ["offline", "online"]],
+    [t("evgroup.changes"), ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
+    [t("evgroup.review"), ["acked", "unacked", "renamed", "note", "tags", "watched", "unwatched"]], [t("evgroup.sources"), ["source_down", "source_up"]]];
   // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
   const isDay = v => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -604,7 +607,7 @@
       if (gen !== state.evGen) return;
       state.events = e.events; state.evNext = e.next; state.evPaged = false;
       renderEvents();
-    } catch (err) { if (gen === state.evGen) showBanner(`Cannot load events: ${err.message}`); }
+    } catch (err) { if (gen === state.evGen) showBanner(t("err.events", { msg: err.message })); }
   }
   async function loadMoreEvents() {
     const btn = $("#evMore"), gen = state.evGen, next = state.evNext;
@@ -616,16 +619,17 @@
       const seen = new Set(state.events.map(x => x.id));
       state.events = state.events.concat(e.events.filter(x => !seen.has(x.id))); state.evNext = e.next; state.evPaged = true;
       renderEvents();
-    } catch (err) { showBanner(`Cannot load more events: ${err.message}`); }
+    } catch (err) { showBanner(t("err.more_events", { msg: err.message })); }
     finally { btn.disabled = false; }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up", renamed: "renamed", note: "note changed", tags: "tags changed",watched: "watched", unwatched: "unwatched", offline: "offline", online: "online" }[k] || k);
+  // an event kind's label; a kind the table lacks (a newer server) shows as sent
+  const kindText = k => { const key = "kind." + k, v = t(key); return v === key ? k : v; };
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
   // or the user agrees to drop them
   function discardOk() {
-    return !formEdited(state.open) || confirm("Discard unsaved changes?");
+    return !formEdited(state.open) || confirm(t("drawer.discard"));
   }
   // the drawer's text fields, by the key the API takes: a new field is added here and in the form markup only
   const FORM_FIELDS = { name: "#fName", note: "#fNote", tags: "#fTags" };
@@ -649,7 +653,7 @@
   async function openDrawer(mac) {
     if (state.open && state.open !== mac && !discardOk()) return;
     // another device's form must not stay live while this one loads: Save would act on that device
-    if (state.open !== mac) { $("#dTitle").textContent = "Device"; $("#dBody").innerHTML = '<p class="muted">loading…</p>'; state.form = null; }
+    if (state.open !== mac) { $("#dTitle").textContent = t("drawer.title"); $("#dBody").innerHTML = `<p class="muted">${esc(t("nav.loading"))}</p>`; state.form = null; }
     // a switch from inside the drawer keeps the control outside it to return to (a drawer control is inert after close)
     if (!$("#drawer").contains(document.activeElement)) state.returnTo = document.activeElement;
     state.open = mac; syncUrl();
@@ -675,8 +679,8 @@
     if (!seen || !seen.length) return "";
     const grace = (state.meta?.grace_minutes ?? 10) * 60, now = Date.now() / 1000 + state.skew; // last_present is server time
     // the age in browser time (- skew), as rel() counts: else "12 min ago · on the wire" with a 10 min grace
-    const line = s => `${esc(connLabel(s.source))} · ${esc(rel(s.last_seen - state.skew))}${s.last_present && now - s.last_present <= grace ? ' · <span class="muted">on the wire</span>' : ""}`;
-    return `<dt>Seen by</dt><dd>${seen.map(line).join("<br>")}</dd>`;
+    const line = s => `${esc(connLabel(s.source))} · ${esc(rel(s.last_seen - state.skew))}${s.last_present && now - s.last_present <= grace ? ` · <span class="muted">${esc(t("drawer.on_wire"))}</span>` : ""}`;
+    return `<dt>${esc(t("drawer.seen_by"))}</dt><dd>${seen.map(line).join("<br>")}</dd>`;
   }
 
   // the private MACs merged into the device, and why (an older server sends no aliases list: no section)
@@ -684,11 +688,11 @@
     if (!aliases || !aliases.length) return "";
     // the server refuses this client's changes: no Split buttons, no column for them
     const canWrite = state.meta?.can_write !== false;
-    const why = a => a.reason === "client-id" ? `client-id ${a.detail}` : a.reason === "hostname" ? `hostname ${a.detail}` : `${a.reason} ${a.detail}`;
-    return `<h3>Merged addresses</h3>
-      <p class="muted note">The device used these private addresses too. Each one was merged into it because it sent the same DHCP client-id or hostname as this device. Split one if it is not this device.</p>
-      <table class="aliases"><thead><tr><th scope="col">MAC</th><th scope="col">Matched by</th><th scope="col">Merged</th><th scope="col">Last seen</th>${canWrite ? '<th scope="col">Action</th>' : ""}</tr></thead>
-      <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td>${canWrite ? `<td><button class="btn small" data-split="${esc(a.mac)}">Split</button></td>` : ""}</tr>`).join("")}</tbody></table>`;
+    const why = a => a.reason === "client-id" ? t("drawer.match_client_id", { detail: a.detail }) : a.reason === "hostname" ? t("drawer.match_hostname", { detail: a.detail }) : `${a.reason} ${a.detail}`;
+    return `<h3>${esc(t("drawer.merged"))}</h3>
+      <p class="muted note">${esc(t("drawer.merged_note"))}</p>
+      <table class="aliases"><thead><tr><th scope="col">${esc(t("drawer.mac"))}</th><th scope="col">${esc(t("drawer.th_matched"))}</th><th scope="col">${esc(t("drawer.th_merged"))}</th><th scope="col">${esc(t("drawer.th_last_seen"))}</th>${canWrite ? `<th scope="col">${esc(t("drawer.th_action"))}</th>` : ""}</tr></thead>
+      <tbody>${aliases.map(a => `<tr><td class="mono">${esc(a.mac)}</td><td>${esc(why(a))}</td><td title="${esc(abs(a.merged_ts))}">${esc(abs(a.merged_ts))}</td><td title="${esc(abs(a.last_seen))}">${esc(rel(a.last_seen - state.skew))}</td>${canWrite ? `<td><button class="btn small" data-split="${esc(a.mac)}">${esc(t("drawer.split"))}</button></td>` : ""}</tr>`).join("")}</tbody></table>`;
   }
 
   // the SSIDs the device was seen on, newest first (an older server sends no list: no section). "now" marks the row of
@@ -698,13 +702,13 @@
     if (!list || !list.length) return "";
     const poll = meta?.poll_seconds ?? 120, since = meta?.wifi_presence_since ? Number(meta.wifi_presence_since) : 0;
     const row = w => {
-      const first = since && Math.abs(w.first_seen - since) <= poll ? `since ${abs(since)}` : abs(w.first_seen);
-      const last = d?.online && d.wifi_ssid && d.wifi_ssid === w.ssid ? "now" : abs(w.last_seen);
-      const title = `${(w.seconds_seen / 3600).toFixed(2)} h in ${w.polls_seen} polls`;
+      const first = since && Math.abs(w.first_seen - since) <= poll ? t("drawer.wifi_since", { when: abs(since) }) : abs(w.first_seen);
+      const last = d?.online && d.wifi_ssid && d.wifi_ssid === w.ssid ? t("row.now") : abs(w.last_seen);
+      const title = t("drawer.wifi_time_title", { h: (w.seconds_seen / 3600).toFixed(2), polls: w.polls_seen });
       return `<tr><td>${esc(w.ssid)}</td><td>${esc(first)}</td><td>${esc(last)}</td><td title="${esc(title)}">${esc(durText(w.seconds_seen))}</td><td>${esc(w.last_ap || "–")}</td></tr>`;
     };
-    return `<h3>Wi-Fi history</h3>
-      <table class="wifi"><thead><tr><th scope="col">SSID</th><th scope="col">First</th><th scope="col">Last</th><th scope="col">Time</th><th scope="col">Last AP</th></tr></thead>
+    return `<h3>${esc(t("drawer.wifi_history"))}</h3>
+      <table class="wifi"><thead><tr><th scope="col">${esc(t("drawer.th_ssid"))}</th><th scope="col">${esc(t("drawer.th_first"))}</th><th scope="col">${esc(t("drawer.th_last"))}</th><th scope="col">${esc(t("drawer.th_time"))}</th><th scope="col">${esc(t("drawer.th_last_ap"))}</th></tr></thead>
       <tbody>${list.map(row).join("")}</tbody></table>`;
   }
 
@@ -731,23 +735,23 @@
     $("#dTitle").textContent = label(d);
     const b = $("#dBody");
     const kv = `
-        <dt>Status</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${d.online ? "online" : (d.last_online ? `offline · last online ${esc(rel(d.last_online))}` : (d.sources === "" ? "offline · split off; waiting for its first poll" : "offline · not seen online since leasewatch started"))}</dd>
-        <dt>IP</dt><dd class="mono">${esc(d.ip || "–")}</dd>
-        ${d.ip6 ? `<dt>IPv6</dt><dd class="mono">${esc(d.ip6)}</dd>` : ""}
-        <dt>MAC</dt><dd class="mono">${esc(d.mac)}</dd>
-        ${d.private ? '<dt>Address</dt><dd><span class="priv" title="private address"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> private (locally administered): the device may change it</dd>' : ""}
-        ${d.split_from ? `<dt>Split from</dt><dd><button class="who" id="fSplitFrom" data-mac="${esc(d.split_from)}">${esc(splitFromLabel(d.split_from))}</button></dd>` : ""}
-        <dt>Hostname</dt><dd>${esc(d.hostname || "–")}</dd>
-        ${d.label ? `<dt>Label</dt><dd>${esc(d.label)}</dd>` : ""}
-        <dt>Vendor</dt><dd>${esc(d.vendor || "unknown")}</dd>
-        <dt>Network</dt><dd><span class="badge vlan" data-vc="${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="fw1 interface">${esc(d.iface)}</span></dd>
-        <dt>Type</dt><dd>${esc(typeText(d))} <span class="muted">· seen in ${esc(sourcesText(d.sources))}</span></dd>
-        ${whereHtml(d, true) ? `<dt>Connected via</dt><dd>${whereHtml(d, true)}</dd>` : ""}${d.wifi_alias ? `<dt>UniFi name</dt><dd>${esc(d.wifi_alias)}</dd>` : ""}
-        <dt>First seen</dt><dd>${d.baseline ? `since the start (${esc(abs(state.meta.baseline_ts))})` : esc(abs(d.first_seen))}${isNew(d) ? ' <span class="badge new">NEW</span>' : ""}</dd>
-        <dt>Last online</dt><dd>${d.last_online ? esc(abs(d.last_online)) : "never"} <span class="muted">· last listed by the firewall ${esc(abs(d.last_seen))}</span></dd>
+        <dt>${esc(t("drawer.status"))}</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${esc(d.online ? t("row.online") : (d.last_online ? t("drawer.offline_last", { ago: rel(d.last_online) }) : (d.sources === "" ? t("drawer.offline_split") : t("drawer.offline_never"))))}</dd>
+        <dt>${esc(t("drawer.ip"))}</dt><dd class="mono">${esc(d.ip || "–")}</dd>
+        ${d.ip6 ? `<dt>${esc(t("drawer.ip6"))}</dt><dd class="mono">${esc(d.ip6)}</dd>` : ""}
+        <dt>${esc(t("drawer.mac"))}</dt><dd class="mono">${esc(d.mac)}</dd>
+        ${d.private ? `<dt>${esc(t("drawer.address"))}</dt><dd><span class="priv" title="${esc(t("row.private"))}"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> ${esc(t("drawer.private"))}</dd>` : ""}
+        ${d.split_from ? `<dt>${esc(t("drawer.split_from"))}</dt><dd><button class="who" id="fSplitFrom" data-mac="${esc(d.split_from)}">${esc(splitFromLabel(d.split_from))}</button></dd>` : ""}
+        <dt>${esc(t("drawer.hostname"))}</dt><dd>${esc(d.hostname || "–")}</dd>
+        ${d.label ? `<dt>${esc(t("drawer.label"))}</dt><dd>${esc(d.label)}</dd>` : ""}
+        <dt>${esc(t("drawer.vendor"))}</dt><dd>${esc(d.vendor || t("drawer.vendor_unknown"))}</dd>
+        <dt>${esc(t("drawer.network"))}</dt><dd><span class="badge vlan" data-vc="${esc(vlanColor(d.vlan))}">${esc(d.vlan || "?")}</span> <span class="muted" title="${esc(t("drawer.iface_title"))}">${esc(d.iface)}</span></dd>
+        <dt>${esc(t("drawer.type"))}</dt><dd>${esc(typeText(d))} <span class="muted">${esc(t("drawer.seen_in", { sources: sourcesText(d.sources) }))}</span></dd>
+        ${whereHtml(d, true) ? `<dt>${esc(t("drawer.where"))}</dt><dd>${whereHtml(d, true)}</dd>` : ""}${d.wifi_alias ? `<dt>${esc(t("drawer.unifi_name"))}</dt><dd>${esc(d.wifi_alias)}</dd>` : ""}
+        <dt>${esc(t("drawer.first_seen"))}</dt><dd>${esc(d.baseline ? t("drawer.since_start", { when: abs(state.meta.baseline_ts) }) : abs(d.first_seen))}${isNew(d) ? ` <span class="badge new">${esc(t("row.new"))}</span>` : ""}</dd>
+        <dt>${esc(t("drawer.last_online"))}</dt><dd>${esc(d.last_online ? abs(d.last_online) : t("drawer.never"))} <span class="muted">${esc(t("drawer.last_listed", { when: abs(d.last_seen) }))}</span></dd>
         ${seenHtml(r.seen)}
-        <dt>Known</dt><dd>${d.acked ? `yes, marked ${esc(abs(d.acked_at))}` : d.baseline ? "yes, present at the start" : "not yet"}</dd>
-        ${d.archived_ts != null ? `<dt>Archived</dt><dd>${esc(abs(d.archived_ts))} <span class="muted">· not in the list until it is online again</span></dd>` : ""}`;
+        <dt>${esc(t("drawer.known"))}</dt><dd>${esc(d.acked ? t("drawer.known_marked", { when: abs(d.acked_at) }) : d.baseline ? t("drawer.known_start") : t("drawer.known_not"))}</dd>
+        ${d.archived_ts != null ? `<dt>${esc(t("drawer.archived"))}</dt><dd>${esc(abs(d.archived_ts))} <span class="muted">${esc(t("drawer.archived_note"))}</span></dd>` : ""}`;
     // don't clobber an edit in progress, but show what a save changed outside the form (Known and the ack button)
     // the merged addresses too, so a split address leaves the table; a Split button that had focus hands it on (to the
     // same button, else to Name)
@@ -770,12 +774,12 @@
       <dl class="kv">${kv}
       </dl>
       <div class="form">
-        <label>Name (what this device is)<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="e.g. Alex's iPad"${ro}></label>
-        <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="owner: alex, where it lives, anything useful"${ro}>${esc(d.note)}</textarea></label>
-        <label>Tags<input id="fTags" maxlength="232" value="${esc(tagsOf(d).join(", "))}" placeholder="iot, owner:alex"${ro}></label>
+        <label>${esc(t("drawer.name"))}<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="${esc(t("drawer.name_ph"))}"${ro}></label>
+        <label>${esc(t("drawer.note"))}<textarea id="fNote" rows="2" maxlength="1000" placeholder="${esc(t("drawer.note_ph"))}"${ro}>${esc(d.note)}</textarea></label>
+        <label>${esc(t("drawer.tags"))}<input id="fTags" maxlength="232" value="${esc(tagsOf(d).join(", "))}" placeholder="${esc(t("drawer.tags_ph"))}"${ro}></label>
         <div class="actions">${ro ? `
-          <span class="muted" id="fReadOnly">${state.meta.role === "ro" ? "Read-only login: this user can look but not change anything" : state.meta.read_only ? "Read-only: changes are off on this server" : "Read-only: changes are off for this address"}</span>` : `
-          <button class="btn" id="fSave">Save</button>
+          <span class="muted" id="fReadOnly">${esc(state.meta.role === "ro" ? t("drawer.ro_login") : state.meta.read_only ? t("err.read_only") : t("err.not_allowed_from_address"))}</span>` : `
+          <button class="btn" id="fSave">${esc(t("drawer.save"))}</button>
           <button class="btn" id="fAck"></button>
           <button class="btn" id="fArch"></button>
           <button class="btn" id="fWatch"></button>
@@ -784,10 +788,10 @@
       </div>
       <div id="dAliases">${aliasesHtml(r.aliases)}</div>
       ${wifiHtml(r.wifi_presence, state.meta, d)}
-      <h3>History</h3>
-      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || '<li class="none">No changes recorded</li>'}</ul>
-      <h3>Events</h3>
-      <ul class="tl">${r.events.map(e => `<li><span class="t">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span> <span class="muted">${esc(String(e.detail || "").replace(" -> ", " → "))}</span></li>`).join("") || '<li class="none">No events</li>'}</ul>`;
+      <h3>${esc(t("drawer.history"))}</h3>
+      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || `<li class="none">${esc(t("drawer.no_changes"))}</li>`}</ul>
+      <h3>${esc(t("drawer.events"))}</h3>
+      <ul class="tl">${r.events.map(e => `<li><span class="t">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span> <span class="muted">${esc(String(e.detail || "").replace(" -> ", " → "))}</span></li>`).join("") || `<li class="none">${esc(t("drawer.no_events"))}</li>`}</ul>`;
     paintVc(b);
     drawerActions(d);
     state.form = { mac, ...formValues() };
@@ -800,23 +804,23 @@
     const from = $("#fSplitFrom"); if (from) from.onclick = () => openDrawer(from.dataset.mac);
     $$("[data-split]", $("#dBody")).forEach(btn => btn.onclick = () => {
       const alias = btn.dataset.split;
-      if (confirm(`Split ${alias} off ${label(d)}? It becomes its own device. What it recorded here stays here, and it is never merged back into this device automatically.`)) splitOff(d.mac, alias);
+      if (confirm(t("drawer.split_confirm", { alias, name: label(d) }))) splitOff(d.mac, alias);
     });
     const save = $("#fSave"), ack = $("#fAck"), main = !d.acked && !d.baseline;
     if (!save) return; // read-only drawer: no buttons
     save.className = main ? "btn" : "btn primary"; ack.className = main ? "btn primary" : "btn";
     // a baseline device is called known already ("present at the start"): its ack only records that it was checked
-    ack.textContent = d.acked ? "Mark unknown" : d.baseline ? "Save & mark checked" : "Save & mark known";
+    ack.textContent = d.acked ? t("drawer.mark_unknown") : d.baseline ? t("drawer.save_checked") : t("drawer.save_known");
     save.onclick = () => setFields(d.mac, formValues(), $("#fName"));
     ack.onclick = () => setFields(d.mac, { acked: !d.acked, ...formValues() }, $("#fName"));
     // posts only the archive state: typed Name/Note stay an unsaved edit (the drawer stays open on the device). No form:
     // nothing typed was saved, so no "saved" flash; the load() after the POST refreshes the drawer
     const arch = $("#fArch"), archived = d.archived_ts != null;
-    arch.textContent = archived ? "Restore to list" : "Archive";
+    arch.textContent = archived ? t("drawer.restore") : t("drawer.archive");
     arch.onclick = () => setFields(d.mac, { archived: !archived });
     // like Archive: posts only the watch state, at once
     const watch = $("#fWatch");
-    watch.textContent = d.watch ? "Unwatch" : "Watch"; watch.onclick = () => setFields(d.mac, { watch: !d.watch });
+    watch.textContent = d.watch ? t("drawer.unwatch") : t("drawer.watch"); watch.onclick = () => setFields(d.mac, { watch: !d.watch });
   }
 
   // the device a split row came from, by its name when the list has it
@@ -832,7 +836,7 @@
       await load();
       if (state.open === mac) {
         await refreshDrawer(mac, true);
-        const s = $("#fSaved"); if (s) { s.textContent = "split"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); }
+        const s = $("#fSaved"); if (s) { s.textContent = t("drawer.split_done"); setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); }
       }
     } catch (e) { showBanner(t("err.split_failed", { msg: e.message })); }
   }
@@ -853,7 +857,7 @@
       // progress); not of a form rebuilt meanwhile by a close and reopen, which shows what its GET returned
       if (form && form === $("#fName") && state.form?.mac === mac) state.form = { mac, ...applyForm(fields, state.form) };
       await load();
-      if (state.open === mac && (form || g?.focus)) { await refreshDrawer(mac, true); if (!form) return; const s = $("#fSaved"); if (s) { s.textContent = "saved"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); } }
+      if (state.open === mac && (form || g?.focus)) { await refreshDrawer(mac, true); if (!form) return; const s = $("#fSaved"); if (s) { s.textContent = t("drawer.saved"); setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); } }
     } catch (e) { showBanner(t("err.save_failed", { msg: e.message })); }
   }
 
