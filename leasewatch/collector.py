@@ -9,6 +9,7 @@ abandoned: its result is dropped (generation counter) and the instance is skippe
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -225,8 +226,18 @@ class Collector:
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
+        self._lease_holders: frozenset[str] | None = self._load_lease_holders()  # None: never stored (first poll)
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
+
+    def _load_lease_holders(self) -> frozenset[str] | None:
+        """The instances that listed a lease when they last answered (meta lease_holders, a JSON list), else None."""
+        raw = self.db.get_meta("lease_holders", "")
+        try:
+            names = json.loads(raw) if raw else None
+        except ValueError:
+            return None
+        return frozenset(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) else None
 
     def close(self) -> None:
         """Close every built connector (a UniFi session logs out), each for at most its instance's TIMEOUT and all
@@ -989,7 +1000,7 @@ class Collector:
         return MergeState(self._no_lease_since, first_run, prev_ok,
                           frozenset(n for n, conn in self._connectors.items()
                                     if "controller" in getattr(conn.describe(), "roles", frozenset())),
-                          producers=frozenset(producers), held_back=bool(waiting),
+                          producers=frozenset(producers), lease_holders=self._lease_holders, held_back=bool(waiting),
                           undecided_since=self._undecided_since)
 
     def _commit(self, c: sqlite3.Connection, state: MergeState, batches: dict, now: int, t0: float,
@@ -1004,6 +1015,7 @@ class Collector:
         state.prune_now = self._prune_reference(c, now)
         res = merge_batches(prev, batches, self.cfg, now, state)
         purged = self._write(c, prev, res, now, state.prune_now, purge=not first_run)
+        self.db.set_meta("lease_holders", json.dumps(sorted(res.lease_holders)), c)
         self._write_poll_meta(c, t0, now, raw_stats, first_run, waiting, status)
         self._write_source_events(c)
         return res, purged
@@ -1057,6 +1069,7 @@ class Collector:
         # when another writer (import-csv, reset-baseline) committed in between; this one waits up to busy_timeout
         with self.db.tx(immediate=True) as c:
             res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
+        self._lease_holders = res.lease_holders  # only after the commit: it is stored with it
         self._source_events_written()
         # after the commit (the published state is what the page shows) and before the alert and the mail: a
         # reconnect here lets the "mqtt" event channel use the connection in the same poll

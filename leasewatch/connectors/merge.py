@@ -289,6 +289,9 @@ class MergeState:
     prev_ok: bool = True
     controllers: frozenset[str] = frozenset()
     producers: frozenset[str] | None = None
+    # instance names that listed a dhcp sighting when they last answered (only they can hold a lease); None when
+    # unknown (first poll), then the producers decide
+    lease_holders: frozenset[str] | None = None
     held_back: bool = False  # first_run, and the baseline is not taken this poll (a producer has not answered yet)
     aliases: dict[str, str] = field(default_factory=dict)  # alias MAC -> device key (devices.mac), from the aliases table
     # new private MAC -> first poll it was held back undecided while a lease producer failed (updated in place)
@@ -318,6 +321,9 @@ class MergeResult:
     # (device key, ssid, ap): a controller that answered this poll lists the device on that SSID. One entry per device;
     # a device kept on its stored SSID while its controller is blind, or listed without an SSID, has none
     wifi: list[tuple[str, str, str]] = field(default_factory=list)
+    # the lease holders after this poll (the input for the next one): an answering instance is one when its batch has
+    # a dhcp sighting or none at all; a failed one keeps its last state
+    lease_holders: frozenset[str] = frozenset()
 
 
 def to_fw1(s: Sighting) -> Fw1Sighting:
@@ -576,8 +582,25 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     ok = {n: normalise_batch(n, b) for n, b in batches.items() if isinstance(b, Batch)}
     # an instance that failed may be the one holding the lease: its absence is no evidence that the lease is gone
     # (a switch or a controller lists no leases, so its failure does not count)
+    # holder: judged by what it listed when it last answered (a firewall lists leases, a controller never does); with
+    # no such record yet (first poll) every failed producer counts
+    holders = state.lease_holders
     lease_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
-                      and (state.producers is None or n in state.producers) for n, b in batches.items())
+                      and (n in holders if holders is not None else state.producers is None or n in state.producers)
+                      for n, b in batches.items())
+    # source-blind: any failed producer, lease holder or not, may be the only one listing a device, so no watch
+    # event is written (offline / online) on this poll
+    src_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
+                    and (state.producers is None or n in state.producers) for n, b in batches.items())
+    now_holders = set(holders or ())
+    for n, b in ok.items():
+        if state.producers is not None and n not in state.producers:
+            continue
+        # an empty answer proves nothing, so the instance stays a suspect
+        (now_holders.discard if b.sightings and not any(s.kind == "dhcp" for s in b.sightings) else now_holders.add)(n)
+    if holders is None:  # unknown: a failed producer stays a suspect until it has answered
+        now_holders |= {n for n, b in batches.items() if isinstance(b, ConnectorFailure) and n not in state.controllers
+                        and (state.producers is None or n in state.producers)}
     # lease-blind: a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
     # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
     # the producers known: otherwise a failed switch would count and hide new devices for nothing
@@ -594,7 +617,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
     res = MergeResult(aliases=new_aliases + folds, folds=folds,
-                      alias_seen=sorted(m for m, k in keys.items() if k != m))
+                      alias_seen=sorted(m for m, k in keys.items() if k != m), lease_holders=frozenset(now_holders))
     res.events += _merge_events(new_aliases, folds, folded, now)
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}
@@ -605,7 +628,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
-    res.events += _watch_events(rows, before, res, state, now, lease_blind)
+    res.events += _watch_events(rows, before, res, state, now, src_blind)
     res.events += _auto_archive(rows, cfg, state, now)
     _assemble(res, rows, before, merged, state, changes)
     return res
