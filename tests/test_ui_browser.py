@@ -718,9 +718,23 @@ class BrowserTagsTest(_BrowserCase):
                                                {"tag": "owner:alex", "text": "\U0001F464alex", "owner": True}])
         self.assertEqual(d["badges"][self.B], [])
         self.assertFalse(d["hidden"])
-        # the owner chip keeps its full text
-        self.assertEqual(d["chips"], [{"tag": "iot", "text": "iot", "n": "1/1", "pressed": "false"},
-                                      {"tag": "owner:alex", "text": "owner:alex", "n": "1/1", "pressed": "false"}])
+        # the owner chip shows the name only, under its own heading; data-tag and the title keep the full tag
+        self.assertEqual([(c["tag"], c["text"], c["n"], c["pressed"]) for c in d["chips"]],
+                         [("iot", "iot", "1/1", "false"), ("owner:alex", "alex", "1/1", "false")])
+        self.assertEqual(d["chips"][1]["title"], "1 online of 1 devices tagged owner:alex")
+        self.assertEqual(d["grp"], [{"text": "Tags", "tag": "span", "tabindex": None},
+                                    {"text": "Owner", "tag": "span", "tabindex": None}])
+
+    def test_owner_chip_filters_on_the_full_tag(self) -> None:
+        r = self.result("tags")
+        self.assertEqual((r["owner"]["rows"], r["owner"]["tag"]), ([self.A], "owner:alex"))
+        self.assertEqual([c["tag"] for c in r["owner"]["chips"] if c["pressed"] == "true"], ["owner:alex"])
+        self.assertIn("tag=owner%3Aalex", r["owner_url"])
+
+    def test_no_headings_with_plain_tags_only(self) -> None:
+        d = self.result("tags")["plain"]
+        self.assertEqual([c["text"] for c in d["chips"]], ["iot", "speaker"])
+        self.assertEqual(d["grp"], [])
 
     def test_chip_filters_and_reload_keeps_it(self) -> None:
         r = self.result("tags")

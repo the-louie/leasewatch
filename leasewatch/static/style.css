@@ -81,6 +81,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 8px 24px 40px; }
 .ssids .chip.toggle.active { border-style: solid; color: inherit; }
 .tags .chip { padding-left: 11px; }
 .tags .chip.toggle { border-style: dashed; color: var(--muted); }
+.tags .grp { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; align-self: center; margin: 0 2px 0 6px; }
+.tags .grp:first-child { margin-left: 0; }
 
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 .search { position: relative; flex: 1 1 320px; }

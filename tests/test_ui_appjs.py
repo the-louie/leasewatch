@@ -344,6 +344,13 @@ out.none = tagCounts([d("", 1), {}]);
                                        {"tag": "printer", "online": 0, "n": 1}])
         self.assertEqual(out["none"], [])
 
+    # an owner tag is "owner:" and at least one character; anything else is a plain tag
+    def test_owner_of_splits_the_prefix(self) -> None:
+        out = _run(["ownerOf"], r"""//--
+out.r = ["owner:alex", "owner:a b", "owner:", "owner", "Owner:alex", "my-owner:alex", "iot"].map(ownerOf);
+""")
+        self.assertEqual(out["r"], ["alex", "a b", None, None, None, None, None])
+
     # the tag filter matches whole tags; the search box matches tag text too
     def test_tag_filter_and_search(self) -> None:
         out = _run(["filtered"], r"""//--

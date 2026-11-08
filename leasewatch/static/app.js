@@ -247,8 +247,10 @@
     }
     return [...m.values()].sort((a, b) => (b.n - a.n) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
   }
+  // the name in an owner:name tag, or null for any other tag (and for a bare "owner:")
+  const ownerOf = t => t.startsWith("owner:") && t.length > 6 ? t.slice(6) : null;
   const TAGS_SHOWN = 12; // chips before "+N more"
-  // the tag row: an owner: tag keeps its full text here, so a later grouping by owner changes only how it is shown
+  // the tag row: an owner: tag keeps its full tag in data-tag and the title, and shows only the name
   function renderTags() {
     const box = $("#tags");
     const fe = box.contains(document.activeElement) ? document.activeElement : null, had = fe?.dataset.tag ?? null;
@@ -259,22 +261,31 @@
     box.classList.toggle("hidden", !list.length);
     // the most used ones, and the active one wherever it ranks
     const shown = state.tagsAll ? list : list.filter((t, i) => i < TAGS_SHOWN || t.tag === state.tag);
-    const chips = shown.map(t => {
-      const on = state.tag === t.tag, c = document.createElement("button");
+    // the plain tags first, then the owners; headings only once there is an owner tag to tell them apart from
+    const plain = shown.filter(t => ownerOf(t.tag) === null), owners = shown.filter(t => ownerOf(t.tag) !== null);
+    const heading = text => { const h = document.createElement("span"); h.className = "grp"; h.textContent = text; box.appendChild(h); };
+    const grouped = list.some(t => ownerOf(t.tag) !== null);
+    const chips = [];
+    if (grouped && plain.length) heading("Tags");
+    plain.forEach(chip);
+    if (owners.length) { if (grouped) heading("Owner"); owners.forEach(chip); }
+    function chip(t) {
+      const on = state.tag === t.tag, c = document.createElement("button"), who = ownerOf(t.tag);
       c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.tag = t.tag;
-      c.innerHTML = `<span class="tg">${esc(t.tag)}</span> <span class="n">${esc(t.online)}/${esc(t.n)}</span>`;
+      c.innerHTML = `<span class="tg">${esc(who ?? t.tag)}</span> <span class="n">${esc(t.online)}/${esc(t.n)}</span>`;
       c.title = `${t.online} online of ${t.n} devices tagged ${t.tag}`;
       c.onclick = () => { state.tag = on ? null : t.tag; renderTags(); renderTable(); syncUrl(); };
       box.appendChild(c);
       if (had != null && had === t.tag) c.focus();
-      return c;
-    });
+      chips.push(c);
+    }
     if (shown.length < list.length) {
+      const next = list[shown.length].tag;
       const more = document.createElement("button");
       more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = `+${list.length - shown.length} more`;
       more.title = "Show every tag";
       // the button goes with the click: the focus moves to the first chip it brought in
-      more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box)[shown.length]?.focus(); };
+      more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box).find(c => c.dataset.tag === next)?.focus(); };
       box.appendChild(more);
       if (fe?.id === "tagMore") more.focus();
     } else if (fe?.id === "tagMore") chips[0]?.focus();
@@ -373,7 +384,7 @@
       if (d.watch) nm.insertAdjacentHTML("beforeend", '<span class="badge watch" title="watched">watch</span>');
       // the tags on their own line under the name, which wraps: an owner: tag shows the owner after a person glyph
       $(".dev-tags", tr).innerHTML = tagsOf(d).map(t => {
-        const who = t.startsWith("owner:") && t.length > 6 ? t.slice(6) : null;
+        const who = ownerOf(t);
         return `<span class="badge tag${who ? " owner" : ""}" data-tag="${esc(t)}" title="tag ${esc(t)}">${who ? `<span class="ico" aria-hidden="true">\u{1F464}</span>${esc(who)}` : esc(t)}</span>`;
       }).join("");
       const sub = [];

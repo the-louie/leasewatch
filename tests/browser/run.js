@@ -910,7 +910,8 @@ const scenarios = {
     const view = () => page.evaluate(() => ({
       hidden: document.querySelector('#tags').classList.contains('hidden'),
       chips: [...document.querySelectorAll('#tags .chip[data-tag]')].map(c => ({ tag: c.dataset.tag, text: c.querySelector('.tg').textContent,
-        n: c.querySelector('.n').textContent, pressed: c.getAttribute('aria-pressed') })),
+        n: c.querySelector('.n').textContent, pressed: c.getAttribute('aria-pressed'), title: c.title })),
+      grp: [...document.querySelectorAll('#tags .grp')].map(g => ({ text: g.textContent, tag: g.tagName.toLowerCase(), tabindex: g.getAttribute('tabindex') })),
       rows: [...document.querySelectorAll('#rows tr')].map(t => t.dataset.mac).sort(),
       badges: Object.fromEntries([...document.querySelectorAll('#rows tr')].map(t => [t.dataset.mac,
         [...t.querySelectorAll('.dev-tags .badge.tag')].map(b => ({ tag: b.dataset.tag, text: b.textContent, owner: b.classList.contains('owner') }))])),
@@ -930,6 +931,13 @@ const scenarios = {
     await page.keyboard.press('Escape'); await waitClosed(page);
     await page.waitForSelector('#tags .chip[data-tag]');
     res.after = await view();
+    // the owner chip shows the name, filters on the full tag, and the address keeps owner:alex
+    await page.click('#tags .chip[data-tag="owner:alex"]');
+    await waitUrl('owner:alex');
+    res.owner = await view();
+    res.owner_url = page.url();
+    await page.click('#tags .chip[data-tag="owner:alex"]');
+    await waitUrl(null);
     // the iot chip filters to A and writes the address; a reload keeps it
     await page.click('#tags .chip[data-tag="iot"]');
     await waitUrl('iot');
@@ -969,6 +977,12 @@ const scenarios = {
             .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}:${Math.round(e.getBoundingClientRect().right)}`) };
       }, W);
     }
+    // only plain tags left: the row looks as before, no headings
+    await page.evaluate(async ms => { for (const [m, tags] of ms) await fetch(`/api/devices/${m}`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags }) }); }, [[A, 'iot'], [W, 'speaker']]);
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(() => document.querySelectorAll('#tags .chip[data-tag]').length === 2);
+    res.plain = await view();
     return res;
   },
   // a device archived after it was on the guest network: not in its list under the default status filter, listed under
