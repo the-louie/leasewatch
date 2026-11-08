@@ -314,7 +314,7 @@
         case "wired": if (onWifi(d) || (d.link !== "wired" && !d.sw_port)) return false; break;
       }
       if (q) {
-        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")} ${tagsOf(d).join(" ")}`.toLowerCase();
+        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.ip6 || ""} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")} ${tagsOf(d).join(" ")}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -362,7 +362,7 @@
     // rebuilding the rows drops keyboard focus: note the focused row (or its button or copy target) to focus its replacement
     const fa = tb.contains(document.activeElement) ? document.activeElement : null;
     const fmac = fa?.closest("tr")?.dataset.mac, fack = !!fa?.classList.contains("ack");
-    const fcp = fmac ? [".c-ip .cp", ".c-mac .cp", ".c-sel input"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
+    const fcp = fmac ? [".c-ip .cp", ".c-ip .cp.ip6", ".c-mac .cp", ".c-sel input"].find(s => $(s, fa.closest("tr")) === fa) : null; // Enter there copies, not opens
     tb.innerHTML = "";
     const tpl = $("#rowTpl").content;
     const frag = document.createDocumentFragment();
@@ -402,7 +402,11 @@
       $(".dev-meta .last", tr).textContent = d.online ? "online" : (d.last_online ? `last ${rel(d.last_online)}` : "offline");
       $(".dev-meta .where", tr).textContent = onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || "?"}` : d.sw_port ? `${d.sw_port}${d.sw_via ? " → " + d.sw_via : ""}` : "";
       const wh = $(".c-where", tr); wh.innerHTML = whereHtml(d, false); wh.title = wh.textContent.replace(/\s+/g, " ").trim(); // the full text, signal included, when the cell is cut
-      if (d.ip) copyable($(".c-ip .cp", tr), d.ip); else $(".c-ip", tr).textContent = "–"; // nothing to copy
+      // the IPv6 address: a second line in the IP column and a span in the phone meta line, only when the device has one
+      const v6 = [$(".c-ip .cp.ip6", tr), $(".dev-meta .ip6", tr)];
+      if (d.ip6) v6.forEach(e => { e.title = d.ip6; copyable(e, d.ip6); e.classList.remove("hidden"); }); // the title keeps the whole address when the text is cut
+      if (d.ip) copyable($(".c-ip .cp", tr), d.ip); else { $(".c-ip .cp", tr).remove(); $(".c-ip", tr).prepend("–"); } // nothing to copy
+      if (!d.ip6) v6.forEach(e => e.remove()); // no empty focusable element
       copyable($(".c-mac .cp", tr), d.mac);
       // a private (locally administered) MAC: tinted row border, the sleuth and its "private address" hint
       if (d.private) { tr.classList.add("is-private"); $(".c-mac .priv", tr).classList.remove("hidden"); }
@@ -445,8 +449,9 @@
   // its column widths
   function copyable(el, text) {
     el.textContent = text;
+    const rest = el.title || "Click to copy"; // the title back after "Copied" or the Ctrl+C hint
     let t = 0; // a second copy restarts the "Copied" time: an earlier copy's timer would end it early
-    const done = () => { clearTimeout(t); el.classList.add("copied"); el.title = "Copied"; t = setTimeout(() => { el.classList.remove("copied"); el.title = "Click to copy"; }, 900); };
+    const done = () => { clearTimeout(t); el.classList.add("copied"); el.title = "Copied"; t = setTimeout(() => { el.classList.remove("copied"); el.title = rest; }, 900); };
     // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
     // select the text so Ctrl+C copies it, and try the old copy command
     const fallback = () => {
@@ -454,7 +459,7 @@
       let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
       if (ok) done();
       // the hint is for this click or key: it goes when the pointer or the keyboard focus leaves
-      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = el.onblur = () => { el.title = "Click to copy"; el.onmouseleave = el.onblur = null; }; }
+      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = el.onblur = () => { el.title = rest; el.onmouseleave = el.onblur = null; }; }
     };
     const copy = ev => { ev.stopPropagation(); /* not the row's drawer */ if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fallback); else fallback(); };
     el.onclick = copy;
@@ -675,6 +680,7 @@
     const kv = `
         <dt>Status</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${d.online ? "online" : (d.last_online ? `offline · last online ${esc(rel(d.last_online))}` : (d.sources === "" ? "offline · split off; waiting for its first poll" : "offline · not seen online since leasewatch started"))}</dd>
         <dt>IP</dt><dd class="mono">${esc(d.ip || "–")}</dd>
+        ${d.ip6 ? `<dt>IPv6</dt><dd class="mono">${esc(d.ip6)}</dd>` : ""}
         <dt>MAC</dt><dd class="mono">${esc(d.mac)}</dd>
         ${d.private ? '<dt>Address</dt><dd><span class="priv" title="private address"><span aria-hidden="true">\u{1F575}\u{FE0F}</span></span> private (locally administered): the device may change it</dd>' : ""}
         ${d.split_from ? `<dt>Split from</dt><dd><button class="who" id="fSplitFrom" data-mac="${esc(d.split_from)}">${esc(splitFromLabel(d.split_from))}</button></dd>` : ""}

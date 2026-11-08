@@ -793,6 +793,61 @@ class BrowserTagsTest(_BrowserCase):
                 self.assertEqual(d["over"], [], d)
 
 
+class BrowserIp6Test(_BrowserCase):
+    """The IPv6 line: under the IPv4 text in the IP column and in the phone meta line, in the drawer and in the search,
+    for one device with an address and one without."""
+    A, B = "02:00:00:00:60:01", "02:00:00:00:60:02"
+    V6 = "2001:db8::ff:fe00:1"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        base, db = start(cls, [s(cls.A, 60, "thermostat"), s(cls.B, 61, "printer")])
+        db.q("UPDATE devices SET ip6=? WHERE mac=?", (cls.V6, cls.A))
+        cls.run_scenarios(base, ("ipv6",))
+
+    def test_row_shows_the_v6_line_under_the_v4_text(self) -> None:
+        a = self.result("ipv6")["a"]
+        self.assertEqual((a["v4"], a["v4_title"]), ("10.0.1.60", "Click to copy"))
+        self.assertEqual((a["v6"], a["v6_title"], a["v6_visible"], a["v6_below"]), (self.V6, self.V6, True, True))
+        self.assertEqual((a["v6_role"], a["v6_tab"], a["meta_v6"]), ("button", 0, self.V6))
+
+    def test_no_v6_element_without_an_address(self) -> None:
+        b = self.result("ipv6")["b"]
+        self.assertEqual((b["v4"], b["v6"], b["v6_visible"], b["meta_v6"]), ("10.0.1.61", None, False, None))
+        self.assertEqual((b["focusable"], b["meta_focusable"]), (1, 0))  # the IPv4 text only
+        self.assertEqual(self.result("ipv6")["a"]["focusable"], 2)
+
+    def test_drawer_row_for_the_device_with_an_address_only(self) -> None:
+        r = self.result("ipv6")
+        self.assertEqual(r["drawer_a"], [["IPv6", self.V6, "mono"]])
+        self.assertEqual(r["drawer_b"], [])
+
+    def test_search_finds_the_address(self) -> None:
+        self.assertEqual(self.result("ipv6")["search"], ["thermostat"])
+
+    def test_click_copies_the_address(self) -> None:
+        r = self.result("ipv6")
+        self.assertEqual((r["copied"], r["open_after_copy"], r["copied_cls"]), ([self.V6], False, True))
+        self.assertEqual(r["title_after"], self.V6)
+
+    def test_phone_layout_keeps_two_lines_and_no_sideways_scroll(self) -> None:
+        r = self.result("ipv6")
+        for width in ("400", "360"):
+            with self.subTest(width=width):
+                d = r[width]
+                self.assertEqual((d["meta_v6"], d["meta_v6_title"], d["meta_v6_visible"], d["col_v6_visible"]),
+                                 (self.V6, self.V6, True, False), d)
+                self.assertLessEqual(d["lines_a"], 2, d)
+                self.assertLessEqual(d["table_scroll"], 0, d)
+                self.assertLessEqual(d["page_scroll"], 0, d)
+                self.assertEqual(d["over"], [], d)
+
+
 class BrowserSsidTest(_BrowserCase):
     """The Wi-Fi network chips and the SSID filter, on presence rows seeded straight into the DB. One SSID name carries
     markup and quotes, as anyone in radio range can name a network that way."""

@@ -466,6 +466,72 @@ const scenarios = {
     res.end = await widths();
     return res;
   },
+  // the IPv6 line: row, phone meta line, drawer, search and copy, for one device with an address and one without
+  async ipv6(page) {
+    const A = '02:00:00:00:60:01', B = '02:00:00:00:60:02', V6 = '2001:db8::ff:fe00:1';
+    await page.waitForSelector(row(A));
+    await page.evaluate(() => {
+      window.__copied = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText: t => { window.__copied.push(t); return Promise.resolve(); } } });
+    });
+    const res = {};
+    const info = mac => page.evaluate(m => {
+      const tr = document.querySelector(`#rows tr[data-mac="${m}"]`), vis = e => !!e && e.offsetWidth > 0;
+      const v6 = tr.querySelector('.c-ip .cp.ip6'), v4 = tr.querySelector('.c-ip .cp');
+      return { v4: v4.textContent, v4_title: v4.title, v6: v6 ? v6.textContent : null, v6_title: v6 ? v6.title : null,
+        v6_visible: vis(v6), v6_tab: v6 ? v6.tabIndex : null, v6_role: v6 ? v6.getAttribute('role') : null,
+        meta_v6: tr.querySelector('.dev-meta .ip6') ? tr.querySelector('.dev-meta .ip6').textContent : null,
+        focusable: [...tr.querySelectorAll('.c-ip [tabindex]')].length, meta_focusable: [...tr.querySelectorAll('.dev-meta [tabindex]')].length,
+        v6_below: v6 ? v6.getBoundingClientRect().top >= v4.getBoundingClientRect().bottom - 1 : null };
+    }, mac);
+    res.a = await info(A); res.b = await info(B);
+    // the drawer shows an IPv6 row for A only
+    const drawerV6 = async mac => {
+      await page.click(`${row(mac)} .nm`); await waitOpen(page, mac);
+      const dts = await page.$$eval('#dBody dt', t => t.map(e => [e.textContent, e.nextElementSibling.textContent, e.nextElementSibling.className]));
+      await page.keyboard.press('Escape'); await waitClosed(page);
+      return dts.filter(d => d[0] === 'IPv6');
+    };
+    res.drawer_a = await drawerV6(A); res.drawer_b = await drawerV6(B);
+    // search: the address (a prefix of it) finds A only
+    await page.click('#q', { clickCount: 3 });
+    await page.type('#q', '2001:db8');
+    await page.waitForFunction(v => new URLSearchParams(location.search).get('q') === v, {}, '2001:db8');
+    res.search = await rowNames(page);
+    await page.click('#q', { clickCount: 3 });
+    await page.keyboard.press('Escape');
+    // click on the text copies it, the title returns to the address; the drawer stays shut
+    await page.click(`${row(A)} .c-ip .cp.ip6`);
+    await page.waitForFunction(() => window.__copied.length === 1);
+    res.copied = await page.evaluate(() => window.__copied.slice());
+    res.open_after_copy = await drawerOpen(page);
+    res.copied_cls = await page.$eval(`${row(A)} .c-ip .cp.ip6`, e => e.classList.contains('copied'));
+    await page.waitForFunction(s => !document.querySelector(s).classList.contains('copied'), {}, `${row(A)} .c-ip .cp.ip6`);
+    res.title_after = await page.$eval(`${row(A)} .c-ip .cp.ip6`, e => e.title);
+    // phone widths: the meta line carries the address, in at most two lines, and nothing scrolls sideways
+    for (const width of [400, 360]) {
+      await page.setViewport({ width, height: 900 });
+      res[width] = await page.evaluate(([a, b]) => {
+        const wrap = document.querySelector('.table-wrap'), de = document.documentElement;
+        const tr = m => document.querySelector(`#rows tr[data-mac="${m}"]`);
+        const meta = m => { // the items' centres: items of unequal height on one line have unequal tops
+          const ys = [...tr(m).querySelectorAll('.dev-meta > *')].filter(e => e.offsetWidth > 0)
+            .map(e => { const r = e.getBoundingClientRect(); return Math.round((r.top + r.bottom) / 2); }).sort((p, q) => p - q);
+          return ys.filter((y, i) => i === 0 || y - ys[i - 1] > 6);
+        };
+        const v6 = tr(a).querySelector('.dev-meta .ip6');
+        return { table_scroll: wrap.scrollWidth - wrap.clientWidth, page_scroll: de.scrollWidth - de.clientWidth,
+          lines_a: meta(a).length, lines_b: meta(b).length,
+          dev_h_a: tr(a).querySelector('.c-dev').offsetHeight, dev_h_b: tr(b).querySelector('.c-dev').offsetHeight,
+          meta_v6: v6.textContent, meta_v6_title: v6.title, meta_v6_visible: v6.offsetWidth > 0,
+          col_v6_visible: tr(a).querySelector('.c-ip .cp.ip6').offsetWidth > 0,
+          over: [...wrap.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > wrap.getBoundingClientRect().right + 0.5 && e.offsetWidth > 0)
+            .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}`) };
+      }, [A, B]);
+    }
+    return res;
+  },
   // archive from the drawer hides the row; the "Archived" filter shows it; restore brings it back (changes server state)
   async archive(page) {
     const M = '0a:00:00:00:10:03';
