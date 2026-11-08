@@ -61,11 +61,13 @@ class Origin:
 
 @dataclass
 class LoadResult:
-    """types: type -> class (built-ins included); broken: type -> why it is not loaded; problems: the ones that stop
+    """types: type -> class (built-ins included); broken: type -> why it is not loaded; refused: built-in type -> why a
+    plugin declaring that name was dropped (the built-in stays loaded); problems: the ones that stop
     the start; modules: the sys.modules names imported from LW_CONNECTORS_DIR (dropped again by unload())."""
     types: dict[str, type] = field(default_factory=dict)
     origins: dict[str, Origin] = field(default_factory=dict)
     broken: dict[str, str] = field(default_factory=dict)
+    refused: dict[str, str] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
     modules: list[str] = field(default_factory=list)
 
@@ -319,6 +321,8 @@ def _without_conflicts(decls: list[_Decl], res: LoadResult) -> list[_Decl]:
             for d in ds:
                 log.error("%s declares type %s, which conflicts with the built-in type %s; give the connector another "
                           "type name", d.origin.label(), type_, type_)
+            res.refused[type_] = (f"conflicts with the built-in type {type_}; declared by "
+                                  f"{' and '.join(d.origin.label() for d in ds)}")
         elif len(ds) > 1:
             times = "twice" if len(ds) == 2 else f"{len(ds)} times"
             res.broken[type_] = f"type {type_} is provided {times}: {' and '.join(d.origin.label() for d in ds)}; remove one"

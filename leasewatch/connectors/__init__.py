@@ -545,6 +545,35 @@ def broken_types() -> dict[str, str]:
     return dict(_loaded().broken)
 
 
+def refused_types() -> dict[str, str]:
+    """built-in type -> why a plugin that declares the same name was dropped (the built-in stays loaded)."""
+    return dict(_loaded().refused)
+
+
+def type_report(instances: Iterable[InstanceSpec], mask: Callable[[str], str] | None = None) -> dict:
+    """The loaded types, the refused and the broken ones as plain data for /api/status. Sorted like type_help():
+    built-ins first, then entry points, then LW_CONNECTORS_DIR. No path: Origin.location stays out. A reason is cut to
+    its first line and 200 characters, then passed through `mask` (a plugin's text may echo a host or a secret)."""
+    from .loader import BUILTIN, DIR
+    reg, origins = registry(), type_origins()
+    used: dict[str, int] = {}
+    for sp in instances:
+        used[sp.type] = used.get(sp.type, 0) + 1
+
+    def why(text: str) -> str:
+        first = (text.splitlines() or [""])[0][:200]
+        return mask(first) if mask else first
+
+    rows = []
+    for t, o in sorted(((t, o) for t, o in origins.items() if t in reg),
+                       key=lambda to: (to[1].kind != BUILTIN, to[1].kind == DIR, to[0])):
+        rows.append({"type": t, "origin": o.label(), "dist": o.dist, "version": o.version,
+                     "type_version": o.type_version, "instances": used.get(t, 0)})
+    return {"types": rows,
+            "refused": [{"type": t, "reason": why(r)} for t, r in sorted(refused_types().items())],
+            "broken": [{"type": t, "reason": why(r)} for t, r in sorted(broken_types().items())]}
+
+
 def type_help() -> str:
     """Every loaded type and where it comes from: the built-ins, then the entry points, then LW_CONNECTORS_DIR (the
     order they are loaded in). No settings, and no path other than the configured LW_CONNECTORS_DIR."""

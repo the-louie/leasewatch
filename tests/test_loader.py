@@ -259,6 +259,13 @@ class TestDuplicates(LoaderBase):
         text = "\n".join(logs.output)
         self.assertIn("conflicts with the built-in type opnsense; give the connector another type name", text)
         self.assertIn("conflicts with the built-in type unifi", text)
+        from leasewatch.connectors import refused_types
+        refused = refused_types()
+        self.assertEqual(sorted(refused), ["opnsense", "unifi"])
+        self.assertEqual(refused["opnsense"], "conflicts with the built-in type opnsense; declared by "
+                                              "LW_CONNECTORS_DIR lw-fake-fw")
+        self.assertTrue(refused["unifi"].startswith("conflicts with the built-in type unifi; declared by entry point "
+                                                    "lw-fake-unifi"))
         cfg = self.cfg(FW1_ENV)
         self.assertEqual(cfg.validate(), [])  # a stray package never takes the firewall connector away
 

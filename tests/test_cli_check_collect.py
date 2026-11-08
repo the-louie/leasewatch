@@ -229,6 +229,15 @@ class TestCheck(CliBase):
         self.assertIn("plugin: brokencli not loaded: ModuleNotFoundError in lwt_broken.connector "
                       "(from LW_CONNECTORS_DIR lw-broken)", out)
 
+    def test_plugin_with_a_built_in_name_is_shown_as_refused(self):
+        make_dist(self.dir, "lw-fakefw", "lwt_fakefw", "opnsense")
+        self.env("dhcp1", inst("dhcp1"))
+        rc, out, err = self.cli("check")
+        self.assertEqual(rc, 0, out)  # the built-in stays; nothing configured uses the plugin
+        self.assertIn("plugin: opnsense refused: conflicts with the built-in type opnsense; declared by "
+                      "LW_CONNECTORS_DIR lw-fakefw", out)
+        self.assertNotIn("not loaded", out)
+
     def test_used_broken_plugin_is_exit_2(self):
         make_dist(self.dir, "lw-broken", "lwt_broken", "brokencli", prelude="import lwt_does_not_exist")
         self.env("dhcp1,dhcp2", inst("dhcp1"), inst("dhcp2", type_="brokencli"))

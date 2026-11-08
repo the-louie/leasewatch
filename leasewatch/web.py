@@ -16,13 +16,14 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodySeparatorDefect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import auth, metrics
 from .config import Config
-from .connectors import InstanceSpec
+from .connectors import InstanceSpec, instances_context, make_host_mask, type_report
 from .connectors.merge import is_private_mac
 from .db import CONTROL_CHARS, AlreadyADevice, Database, UnknownDevices
 from .fw1 import MAC_RE
@@ -532,7 +533,22 @@ class Handler(BaseHTTPRequestHandler):
         self._json_vary({"meta": meta, "devices": [_dev({**d, "wifi_presence": [_wifi_row(w) for w in d["wifi_presence"]]}) for d in devices]}, etag)
 
     def _api_status(self) -> None:
-        self._json_vary({"meta": self._meta()})
+        # the types are here and not in _meta(): that one feeds /healthz, /api/stats and the ETag of /api/devices
+        self._json_vary({"meta": self._meta(), **type_report(self.cfg.instances, self._type_mask())})
+
+    def _type_mask(self) -> Callable[[str], str]:
+        """A plugin's refusal text may echo a secret or a host: the secrets of every instance, then every instance's
+        URL/HOST host (the same masks `check` uses; no instance vouches for such a text)."""
+        specs = self.cfg.instances
+        redact = instances_context(specs).redact
+        hosts = [make_host_mask(v) for s in specs for k, v in s.settings.items() if k in ("url", "host") and v.strip()]
+
+        def mask(text: str) -> str:
+            text = redact(text)
+            for m in hosts:
+                text = m(text)
+            return text
+        return mask
 
     def _api_stats(self) -> None:
         self._json({"meta": self._meta(), "stats": self.db.stats(self.cfg.new_days)})

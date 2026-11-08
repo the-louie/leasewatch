@@ -338,7 +338,7 @@ def _probe_error(phase: str, out: object, timed_out: bool, timeout: int, redact:
 
 def check_cmd(argv: list[str]) -> int:
     import argparse
-    from .connectors import broken_types, instances_context
+    from .connectors import broken_types, instances_context, refused_types
     ap = argparse.ArgumentParser(prog="python -m leasewatch check",
                                  description="Show the loaded connector types and config problems, then run validate() "
                                              "and check() for each instance (collect() is never called).")
@@ -352,6 +352,8 @@ def check_cmd(argv: list[str]) -> int:
     _out(types_line())
     for type_, why in sorted(broken_types().items()):
         _out(f"plugin: {type_} not loaded: {ctx.redact(why)}")
+    for type_, why in sorted(refused_types().items()):
+        _out(f"plugin: {type_} refused: {ctx.redact(why)}")
     # each named instance is built once, here, and the same connector is checked and closed below
     built = {n: setup_instance(specs[n], ctx) for n in names if n in specs}
     if names:  # global problems plus the named instances' own; another instance's problem does not count

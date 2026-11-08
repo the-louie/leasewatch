@@ -390,7 +390,7 @@ class StatusTests(Base):
             srv.server_close()
             t.join(5)
         self.assertEqual(resp.status, 200)
-        self.assertEqual(list(body), ["meta"])
+        self.assertEqual(list(body), ["meta", "types", "refused", "broken"])
         conns = body["meta"]["connectors"]
         self.assertEqual([(c["name"], c["type"], c["ok"], c["enabled"]) for c in conns], [("fw1", "opnsense", True, True), ("x", "fake", True, True)])
         self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "strategy", "enabled"})

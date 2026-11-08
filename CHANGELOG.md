@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- `/api/status` lists `types` (every loaded connector type with its origin and how many instances use it), `refused` (a plugin that declares a built-in type name; the built-in stays) and `broken`; `python -m leasewatch check` prints `plugin: <type> refused: <reason>` for the refused ones.
 - **Watch alerts:** `MAIL_ON_WATCH=1` (default `0`) sends the `offline`, `online`, `ip`, `vlan`, `port` and `wifi` events of watched devices through the channels, one digest per poll (webhook `event` `watch`), each line with a link to the device's page. New `offline` (after the grace) and `online` (back within a day) events, for watched devices only and never in the poll after a failed one.
 - `AUTH_RO_USER` + `AUTH_RO_PASSWORD_HASH` (both or neither; needs `AUTH_USER`, a different name): a second login that can look but not change anything. The page hides the edit controls (`can_write` false), a POST gets 403 `read-only`; both logins share the password-check limit and the cache.
 - **Watch:** a per-device `watch` flag. The device page has a Watch / Unwatch button next to Archive (saved at once; hidden for a client that may not write), a watched device has a `watch` badge in the list, `POST /api/devices/<mac>` takes `"watch": bool` (the bulk route refuses it), the device JSON carries `watch` (0 or 1), the CSV has a last column `watch`, and a change writes a `watched` or `unwatched` event with who did it.
