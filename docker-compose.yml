@@ -4,6 +4,7 @@
 services:
   leasewatch:
     build: .
+    # image: ghcr.io/the-louie/leasewatch:1.4.0  # instead of build: ., once published
     image: leasewatch:local
     container_name: leasewatch
     restart: unless-stopped

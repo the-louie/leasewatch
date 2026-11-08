@@ -1,5 +1,6 @@
 # python:3.12-alpine, index digest as of 2026-11-08; refresh: docker buildx imagetools inspect python:3.12-alpine (Dependabot opens the PR)
 FROM python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
+LABEL org.opencontainers.image.source="https://github.com/the-louie/leasewatch" org.opencontainers.image.licenses="MIT" org.opencontainers.image.title="leasewatch"
 # fixed ids, so a bind-mounted data/ can be chowned before the first start (chown 10001:10001 data/)
 RUN apk add --no-cache tzdata && addgroup -S -g 10001 app && adduser -S -u 10001 -G app -h /app app && mkdir -p /data && chown 10001:10001 /data
 WORKDIR /app
