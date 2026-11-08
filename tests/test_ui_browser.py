@@ -888,7 +888,9 @@ class BrowserLangSvTest(_BrowserCase):
         self.assertEqual(d["html_lang"], "sv")
         self.assertEqual(d["sub"]["shown"], d["sub"]["table"])
         self.assertEqual(d["sub"]["shown"], "Vem finns på nätverket, nyast först")  # the owner-facing sample
-        for part in (d["new_badge"], d["kind_option"], d["headings"], *d["headers"].values(), *d["drawer"].values()):
+        self.assertEqual(d["row_ack"]["shown"], "Markera som känd")
+        self.assertEqual(d["new_label"], {"shown": "nya (7 d)", "table": "nya (7 d)"})  # the default 7 days, as after the status reply
+        for part in (d["new_badge"], d["row_ack"], d["kind_option"], d["headings"], *d["headers"].values(), *d["drawer"].values()):
             self.assertEqual(part["shown"], part["table"], part)
         self.assertEqual(sorted(d["headers"]), ["th.device", "th.first", "th.last"])
         self.assertEqual(sorted(d["drawer"]), ["drawer.archive", "drawer.save", "drawer.watch"])

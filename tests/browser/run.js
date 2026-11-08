@@ -135,6 +135,8 @@ const scenarios = {
     res.headers = {};
     for (const [cls, key] of [['c-dev', 'th.device'], ['c-first', 'th.first'], ['c-last', 'th.last']])
       res.headers[key] = { shown: await page.$eval(`thead th.${cls}`, e => e.textContent.trim()), table: await sv(key) };
+    res.row_ack = { shown: await page.$eval(`${row(A)} button.ack`, e => e.textContent.trim()), table: await sv('row.mark_known') };
+    res.new_label = { shown: await page.$eval('.card[data-filter="new"] .lbl', e => e.textContent), table: await sv('card.new_default') };
     res.kind_option = { shown: await page.$eval('#evKind option[value="renamed"]', e => e.textContent), table: await sv('kind.renamed') };
     res.event = await page.$eval('#events li:has(.k.renamed)', li => ({ kind: li.querySelector('.k').textContent, detail: li.querySelector('.muted').textContent }));
     res.event.table = await sv('kind.renamed');

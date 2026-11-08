@@ -575,6 +575,29 @@ out.v = [lang, durText(5400), durText(36000)];
 """)
         self.assertEqual(out["v"], ["sv", "1,5 h", "10,0 h"])
 
+    # the Swedish adjectives agree with the count they follow
+    def test_swedish_count_agreement(self) -> None:
+        out = _run([], r"""location.search = "?lang=sv";
+//--
+out.sel = [t("sel.count", { n: 1 }), t("sel.count", { n: 2 })];
+out.bar = [t("card.bar_title", { day: "d", n: 1 }), t("card.bar_title", { day: "d", n: 3 })];
+out.ssid = [t("chip.ssid_title", { now: 1, ssid: "S", devices: "1 enhet", n: 1 }), t("chip.ssid_title_since", { now: 1, ssid: "S", devices: "2 enheter", n: 2, day: "d" })];
+out.unacked = [t("card.unacked_n", { n: 1 }), t("card.unacked_n", { n: 2 })];
+""")
+        self.assertEqual(out["sel"], ["1 markerad", "2 markerade"])
+        self.assertEqual(out["bar"], ["d: 1 ny", "d: 3 nya"])
+        self.assertEqual(out["ssid"], ["1 online nu på S, 1 enhet sedd där", "1 online nu på S, 2 enheter sedda där sedan d"])
+        self.assertEqual(out["unacked"], ["ej känd än", "ej kända än"])
+
+    # the hours in the Wi-Fi history tooltip follow the language's decimal mark
+    def test_wifi_tooltip_decimal_follows_the_language(self) -> None:
+        out = _run([], r"""location.search = "?lang=sv";
+//--
+out.v = wifiHtml([{ ssid: "S", first_seen: 1, last_seen: 2, seconds_seen: 4500, polls_seen: 3, last_ap: "ap" }], {}, null);
+""")
+        self.assertIn("1,25 h", out["v"])
+        self.assertNotIn("1.25", out["v"])
+
     # a ?lang= from the address stays through a filter change and a clear; it is not a filter
     def test_lang_param_survives_url_writes(self) -> None:
         out = _run(["urlRetry", "syncUrl"], r"""location.search = "?lang=en&q=old"; let url = null;

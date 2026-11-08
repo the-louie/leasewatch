@@ -16,7 +16,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
 - A sighting's `ip` that is not a dotted IPv4 address is emptied by the host, and the merge reads an empty `ip` as unknown, so a device keeps its last IPv4 address; only a device none of whose sightings has an IPv4 address ends up with no IP.
 - CI: actions pinned by commit SHA, checkouts without a persisted token, read-only workflow permissions.
-- Chip tooltips say "1 device" instead of "1 devices"; the status line says "4 NDP entries" and "NDP table unavailable" instead of "4 ndp" and "ndp unavailable".
+- Chip tooltips say "1 device" instead of "1 devices"; the status line says "4 NDP entries" and "NDP table unavailable" instead of "4 ndp" and "ndp unavailable". A refused save reads "Read-only: changes are off on this server" or "Read-only: changes are off for this address" instead of "Save failed: read-only" or "Save failed: writes are not allowed from this address".
 
 ### Fixed
 - The gzip HEAD test freezes the clock, so it no longer fails now and then.

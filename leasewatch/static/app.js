@@ -233,6 +233,7 @@
   function renderCards() {
     const s = state.stats; if (!s) return;
     $("#cTotal").textContent = s.total; $("#cOnline").textContent = s.online; $("#cNew").textContent = s.new; $("#cUnacked").textContent = s.unacked;
+    $('.card[data-filter="unacked"] .lbl').textContent = t("card.unacked_n", { n: s.unacked });
     // the baseline card shows only while there is something to check (or its filter is on, so the click can be undone)
     const nb = s.baseline_unchecked || 0, showB = nb > 0 || state.status === "baseline";
     $("#cBaseline").textContent = nb; $("#cardBaseline").classList.toggle("hidden", !showB); $("#cards").classList.toggle("five", showB);
@@ -281,7 +282,7 @@
       const on = state.ssid === s.ssid, c = document.createElement("button");
       c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.ssid = s.ssid;
       c.innerHTML = `<span class="ssid">${esc(s.ssid)}</span> <span class="n">${esc(s.devices_now)}/${esc(s.devices_ever)}</span>`;
-      const p = { now: s.devices_now, ssid: s.ssid, devices: t("count.devices", { n: s.devices_ever }), day: since };
+      const p = { now: s.devices_now, ssid: s.ssid, devices: t("count.devices", { n: s.devices_ever }), n: s.devices_ever, day: since };
       c.title = since ? t("chip.ssid_title_since", p) : t("chip.ssid_title", p);
       c.onclick = () => { state.ssid = on ? null : s.ssid; if (on) state.ssidNow = false; renderSsids(); renderTable(); syncUrl(); };
       box.insertBefore(c, now);
@@ -704,7 +705,7 @@
     const row = w => {
       const first = since && Math.abs(w.first_seen - since) <= poll ? t("drawer.wifi_since", { when: abs(since) }) : abs(w.first_seen);
       const last = d?.online && d.wifi_ssid && d.wifi_ssid === w.ssid ? t("row.now") : abs(w.last_seen);
-      const title = t("drawer.wifi_time_title", { h: (w.seconds_seen / 3600).toFixed(2), polls: w.polls_seen });
+      const title = t("drawer.wifi_time_title", { h: (w.seconds_seen / 3600).toLocaleString(lang, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), polls: w.polls_seen });
       return `<tr><td>${esc(w.ssid)}</td><td>${esc(first)}</td><td>${esc(last)}</td><td title="${esc(title)}">${esc(durText(w.seconds_seen))}</td><td>${esc(w.last_ap || "–")}</td></tr>`;
     };
     return `<h3>${esc(t("drawer.wifi_history"))}</h3>
