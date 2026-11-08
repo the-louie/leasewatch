@@ -183,22 +183,40 @@ def _host_ip(row: dict) -> str:
 
 
 def _host_net(ip: str) -> str:
-    """The /24 around a dnsmasq host's address, its cidr_map key ("" for no address). The hosts model has no
-    subnet, so a lease-less host takes the interface of a lease or ARP entry in the same /24."""
+    """The /24 around a dnsmasq host's address, its fallback cidr_map key ("" for no address). The hosts model has
+    no subnet, so a lease-less host without an exact match (_exact_ifaces) takes the interface of a lease or ARP
+    entry in the same /24, which is wrong on a subnet smaller than /24."""
     return str(ipaddress.ip_network(f"{ip}/24", strict=False)) if ip else ""
+
+
+def _exact_ifaces(lease_rows: list[dict], arp: list) -> dict:
+    """Address text -> (if, if_descr, if_dev) of the lease (first wins), else the ARP entry, with that address: the
+    interface of a dnsmasq host for sure, so dnsmasq_hosts looks it up before the /24 guess."""
+    out: dict = {}
+    for l in lease_rows:
+        if (a := _s(l.get("address"))) and a not in out:
+            out[a] = (_s(l.get("if")), _s(l.get("if_descr")), _s(l.get("if_dev")))
+    for e in arp:
+        if isinstance(e, dict) and (a := _s(e.get("ip"))) and a not in out:
+            out[a] = ("", _s(e.get("intf_description")), _s(e.get("intf")))
+    return out
 
 
 def dnsmasq_hosts(rows: list[dict], cidr_map: dict) -> list[dict]:
     """dnsmasq static host rows (/api/dnsmasq/settings/search_host) in the kea_reservations shape, one row per MAC in
-    "hwaddr". Skipped: a row with no valid MAC (a DNS-only record) and a row with "ignore" set (dnsmasq ignores that
-    client). An "ip" without an IPv4 address gives address "": the MAC is still a configured device. The hostname is
-    the short "host" name, the label "descr", subnet "" (the model has none). cidr_map is keyed by _host_net."""
+    "hwaddr". Skipped: a row with no valid MAC (a DNS-only record), a row with "ignore" set (dnsmasq ignores that
+    client) and a row whose "ip" holds only IPv6 addresses (leasewatch tracks IPv4). An empty "ip" (a MAC-only
+    reservation with a dynamic address) gives address "": the MAC is still a configured device. The hostname is the
+    short "host" name, the label "descr", subnet "" (the model has none). cidr_map is keyed by the address itself
+    (_exact_ifaces), looked up first, and by _host_net."""
     out = []
     for r in rows:
         if not isinstance(r, dict) or _s(r.get("ignore")).lower() in ("1", "true", "yes"):
             continue
         ip = _host_ip(r)
-        ifc, descr, dev = cidr_map.get(_host_net(ip), ("", "", ""))
+        if not ip and _items(r.get("ip")):
+            continue
+        ifc, descr, dev = cidr_map.get(ip) or cidr_map.get(_host_net(ip), ("", "", ""))
         label = _s(r.get("descr"))[:LABEL_MAX].strip()
         for mac in dict.fromkeys(m for m in (norm_mac(t) for t in _items(r.get("hwaddr"))) if m):
             out.append({"mac": mac, "address": ip, "hostname": _s(r.get("host")).rstrip("."), "man": "",
@@ -390,7 +408,7 @@ class Fw1Client:
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
             if self.dhcp_backend == "dnsmasq":
                 nets = [{"subnet": _host_net(_host_ip(r))} for r in reservations if isinstance(r, dict)]
-                res_rows = dnsmasq_hosts(reservations, _cidr_map(nets, lease_rows, arp))
+                res_rows = dnsmasq_hosts(reservations, {**_cidr_map(nets, lease_rows, arp), **_exact_ifaces(lease_rows, arp)})
             else:
                 res_rows = kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
             by_mac: dict[str, list[dict]] = {}

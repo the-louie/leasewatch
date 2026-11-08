@@ -19,7 +19,7 @@ done
 pip hash wheels-*/*.whl
 ```
 
-  Write one line per package, sorted by name, with one `--hash=sha256:` per distinct wheel, and update the date in the header. If `pip download` fails for a platform, a package has no musllinux wheel for that version: lock the newest version that has both. `uv pip compile --generate-hashes` also works, but it writes the hashes of every wheel and the sdist, not only the two platforms.
+  Write one line per package, sorted by name, with one `--hash=sha256:` per distinct wheel, and update the date in the header. With `--only-binary=:all:`, `pip download` does not fail when a platform has no wheel for the newest version: it quietly resolves an older version for that platform. Compare the version of each package in both platform directories; they must be equal before hashing. If they differ, lock the newest version that has both. `uv pip compile --generate-hashes` also works, but it writes the hashes of every wheel and the sdist, not only the two platforms.
 - Check without Docker (both must print `Would install …` with no error):
 
 ```sh

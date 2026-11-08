@@ -648,7 +648,7 @@ class BrowserLongTextTest(_BrowserCase):
 
 class BrowserSsidWidthTest(_BrowserCase):
     """Long SSID names and a NEW private-MAC row: no sideways scroll at phone widths, filtered or not."""
-    S32, S40 = "Guest-Network-Long-SSID-Name-32ch", "VeryLongNetworkNameWithoutAnyBreaksAtAll"
+    S32, S40 = "Guest-Network-Long-SSID-Name-32c", "VeryLongNetworkNameWithoutAnyBreaksAtAll"
     MACS = ("02:00:00:00:31:01", "02:00:00:00:31:02", "02:00:00:00:31:03")
 
     @classmethod
@@ -676,6 +676,7 @@ class BrowserSsidWidthTest(_BrowserCase):
                     self.assertGreater(r["rows"], 0, r)
                     self.assertLessEqual(r["table_scroll"], 0, r)
                     self.assertLessEqual(r["page_scroll"], 0, r)
+                    self.assertEqual(r["over"], [], r)
 
 
 class BrowserSsidTest(_BrowserCase):

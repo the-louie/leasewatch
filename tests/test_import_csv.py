@@ -1,6 +1,6 @@
 """The `import-csv` command (leasewatch/importer.py): the device CSV export read back, also as a spreadsheet saves it.
 Synthetic data only: private MACs."""
-import contextlib, csv, io, os, sqlite3, sys, tempfile, unittest
+import contextlib, csv, hashlib, io, os, sqlite3, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
@@ -254,12 +254,54 @@ class ImportCsvTests(unittest.TestCase):
         path = self.write("mac,note\n" + f"{A},{'x' * 900}\n" * 1200)
         self.assertEqual(self.run_cmd(path)[:3:2], (2, "import-csv: file larger than 1 MiB\n"))
 
-    def test_only_the_first_twenty_details_are_listed(self):
+    def test_ten_unknown_and_ten_skipped_are_listed_with_the_rest_counted(self):
         self.make_db()
-        path = self.write("mac\n" + "".join(f"02:00:00:00:51:{i:02x}\n" for i in range(25)))
+        path = self.write("mac\n" + "".join(f"02:00:00:00:51:{i:02x}\n" for i in range(25)) + "bad\n" * 12)
         rc, lines, _ = self.run_cmd(path)
-        self.assertEqual(lines[0], "import-csv: 25 rows, 0 updated, 0 unchanged, 25 unknown MAC")
-        self.assertEqual(len(lines), 21)
+        self.assertEqual(lines[0], "import-csv: 37 rows, 0 updated, 0 unchanged, 25 unknown MAC, 12 skipped (bad row)")
+        self.assertEqual(lines[1:11], [f"  unknown: 02:00:00:00:51:{i:02x}" for i in range(10)])
+        self.assertEqual(lines[11], "  … and 15 more")
+        self.assertEqual(lines[12:22], [f"  skipped line {n}: bad MAC 'bad'" for n in range(27, 37)])
+        self.assertEqual(lines[22:], ["  … and 2 more"])
+        path = self.write(f"mac\n{GONE}\nbad\n")
+        self.assertEqual(self.run_cmd(path)[1][1:], [f"  unknown: {GONE}", "  skipped line 3: bad MAC 'bad'"])
+
+    def test_cr_only_line_ends_import(self):
+        self.make_db()
+        path = self.write(f'mac,name,note\r{A},Laser,\r{C},Cam,"a\rb"\r')
+        rc, lines, err = self.run_cmd(path, "--overwrite", "--fields", "name,note")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(lines, ["import-csv: 2 rows, 2 updated, 0 unchanged"])
+        self.assertEqual(self.sql("SELECT name, note FROM devices WHERE mac IN (?,?) ORDER BY mac", (A, C)),
+                         [("Laser", ""), ("Cam", "a\nb")])
+
+    def test_unclosed_quote_is_a_usage_error_and_writes_nothing(self):
+        self.make_db()
+        before = self.state()
+        path = self.write(f'mac,name\n{A},New\n{C},"open\n{D},x\n')
+        rc, lines, err = self.run_cmd(path, "--overwrite")
+        self.assertEqual((rc, lines), (2, []))
+        self.assertTrue(err.startswith("import-csv: line 3: "), err)
+        self.assertEqual(self.state(), before)
+
+    def test_dry_run_leaves_the_database_file_as_it_is(self):
+        self.make_db()
+        path = self.write(self.export())
+        self.sql(WIPE)
+        # a schema-3 file, as an older leasewatch leaves it: Database() would migrate it
+        self.sql("DROP TABLE wifi_presence")
+        self.sql("UPDATE meta SET value='3' WHERE key='schema_version'")
+        self.sql("PRAGMA wal_checkpoint(TRUNCATE)")  # the whole state in the main file
+        with open(self.db_path, "rb") as f:
+            before = hashlib.sha256(f.read()).hexdigest()
+        mtime = os.stat(self.db_path).st_mtime_ns
+        rc, lines, _ = self.run_cmd(path, "--dry-run")
+        self.assertEqual((rc, lines), (0, ["import-csv (dry run): 4 rows, 4 updated, 0 unchanged"]))
+        with open(self.db_path, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), before)
+        self.assertEqual(os.stat(self.db_path).st_mtime_ns, mtime)
+        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'"), [("3",)])
+        self.assertEqual(self.sql("SELECT name FROM sqlite_master WHERE name='wifi_presence'"), [])
 
     def test_main_dispatch(self):
         self.assertIn("import-csv", m.SUBCOMMANDS)

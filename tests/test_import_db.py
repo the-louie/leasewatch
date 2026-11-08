@@ -2,8 +2,10 @@
 restores or unwatches; overwrite applies every present field; one transaction; events come from the shared
 user-field rules. Synthetic data only: private MACs."""
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -126,6 +128,23 @@ class ImportTests(unittest.TestCase):
             self.imp([{"mac": A, "name": "Fine", "acked": True}, {"mac": B, "name": 123}])
         self.assertEqual((self.dev()["name"], self.dev()["acked"]), ("", 0))
         self.assertEqual(self.db.q("SELECT COUNT(*) n FROM events")[0]["n"], 0)
+
+    def test_begins_immediate_and_waits_for_another_writer(self):
+        sql = []
+        self.db._c().set_trace_callback(sql.append)
+        other = sqlite3.connect(os.path.join(self.tmp.name, "lw.db"), isolation_level=None, check_same_thread=False)
+        try:
+            other.execute("BEGIN IMMEDIATE")  # a poll holding the write lock
+            other.execute("UPDATE devices SET last_seen=200 WHERE mac=?", (B,))
+            t = threading.Timer(0.3, other.execute, ("COMMIT",))
+            t.start()
+            r = self.imp([{"mac": A, "name": "N"}])  # waits for the commit instead of "database is locked"
+            t.join()
+        finally:
+            other.close()
+            self.db._c().set_trace_callback(None)
+        self.assertIn("BEGIN IMMEDIATE", sql)
+        self.assertEqual((r.updated, self.dev()["name"], self.dev(B)["last_seen"]), (1, "N", 200))
 
     def test_result_type(self):
         self.assertEqual(self.imp([]), ImportResult(0, 0, [], [], 0))

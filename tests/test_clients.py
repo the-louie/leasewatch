@@ -327,8 +327,9 @@ class DnsmasqTests(StubCase):
         {"uuid": "u4", "host": "laptop", "ip": "10.0.120.40,10.0.120.41",
          "hwaddr": "02:00:00:00:02:11, 02-00-00-00-02-12", "descr": "Laptop"},                   # two MACs, string form
         {"uuid": "u5", "host": "banned", "ip": "10.0.110.50", "hwaddr": "02:00:00:00:02:13", "ignore": "1"},  # skipped
-        {"uuid": "u6", "host": "v6only", "ip": "fd00::60", "hwaddr": "02:00:00:00:02:14"},       # kept, no address
+        {"uuid": "u6", "host": "v6only", "ip": "fd00::60", "hwaddr": "02:00:00:00:02:14"},       # IPv6 only: skipped
         {"uuid": "u7", "host": "odd", "ip": None, "hwaddr": 42, "ignore": None, "descr": None},  # no valid MAC: skipped
+        {"uuid": "u8", "host": "dyn", "ip": "", "hwaddr": "02:00:00:00:02:15"},                  # MAC only: no address
         "not-a-row",
     ]
 
@@ -340,7 +341,7 @@ class DnsmasqTests(StubCase):
             if s.source == "dhcp":
                 by.setdefault(s.mac, []).append(s)
         self.assertEqual(sorted(by), ["02:00:00:00:02:01", "02:00:00:00:02:10", "02:00:00:00:02:11",
-                                      "02:00:00:00:02:12", "02:00:00:00:02:14"])
+                                      "02:00:00:00:02:12", "02:00:00:00:02:15"])
         leased = by["02:00:00:00:02:01"]
         self.assertEqual(len(leased), 1)  # a leased host is not duplicated
         self.assertEqual((leased[0].hostname, leased[0].lease_type, leased[0].label), ("alexs-ipad", "dynamic", "Alex iPad"))
@@ -350,9 +351,21 @@ class DnsmasqTests(StubCase):
         for mac in ("02:00:00:00:02:11", "02:00:00:00:02:12"):
             s = by[mac][0]
             self.assertEqual((s.ip, s.hostname, s.vlan, s.iface, s.label), ("10.0.120.40", "laptop", "IOT", "", "Laptop"))
-        v6 = by["02:00:00:00:02:14"][0]
-        self.assertEqual((v6.ip, v6.vlan, v6.lease_type, v6.online), ("", "", "static", False))
+        dyn = by["02:00:00:00:02:15"][0]
+        self.assertEqual((dyn.ip, dyn.vlan, dyn.lease_type, dyn.online), ("", "", "static", False))
         self.assertEqual(stats, {"leases": 1, "arp": 1, "reservations": len(self.HOSTS)})
+
+    def test_dnsmasq_host_interface_from_exact_address_first(self):
+        # 10.0.130.0/24 split in two /25: the ARP entry with the host's own address names its interface, not the
+        # lease in the same /24 on the other half
+        lease = {**self.LEASE, "address": "10.0.130.10", "if": "vlan0131", "if_name": "opt5", "if_descr": "Low"}
+        arp = [{"mac": "02:00:00:00:02:30", "ip": "10.0.130.200", "intf": "vlan0132", "intf_description": "High"}]
+        hosts = [{"host": "cam", "ip": "10.0.130.200", "hwaddr": "02:00:00:00:02:31"},
+                 {"host": "guess", "ip": "10.0.130.201", "hwaddr": "02:00:00:00:02:32"}]
+        out, _, _ = self.run_dm([lease], arp, hosts=hosts)
+        got = {s.mac: (s.vlan, s.iface) for s in out if s.source == "dhcp"}
+        self.assertEqual(got["02:00:00:00:02:31"], ("High", ""))
+        self.assertEqual(got["02:00:00:00:02:32"], ("Low", "opt5"))  # no exact match: the /24 guess
 
     def test_dnsmasq_hosts_parser(self):
         for v in ("1", 1, True, "true"):
@@ -363,6 +376,8 @@ class DnsmasqTests(StubCase):
                                    "descr": "x" * 200}], {})
         self.assertEqual([(r["mac"], r["address"], r["subnet"], len(r["label"])) for r in rows],
                          [("02:00:00:00:02:21", "10.0.1.9", "", fw1.LABEL_MAX)])
+        self.assertEqual(fw1.dnsmasq_hosts([{"hwaddr": "02:00:00:00:02:22", "ip": ["fd00::2", "fe80::2"]}], {}), [])
+        self.assertEqual([r["address"] for r in fw1.dnsmasq_hosts([{"hwaddr": "02:00:00:00:02:23", "ip": []}], {})], [""])
 
     def test_dnsmasq_host_failure_is_not_fatal(self):
         arp = [{"mac": "02:00:00:00:02:05", "ip": "10.0.110.7", "intf": "vlan0110", "intf_description": "Clients"}]

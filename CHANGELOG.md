@@ -4,7 +4,12 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ## Unreleased
 
+### Fixed
+- the device table no longer scrolls sideways at 400 px (the meta line wraps below 560 px).
+
 ### Added
+- **Pinned base image:** the Dockerfile pins the base image by digest, and Dependabot proposes the weekly refresh of the base image (docker), the GitHub actions and the pip ranges.
+- **Hash-locked install:** the image installs the Python packages from `requirements.lock` (`--require-hashes`, wheels only; amd64 and arm64); [docs/image-build.md](docs/image-build.md) explains how to refresh it.
 - **Published image:** a `v*` tag publishes the image to `ghcr.io/the-louie/leasewatch` (tags `<version>`, `<major>.<minor>` and `latest`; linux/amd64 and linux/arm64, with provenance) after the tests and the Docker build pass; the package is made public by the owner after the first publish.
 - **dnsmasq static hosts:** with `DHCP_BACKEND=dnsmasq` the OPNsense static hosts (Services > Dnsmasq DNS & DHCP > Hosts, `/api/dnsmasq/settings/search_host`, same privilege) are read like Kea reservations: a host without a lease is listed as static and offline (interface from a lease or ARP entry in the same /24), its description as label; a host with several MACs gives one device per MAC; DNS-only and ignored hosts are skipped. Built from the OPNsense model, not yet verified against a live firewall; when the search fails the poll lists the leases only and keeps the stored labels.
 - `/api/status` lists `types` (every loaded connector type with its origin and how many instances use it), `refused` (a plugin that declares a built-in type name; the built-in stays) and `broken`; `python -m leasewatch check` prints `plugin: <type> refused: <reason>` for the refused ones.

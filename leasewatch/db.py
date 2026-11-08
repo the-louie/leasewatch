@@ -229,11 +229,14 @@ class Database:
         return True
 
     @contextmanager
-    def tx(self) -> Iterator[sqlite3.Connection]:
+    def tx(self, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        """One transaction. immediate=True takes the write lock at BEGIN (waiting up to busy_timeout): a deferred
+        transaction that reads and then writes fails at once with "database is locked" when another connection
+        committed in between."""
         with self._lock:
             if self._c().in_transaction:  # a failed COMMIT+ROLLBACK must not wedge every later transaction
                 self._c().execute("ROLLBACK")
-            self._c().execute("BEGIN")
+            self._c().execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             try:
                 yield self._c()
                 self._c().execute("COMMIT")
@@ -481,7 +484,7 @@ class Database:
         unwatches). With overwrite every present key is applied as given. The shared cleaning, the unchanged-value
         rule and the events (named by actor) are those of _apply_user_fields."""
         res = ImportResult()
-        with self.tx() as c:
+        with self.tx(immediate=True) as c:  # reads then writes: wait for a poll's write lock instead of failing
             last: dict[str, dict] = {}
             first_mac: dict[str, str] = {}
             for row in rows:

@@ -10,8 +10,10 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Iterator
+from urllib.request import pathname2url
 
 from .config import Config
 from .db import Database
@@ -21,7 +23,7 @@ from .maintenance import _fail, _say
 FIELDS = ("name", "note", "acked", "archived", "watch")
 MAX_BYTES = 1024 * 1024  # the export of a large home network is well below this
 MAX_ROWS = 20_000
-MAX_LISTED = 20  # unknown MACs and skipped lines printed after the summary
+MAX_LISTED = 10  # unknown MACs, and apart from them skipped lines, printed after the summary
 _TRUE = ("1", "true", "yes")
 _FALSE = ("0", "false", "no")
 _SEPARATORS = ";\r\n"  # the places _csv_cell in web.py guards besides the cell start
@@ -91,7 +93,10 @@ def _check_fields(fields: Iterable[str]) -> tuple[str, ...]:
 def _header(line: str) -> tuple[str, list[str]]:
     """The delimiter (',' or ';', the one that yields a mac column; ',' when both do) and the header cells."""
     for delim in (",", ";"):
-        cells = [c.strip().lower() for c in next(csv.reader([line], delimiter=delim), [])]
+        try:
+            cells = [c.strip().lower() for c in next(csv.reader([line], delimiter=delim, strict=True), [])]
+        except csv.Error as e:
+            raise ValueError(f"line 1: {e}") from None
         if "mac" in cells:
             return delim, cells
     raise ValueError("no mac column in the header")
@@ -111,17 +116,19 @@ def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
             raise ValueError("not UTF-8 (save the file as CSV UTF-8)") from None
     else:
         text = data[1:] if data.startswith("﻿") else data
-    first = text.split("\n", 1)[0].rstrip("\r")
-    delim, header = _header(first)
+    # CR-only line ends (old Mac spreadsheets) as LF; a CR inside a cell becomes LF too, which the import's text
+    # cleaning would strip anyway
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    delim, header = _header(text.split("\n", 1)[0])
     col: dict[str, int] = {}
     for i, name in enumerate(header):
         col.setdefault(name, i)  # a repeated column: the first one counts
     plan = ParsePlan(ignored_columns=[h for h in dict.fromkeys(header) if h != "mac" and h not in want])
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim, strict=True)
     line = 1
 
     def records() -> Iterator[list[str]]:
-        # csv.Error (a cell over the csv field size limit, an unterminated quote with strict quoting) is a bad file
+        # csv.Error (a cell over the csv field size limit, an unterminated quote, a stray quote) is a bad file
         try:
             yield from reader
         except csv.Error as e:
@@ -202,21 +209,31 @@ def import_csv_cmd(argv: list[str], out: Callable[[str], None]) -> int:
     if not os.path.exists(cfg.db_path):  # Database() would create an empty file
         return _fail("import-csv", f"no database at {cfg.db_path}")
     try:
-        db = Database(cfg.db_path)
-        try:
-            target = db
-            if args.dry_run:
-                # import_user_fields commits its own transaction: a dry run imports into an in-memory copy
-                target = Database(":memory:")
-                with db._lock:
-                    db._c().backup(target._c())
-            try:
-                res = target.import_user_fields(plan.rows, overwrite=args.overwrite, actor="import-csv")
-            finally:
-                if target is not db:
+        if args.dry_run:
+            # import_user_fields commits its own transaction, and Database() migrates the file it opens: a dry run
+            # copies the real file, opened read-only, and imports into the copy, so the real file is never written
+            with tempfile.TemporaryDirectory() as tmp:
+                copy = os.path.join(tmp, "dry-run.db")
+                src = sqlite3.connect(f"file:{pathname2url(os.path.abspath(cfg.db_path))}?mode=ro", uri=True)
+                try:
+                    dst = sqlite3.connect(copy)
+                    try:
+                        src.backup(dst)
+                    finally:
+                        dst.close()
+                finally:
+                    src.close()
+                target = Database(copy)
+                try:
+                    res = target.import_user_fields(plan.rows, overwrite=args.overwrite, actor="import-csv")
+                finally:
                     target.close()
-        finally:
-            db.close()
+        else:
+            db = Database(cfg.db_path)
+            try:
+                res = db.import_user_fields(plan.rows, overwrite=args.overwrite, actor="import-csv")
+            finally:
+                db.close()
     except (OSError, sqlite3.Error) as e:
         return _fail("import-csv", e)
     parts = [f"{plan.total} rows", f"{res.updated} updated", f"{res.unchanged} unchanged"]
@@ -227,8 +244,10 @@ def import_csv_cmd(argv: list[str], out: Callable[[str], None]) -> int:
     if plan.bad:
         parts.append(f"{len(plan.bad)} skipped (bad row)")
     lines = [("import-csv (dry run): " if args.dry_run else "import-csv: ") + ", ".join(parts)]
-    details = [f"  unknown: {m}" for m in res.unknown] + [f"  skipped line {n}: {r}" for n, r in plan.bad]
-    lines += details[:MAX_LISTED]
+    for group in ([f"  unknown: {m}" for m in res.unknown], [f"  skipped line {n}: {r}" for n, r in plan.bad]):
+        lines += group[:MAX_LISTED]
+        if len(group) > MAX_LISTED:
+            lines.append(f"  … and {len(group) - MAX_LISTED} more")
     rc = 0
     for line in lines:
         rc = _say(out, line, 0)
