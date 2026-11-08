@@ -446,7 +446,7 @@ class Connector(Base):
         return c
 
     def test_platform_setting(self) -> None:
-        self.assertEqual(UnifiConnector.describe().version, "1.2")
+        self.assertEqual(UnifiConnector.describe().version, "1.3")
         self.assertEqual(self.conn("https://unifi.example.lan").client.cfg.platform, "auto")
         for v in ("auto", "classic", "unifi_os"):
             c = self.conn("https://unifi.example.lan", platform=v)

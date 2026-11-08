@@ -66,6 +66,8 @@ class WifiInfo:
     channel: int | None = None
     wired: bool = False         # seen by UniFi as a wired client (behind a UniFi switch/AP port)
     alias: str = ""             # name set in the UniFi controller
+    hostname: str = ""          # the hostname the controller learned (session API only)
+    oui: str = ""               # the vendor the controller derived from the MAC (session API only)
 
 
 RADIO_NAMES = {"ng": "2.4 GHz", "na": "5 GHz", "6e": "6 GHz", "ac": "5 GHz", "ax": "5 GHz"}
@@ -103,6 +105,7 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
             radio="" if wired else RADIO_NAMES.get(radio, radio),
             channel=None if wired else channel,
             wired=wired, alias=str(c.get("name") or ""),
+            hostname=str(c.get("hostname") or "").strip(), oui=str(c.get("oui") or "").strip(),
         )
     return out
 

@@ -50,7 +50,7 @@ class DescribeTests(unittest.TestCase):
                     self.assertIn(s.default, s.choices)
 
     def test_unifi_version_counts_the_apikey_mode(self):
-        self.assertEqual(UnifiConnector.describe().version, "1.2")
+        self.assertEqual(UnifiConnector.describe().version, "1.3")
 
     def test_snmp_switch_version_counts_the_1_3_settings(self):
         # PORT, PRIV and the new AUTH names (1.3) are a connector change, as PLATFORM took unifi to 1.1
@@ -60,7 +60,7 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy", "ipv6"})
         self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "port", "name", "user", "auth", "auth_key", "priv", "priv_key", "profile", "profile_file", "min_macs"})
-        self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "auth", "api_key", "verify_tls", "proxy", "platform"})
+        self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "auth", "api_key", "verify_tls", "hostnames", "proxy", "platform"})
 
     def test_wrappers_are_connectors(self):
         for c in (OpnsenseConnector("fw1", FW1, CTX), SnmpSwitchConnector("switch", SW, CTX), UnifiConnector("unifi", UF, CTX)):

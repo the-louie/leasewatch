@@ -8,7 +8,7 @@ from typing import Mapping
 
 from ..unifi import UnifiClient, UnifiKeyClient, WifiInfo
 from . import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin,
-               mask_url_host, parse_bool, url_problems)
+               Sighting, mask_url_host, parse_bool, url_problems)
 
 
 @dataclass
@@ -32,9 +32,17 @@ def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> 
     return out
 
 
+def to_sightings(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> list[Sighting]:
+    """The controller's hostname and vendor per client: no IP and not presence, so online state and moves stay with the
+    other sources."""
+    return [Sighting(mac=mac, source=source, kind="client", presence=False, observed_at=observed_at, ip="",
+                     hostname=w.hostname, vendor=w.oui)
+            for mac, w in wifi.items() if w.hostname or w.oui]
+
+
 class UnifiConnector(SettingsMixin):
     INFO = ConnectorInfo(
-        type="unifi", version="1.2", api_version=API_VERSION, produces=frozenset({"attachment"}),
+        type="unifi", version="1.3", api_version=API_VERSION, produces=frozenset({"attachment", "sighting"}),
         roles=frozenset({"controller"}),
         settings=(
             Setting("url", required=True, help="https://<controller>"),
@@ -45,6 +53,7 @@ class UnifiConnector(SettingsMixin):
                     help="session = USER and PASSWORD login; apikey = a controller API key (UniFi OS only)"),
             Setting("api_key", secret=True, help="the controller API key (AUTH=apikey)"),
             Setting("verify_tls", default="1", help="check the controller's certificate"),
+            Setting("hostnames", default="1", help="also report the controller's hostname and vendor per client (session mode)"),
             Setting("proxy", default="0", help="honour http(s)_proxy for this connection"),
             Setting("platform", default="auto", choices=("auto", "classic", "unifi_os"),
                     help="auto = detect; classic = self-hosted Network app; unifi_os = UDM/UCG/UniFi OS console"),
@@ -70,7 +79,7 @@ class UnifiConnector(SettingsMixin):
         problems = self._generic_problems()
         if self.settings["url"]:
             problems += url_problems("url", self.settings["url"], "https://<controller>")
-        for key in ("verify_tls", "proxy"):
+        for key in ("verify_tls", "hostnames", "proxy"):
             if parse_bool(self.settings[key]) is None:
                 problems.append(f"{key} must be a boolean (1/0, true/false, yes/no, on/off)")
         where = f"connector {self.name} ({self.INFO.type}): "
@@ -109,7 +118,11 @@ class UnifiConnector(SettingsMixin):
                 stats["dropped"] = parsed["dropped"]
             if self.settings["auth"] == "apikey":
                 stats["ssid_unavailable"] = 1  # the Integration API lists no SSID, signal or radio
-            return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats=stats)
+            now = self.ctx.now()
+            attachments = to_attachments(wifi, self.name, now)
+            # key mode has no hostname or vendor fields, so nothing is emitted there
+            sightings = to_sightings(wifi, self.name, now) if parse_bool(self.settings["hostnames"]) is not False else []
+            return Batch(sightings=sightings, attachments=attachments, stats=stats)
         except ConnectorError:
             raise
         except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host
