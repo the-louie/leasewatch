@@ -1,4 +1,4 @@
-"""The `backup` and `vacuum` commands: they open the database file directly (never through Database, so nothing is
+"""The `backup`, `vacuum` and `reset-baseline` commands: they open the database file directly (never through Database, so nothing is
 migrated or created) and never start the server."""
 from __future__ import annotations
 
@@ -250,3 +250,51 @@ def vacuum_cmd(argv: list[str], out: Callable[[str], None]) -> int:
         return _say(out, f"vacuum: {before} -> {_mb(cfg.db_path)}", 0)
     except (OSError, sqlite3.Error) as e:
         return _fail("vacuum", e)
+
+
+def reset_baseline_cmd(argv: list[str], out: Callable[[str], None]) -> int:
+    ap = argparse.ArgumentParser(prog="python -m leasewatch reset-baseline",
+                                 description="Mark every listed device as baseline (already present: it never merges and "
+                                             "never mails) without deleting the database. No events are written.")
+    ap.add_argument("--yes", action="store_true", help="confirm (required when stdin is not a terminal)")
+    ap.add_argument("--clear-acks", action="store_true", help="also set every targeted device to not acknowledged")
+    ap.add_argument("--include-archived", action="store_true", help="also mark archived devices (default: untouched)")
+    args = ap.parse_args(argv)
+    interactive = sys.stdin is not None and sys.stdin.isatty()
+    if not args.yes and not interactive:
+        sys.stderr.write("reset-baseline: add --yes to confirm\n")
+        return 2
+    cfg = Config()
+    where = "" if args.include_archived else " WHERE archived_ts IS NULL"
+    try:
+        try:
+            conn = _open_source(cfg.db_path)
+        except sqlite3.Error as e:
+            return _fail("reset-baseline", f"cannot open {cfg.db_path}: {e}")
+        try:
+            total = conn.execute("SELECT count(*) FROM devices" + where).fetchone()[0]
+            if not args.yes:
+                sys.stderr.write(f"Mark {total} devices as baseline? [y/N] ")
+                sys.stderr.flush()
+                if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+                    sys.stderr.write("reset-baseline: cancelled\n")
+                    return 1
+            conn.execute("BEGIN IMMEDIATE")  # the count and the update see the same rows
+            try:
+                total = conn.execute("SELECT count(*) FROM devices" + where).fetchone()[0]
+                new = conn.execute("SELECT count(*) FROM devices WHERE baseline=0"
+                                   + (" AND archived_ts IS NULL" if not args.include_archived else "")).fetchone()[0]
+                sets = "baseline=1, mail_queued=NULL" + (", acked=0, acked_at=NULL" if args.clear_acks else "")
+                conn.execute("UPDATE devices SET " + sets + where)
+                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('baseline_ts', ?)", (str(int(time.time())),))
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+        line = f"reset-baseline: {total} devices marked as baseline ({new} were new)"
+        return _say(out, line + (", acks cleared" if args.clear_acks else ""), 0)
+    except (OSError, sqlite3.Error) as e:
+        return _fail("reset-baseline", e)
