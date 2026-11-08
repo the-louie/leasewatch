@@ -58,6 +58,16 @@ class Coerce(Base):
             c.execute("INSERT INTO t VALUES (?)", (res.rows[A]["wifi_signal"],))  # raised OverflowError before
         c.close()
 
+    def test_T09_ip_is_dotted_ipv4_or_empty(self):
+        cases = [("2001:db8::1", ""), ("10.0.0.1 ", "10.0.0.1"), ("010.0.0.1", ""), ("junk", ""), (None, ""),
+                 ("", ""), ("10.0.0.1", "10.0.0.1"), ("::ffff:10.0.0.1", "")]
+        for given, want in cases:
+            with self.subTest(given=given):
+                b = normalise_batch("x", Batch(sightings=[Sighting(mac=A, source="", kind="arp", presence=True,
+                                                                   observed_at=1, ip=given)]))
+                self.assertEqual([s.ip for s in b.sightings], [want])
+                self.assertEqual(b.stats["dropped"], 0)
+
     def test_R127_subclass_records_are_coerced_not_raised(self):
         @dataclass(frozen=True)
         class MySighting(Sighting):

@@ -43,6 +43,7 @@ present (a controller's active client).
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -411,6 +412,15 @@ def _str(v: object, strip: bool) -> str:
     return s.strip() if strip else s
 
 
+def _ipv4(s: str) -> str:
+    """The dotted-quad form of s, or "" for anything else (IPv6, junk, leading zeros): the page sorts and shows `ip`
+    as a dotted quad."""
+    try:
+        return str(ipaddress.IPv4Address(s)) if s else ""
+    except ValueError:
+        return ""
+
+
 def _flag(v: object) -> bool:
     """A flag from a bool or a number, or from text by the words config.py accepts ("false", "0", "no" are False;
     bool("false") would be True); text that is none of them is False, as it asserts nothing. Bytes are read as text:
@@ -427,6 +437,8 @@ def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachm
     t = Sighting if isinstance(r, Sighting) else Attachment  # a subclass has the same fields; type(r) is no table key
     ch: dict = {"mac": mac, "source": name, "observed_at": _int(r.observed_at) or 0}
     ch.update({f: _str(getattr(r, f), f not in _UNSTRIPPED) for f in _STR_FIELDS[t]})
+    if t is Sighting:
+        ch["ip"] = _ipv4(ch["ip"])
     if t is Sighting:  # the merge compares kinds exactly: "DHCP" would silently lose its lease
         ch["kind"] = ch["kind"].lower()
         ch["client_id"] = norm_client_id(ch["client_id"])
@@ -444,13 +456,13 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     bool() or str method raises). A record with a
     valid MAC but a wrong-typed field is kept with its fields coerced (str fields: None -> "", else str() with lone
     surrogates replaced, tab/line breaks as spaces and control/bidi characters removed, then .strip() except ssid/ap/alias; kind lower-cased;
-    client_id in its normal form (norm_client_id);
+    client_id in its normal form (norm_client_id); ip "" unless a dotted IPv4 (rewritten by str(IPv4Address));
     flags -> bool, text by the config words; observed_at -> int or 0; vlan/signal -> int in int64 range or None).
     Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
-    dropped = 0
+    dropped = bad_ip = 0
 
     def fix(records: object, kind: type) -> list:
-        nonlocal dropped
+        nonlocal dropped, bad_ip
         try:  # a list subclass may raise in __iter__
             items = list(records) if isinstance(records, (list, tuple)) else None
         except Exception:
@@ -463,7 +475,10 @@ def normalise_batch(name: str, b: Batch) -> Batch:
             try:  # the MAC too: a str subclass's strip() or a `mac` property may raise
                 mac = norm_mac(r.mac) if isinstance(r, kind) and isinstance(r.mac, str) else ""
                 if mac:
-                    out.append(_coerce(r, mac, name))
+                    c = _coerce(r, mac, name)
+                    if kind is Sighting and c.ip == "" and _str(r.ip, True):
+                        bad_ip += 1
+                    out.append(c)
                     continue
             except Exception:  # any: a MAC or field whose conversion raises is as malformed as a bad MAC
                 pass
@@ -482,6 +497,8 @@ def normalise_batch(name: str, b: Batch) -> Batch:
         _mac_warned.add(name)
         log.warning("connector %s: %d malformed records dropped (invalid MAC, wrong type or unconvertible field)",
                     name, dropped)
+    if bad_ip:
+        log.debug("connector %s: %d sightings with an ip that is not IPv4, ip emptied", name, bad_ip)
     return Batch(sightings=sightings, attachments=attachments,
                  stats={**stats, "dropped": before + dropped})
 

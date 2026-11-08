@@ -85,7 +85,7 @@ One device as one source saw it (an IP, a hostname, a network).
 | `kind` | `str` | What the evidence is: `"dhcp"`, `"arp"`, `"client"` or `"scan"`. See the ranking below. |
 | `presence` | `bool` | `True` only if the source saw the device on the wire **now** (an ARP entry, a lease the DHCP server marks online, an active controller client). A lease or a reservation alone is `False`. |
 | `observed_at` | `int` | Epoch seconds when you collected it (use `ctx.now()`). Informational in API 1; the merge does not rank by it. |
-| `ip` | `str` | IPv4 address, or `""`. |
+| `ip` | `str` | IPv4 address, or `""`. IPv4 only; anything else (IPv6, junk, a leading zero as in `010.0.0.1`) is treated as empty. |
 | `hostname` | `str` | Or `""`. |
 | `vendor` | `str` | Or `""`. |
 | `network` | `str` | Human interface name (`LAN`, `IOT`); shown as the device's network (the `vlan` column). |
