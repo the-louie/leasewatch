@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
 Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting;
-dnsmasq's IPv6 leases too when IPv6 is on), under Kea also the reservation search, under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+dnsmasq's IPv6 leases too when IPv6 is on), under Kea also the reservation search and, when IPv6 is on, the DHCPv6 lease search (privilege "Services: DHCP: Kea(v6)"), under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
@@ -155,6 +155,26 @@ def dnsmasq_leases(rows: list[dict], now: float, ipv6: bool = False) -> list[dic
             continue
         (out6 if v6 else out).append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
     return kea_leases(out) + [{**r, "ip6": r["address"], "address": ""} for r in kea_leases(out6)]
+
+
+def kea_leases6(rows: list[dict]) -> list[dict]:
+    """Kea DHCPv6 rows (/api/kea/leases6/search) in the shape dnsmasq_leases gives IPv6 leases: the address in "ip6",
+    "address" empty, so IPv4 code never sees it. State and type as in kea_leases. Skipped: a lease that is not active,
+    an IA_PD row (a delegated prefix is not an address) and a row whose "hwaddr" is not a MAC (Kea knows it only when
+    one of its mac-sources finds one). "client_id" is the DUID, else the row's client_id."""
+    out = []
+    for l in rows:
+        if not isinstance(l, dict) or _s(l.get("type")).upper() == "IA_PD" or not norm_mac(_s(l.get("hwaddr"))):
+            continue
+        for r in kea_leases([l]):
+            if ":" not in r["address"]:
+                continue
+            out.append({
+                "mac": norm_mac(r["mac"]), "ip6": r["address"], "address": "", "hostname": r["hostname"],
+                "if": r["if"], "if_descr": r["if_descr"], "if_dev": r["if_dev"], "type": r["type"], "status": "",
+                "client_id": _s(l.get("duid")) or r["client_id"],
+            })
+    return out
 
 
 def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
@@ -366,6 +386,10 @@ class Fw1Client:
             log.warning("%s list truncated: %d of %d rows (raise LEASE_ROWS)", what, len(r["rows"]), total)
         return r["rows"]
 
+    def leases6_raw(self) -> list[dict]:
+        """Kea DHCPv6 leases; a search POSTed like the v4 one."""
+        return self._search_rows("/api/kea/leases6/search", "DHCPv6 lease")
+
     def arp_raw(self) -> list[dict]:
         r = self._call("/api/diagnostics/interface/get_arp")
         if isinstance(r, dict):
@@ -390,7 +414,8 @@ class Fw1Client:
 
         With ipv6, the NDP table is also read (best-effort) into "ndp" sightings with ip6 set and online False;
         skipped are rows without a MAC, on an ignored interface, with a link-local or unparsable address, and
-        rows whose MAC is in a permanent ARP entry of this poll (the firewall's own interfaces).
+        rows whose MAC is in a permanent ARP entry of this poll (the firewall's own interfaces). Under Kea, the
+        DHCPv6 lease search is read too (best-effort, stats["kea6_unavailable"] on failure) into "dhcp6" sightings.
 
         ignore_interfaces matches (case-insensitively) the OPNsense identifier (opt3), the device (vlan0110, igc4)
         or the description (Klienter, WAN), because leases and ARP rows name interfaces differently."""
@@ -419,8 +444,20 @@ class Fw1Client:
                     log.warning("NDP table unavailable, listing IPv4 only: %s", e)
                     self._ndp_warned = True
                 ndp_unavailable = True
+        leases6 = None
+        kea6_unavailable = False
+        if ipv6 and self.dhcp_backend == "kea":
+            # the DHCPv6 leases only add IPv6 addresses; an API key without that privilege must not stop the poll
+            try:
+                leases6 = self.leases6_raw()
+                self._kea6_warned = False
+            except Fw1Error as e:
+                if not getattr(self, "_kea6_warned", False):
+                    log.warning("Kea DHCPv6 leases unavailable, listing IPv4 only: %s", e)
+                    self._kea6_warned = True
+                kea6_unavailable = True
         try:
-            out, stats = self._sightings(leases, arp, skip, reservations, ndp, ipv6)
+            out, stats = self._sightings(leases, arp, skip, reservations, ndp, ipv6, leases6)
         except (TypeError, AttributeError, KeyError) as e:
             raise Fw1Error("fw1: unexpected field type in leases/arp") from e
         if labels_unavailable:
@@ -428,15 +465,20 @@ class Fw1Client:
             stats["labels_unavailable"] = 1
         if ndp_unavailable:
             stats["ndp_unavailable"] = 1
+        if kea6_unavailable:
+            stats["kea6_unavailable"] = 1
         return out, stats
 
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None,
-                   ndp: list | None = None, ipv6: bool = False) -> tuple[list[Sighting], dict]:
+                   ndp: list | None = None, ipv6: bool = False,
+                   leases6: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
         if self.dhcp_backend == "dnsmasq":
             lease_rows = dnsmasq_leases(leases, time.time(), ipv6=ipv6)  # the clock read here keeps the parser pure
         else:
             lease_rows = {"kea": kea_leases}.get(self.dhcp_backend, isc_leases)(leases)
+        if leases6:
+            lease_rows = lease_rows + kea_leases6(leases6)
         lease6 = [l for l in lease_rows if l.get("ip6")]  # dnsmasq IPv6 leases stay out of the IPv4 lease logic
         if lease6:
             lease_rows = [l for l in lease_rows if not l.get("ip6")]
@@ -528,7 +570,7 @@ class Fw1Client:
         stats = {"leases": len(leases), "arp": len(arp)}
         if reservations is not None:
             stats["reservations"] = len(reservations)
-        if ipv6 and self.dhcp_backend == "dnsmasq":
+        if ipv6 and (self.dhcp_backend == "dnsmasq" or (self.dhcp_backend == "kea" and leases6 is not None)):
             stats["leases6"] = kept6
         if ndp is not None:
             stats["ndp"] = kept

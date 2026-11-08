@@ -1,6 +1,6 @@
 import unittest
 
-from leasewatch.fw1 import Fw1Client, Sighting, dnsmasq_leases
+from leasewatch.fw1 import Fw1Client, Fw1Error, Sighting, dnsmasq_leases
 
 DNSMASQ = "/api/dnsmasq/leases/search"
 HOSTS = "/api/dnsmasq/settings/search_host"
@@ -88,14 +88,81 @@ class Dhcp6Tests(unittest.TestCase):
         out, stats = StubClient("dnsmasq", ROWS).sightings(("LAN",), ipv6=True)
         self.assertEqual((out, stats["leases6"]), ([], 0))
 
-    def test_kea_ignores_the_flag(self):
-        kea_rows = [{"hwaddr": MAC, "address": "10.0.1.10", "hostname": "pc1", "if_name": "opt1", "if_descr": "LAN",
-                     "state": 0}]
-        off = StubClient("kea", kea_rows).sightings(())
-        on = StubClient("kea", kea_rows).sightings((), ipv6=True)
+    def test_kea_without_v6_leases_adds_only_counters(self):
+        off = StubClient("kea", KEA4_ROWS).sightings(())
+        on = Kea6Stub([]).sightings((), ipv6=True)
         self.assertEqual(on[0], off[0])
-        self.assertEqual(on[1], {**off[1], "ndp": 0})
-        self.assertNotIn("leases6", on[1])
+        self.assertEqual(on[1], {**off[1], "ndp": 0, "leases6": 0})
+
+
+KEA6 = "/api/kea/leases6/search"
+V6 = {"address": "2001:db8:1::20", "prefix_len": 128, "type": "IA_NA", "hwaddr": "02:00:00:00:00:02", "duid": "00:03:00:01:02:00:00:00:00:02",
+      "hostname": "pc2.lan.", "state": 0, "if": "vlan0110", "if_name": "opt1", "if_descr": "LAN"}
+KEA6_ROWS = [
+    V6,
+    {**V6, "address": "2001:db8:1:1::", "prefix_len": 56, "type": "IA_PD"},
+    {**V6, "address": "2001:db8:1::21", "state": 1},
+    {**V6, "address": "2001:db8:1::22", "hwaddr": ""},
+]
+KEA4_ROWS = [{"hwaddr": MAC, "address": "10.0.1.10", "hostname": "pc1", "if_name": "opt1", "if_descr": "LAN", "state": 0}]
+
+
+class Kea6Stub(StubClient):
+    def __init__(self, rows6=None, fail6=False):
+        super().__init__("kea", KEA4_ROWS)
+        self.rows6 = KEA6_ROWS if rows6 is None else rows6
+        self.fail6 = fail6
+
+    def _call(self, path, body=None):
+        if path == KEA6:
+            self.paths.append(path)
+            if self.fail6:
+                raise Fw1Error("fw1 /api/kea/leases6/search: HTTP 403")
+            return {"total": len(self.rows6), "rows": self.rows6}
+        return super()._call(path, body)
+
+
+class Kea6Tests(unittest.TestCase):
+    def test_one_dhcp6_sighting(self):
+        c = Kea6Stub()
+        out, stats = c.sightings((), ipv6=True)
+        self.assertEqual([s.source for s in out], ["dhcp", "dhcp6"])
+        self.assertEqual(out[1], Sighting(
+            mac="02:00:00:00:00:02", ip="", hostname="pc2.lan", vendor="", vlan="LAN", iface="opt1", source="dhcp6",
+            lease_type="dynamic", online=False, client_id="00:03:00:01:02:00:00:00:00:02", label="", ip6="2001:db8:1::20"))
+        self.assertEqual(stats["leases6"], 1)
+        self.assertNotIn("kea6_unavailable", stats)
+        self.assertIn(KEA6, c.paths)
+
+    def test_static_type_follows_the_row(self):
+        out, _ = Kea6Stub([{**V6, "is_reserved": "1"}]).sightings((), ipv6=True)
+        self.assertEqual(out[1].lease_type, "static")
+
+    def test_off_makes_no_call(self):
+        c = Kea6Stub()
+        out, stats = c.sightings(())
+        self.assertNotIn(KEA6, c.paths)
+        self.assertEqual([s.source for s in out], ["dhcp"])
+        self.assertEqual(stats, {"leases": 1, "arp": 0, "reservations": 0})
+
+    def test_failure_keeps_the_rest(self):
+        with self.assertLogs("leasewatch.fw1", "WARNING"):
+            out, stats = Kea6Stub(fail6=True).sightings((), ipv6=True)
+        self.assertEqual([s.source for s in out], ["dhcp"])
+        self.assertEqual(stats, {"leases": 1, "arp": 0, "reservations": 0, "ndp": 0, "kea6_unavailable": 1})
+
+    def test_one_warning_per_spell(self):
+        c = Kea6Stub(fail6=True)
+        with self.assertLogs("leasewatch.fw1", "WARNING") as cm:
+            c.sightings((), ipv6=True)
+            c.sightings((), ipv6=True)
+        self.assertEqual(len(cm.output), 1)
+        c.fail6 = False
+        c.sightings((), ipv6=True)
+        c.fail6 = True
+        with self.assertLogs("leasewatch.fw1", "WARNING") as cm:
+            c.sightings((), ipv6=True)
+        self.assertEqual(len(cm.output), 1)
 
 
 if __name__ == "__main__":
