@@ -24,7 +24,7 @@ from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec
 from .connectors.merge import is_private_mac
-from .db import AlreadyADevice, Database, UnknownDevices
+from .db import CONTROL_CHARS, AlreadyADevice, Database, UnknownDevices
 from .fw1 import MAC_RE
 
 log = logging.getLogger("leasewatch.web")
@@ -298,6 +298,12 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self._error(404, "not found")
         self._api_device_post(m.group(1), p)
+
+    def _actor(self) -> str:
+        """Who a write is from, for the event detail: the socket peer (never a forwarded header) and the login name
+        when the login is on."""
+        who = self.client_address[0] + (" " + self.cfg.auth_user if self.cfg.auth_enabled else "")
+        return CONTROL_CHARS.sub("", who)[:80]
 
     def _write_ok(self) -> bool:
         """True when this client may change data; else the 403 is sent. The socket peer only: X-Forwarded-For is
@@ -656,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
         if fields is None:
             return
         try:
-            d = self.db.update_user_fields(mac, *fields)
+            d = self.db.update_user_fields(mac, *fields, actor=self._actor())
         except Exception:
             log.exception("POST %s failed", p)
             return self._error(500, "internal error")
@@ -705,7 +711,7 @@ class Handler(BaseHTTPRequestHandler):
         if acked is None and archived is None:  # {"acked": null}
             return self._error(400, "bulk takes acked or archived")
         try:
-            changed, unchanged = self.db.update_many(macs, acked=acked, archived=archived)
+            changed, unchanged = self.db.update_many(macs, acked=acked, archived=archived, actor=self._actor())
         except UnknownDevices as e:
             return self._json({"error": "unknown device", "unknown": e.macs}, 404)
         except Exception:

@@ -40,7 +40,7 @@ class BulkTests(_Bulk):
         for m in MACS:
             self.assertEqual(acked[m]["acked"], 1)
             self.assertIsNotNone(acked[m]["acked_at"])
-        self.assertEqual(sorted(self.events()), sorted((m, "acked", "") for m in MACS))
+        self.assertEqual(sorted(self.events()), sorted((m, "acked", "by 127.0.0.1") for m in MACS))
         # the same state again: no event, counted as unchanged
         st, body = self.bulk({"macs": MACS, "acked": True})
         self.assertEqual((st, body), (200, {"changed": 0, "unchanged": 3}))
@@ -80,7 +80,7 @@ class BulkTests(_Bulk):
         self.db.q("INSERT INTO aliases(mac,device,reason,merged_ts,last_seen) VALUES(?,?,'hostname',1,1)", (ALIAS, MACS[0]))
         st, body = self.bulk({"macs": [ALIAS, MACS[0], MACS[1]], "acked": True})
         self.assertEqual((st, body), (200, {"changed": 2, "unchanged": 0}))
-        self.assertEqual(sorted(self.events()), [(MACS[0], "acked", ""), (MACS[1], "acked", "")])
+        self.assertEqual(sorted(self.events()), [(MACS[0], "acked", "by 127.0.0.1"), (MACS[1], "acked", "by 127.0.0.1")])
 
     def test_limits_and_shapes(self) -> None:
         many = [f"02:00:00:{n >> 8:02x}:{n & 0xff:02x}:00" for n in range(201)]

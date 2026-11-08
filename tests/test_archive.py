@@ -135,17 +135,17 @@ class ApiTests(WebTestCase):
         ts = body["device"]["archived_ts"]
         self.assertIsInstance(ts, int)
         self.assertIsNone(self.db.device(MAC2)["mail_queued"])  # an archived device leaves the mail queue
-        self.assertEqual(self.events(MAC2, "archived"), [""])
+        self.assertEqual(self.events(MAC2, "archived"), ["by 127.0.0.1"])
         # the same state again: no change, no event
         status, body, _ = self.post(MAC2, {"archived": True})
         self.assertEqual((status, body["device"]["archived_ts"]), (200, ts))
-        self.assertEqual(self.events(MAC2, "archived"), [""])
+        self.assertEqual(self.events(MAC2, "archived"), ["by 127.0.0.1"])
         status, body, _ = self.post(MAC2, {"archived": False})
         self.assertEqual(status, 200)
         self.assertIsNone(body["device"]["archived_ts"])
-        self.assertEqual(self.events(MAC2, "restored"), [""])
+        self.assertEqual(self.events(MAC2, "restored"), ["by 127.0.0.1"])
         self.post(MAC2, {"archived": False})
-        self.assertEqual(self.events(MAC2, "restored"), [""])
+        self.assertEqual(self.events(MAC2, "restored"), ["by 127.0.0.1"])
 
     def test_archived_must_be_boolean(self):
         for v in ("yes", 1, 0, [], {}):

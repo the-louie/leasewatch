@@ -394,12 +394,12 @@ class Database:
         return [dict(r) for r in self.q(sql, (*params, limit))]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
-                           archived: bool | None = None) -> dict | None:
+                           archived: bool | None = None, *, actor: str = "") -> dict | None:
         with self.tx() as c:
             key = self._resolve(c, mac)
             if not key:
                 return None
-            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived)[0]
+            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor)[0]
 
     def split_alias(self, device_mac: str, alias: str) -> tuple[dict, dict] | None:
         """Turn the alias MAC of a device back into a device of its own: (the device, the new row), or None when
@@ -432,7 +432,7 @@ class Database:
             return out[0], out[1]
 
     def update_many(self, macs: list[str], acked: bool | None = None,
-                    archived: bool | None = None) -> tuple[list[str], list[str]]:
+                    archived: bool | None = None, *, actor: str = "") -> tuple[list[str], list[str]]:
         """Set acked or archived on several devices in one transaction: (changed keys, unchanged keys). An alias MAC
         counts as its device, and a device named twice counts once. Raises UnknownDevices (nothing written) when any
         MAC is neither a device nor an alias."""
@@ -452,7 +452,7 @@ class Database:
             changed: list[str] = []
             unchanged: list[str] = []
             for key in keys:
-                (changed if self._apply_user_fields(c, key, now, acked, None, None, archived)[1] else unchanged).append(key)
+                (changed if self._apply_user_fields(c, key, now, acked, None, None, archived, actor)[1] else unchanged).append(key)
             return changed, unchanged
 
     def _resolve(self, c: sqlite3.Connection, mac: str) -> str:
@@ -465,19 +465,23 @@ class Database:
 
     @staticmethod
     def _apply_user_fields(c: sqlite3.Connection, mac: str, now: int, acked: bool | None, name: str | None,
-                           note: str | None, archived: bool | None) -> tuple[dict, bool]:
+                           note: str | None, archived: bool | None, actor: str = "") -> tuple[dict, bool]:
         """Write the user fields of the existing device mac inside the caller's transaction: (the row, whether an
-        acked/unacked or archived/restored event was written)."""
+        acked/unacked or archived/restored event was written). Every event names the actor (who made the change);
+        a rename or note change writes its own event, a note event holds the lengths and never the text."""
         cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
         sets, params = [], []
         if acked is not None:
             sets.append("acked=?"); params.append(1 if acked else 0)
             if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
                 sets.append("acked_at=?"); params.append(now if acked else None)
+        new_name = new_note = None
         if name is not None:
-            sets.append("name=?"); params.append(CONTROL_CHARS.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
+            new_name = CONTROL_CHARS.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip()  # strip first too: leading blanks must not use up the limit
+            sets.append("name=?"); params.append(new_name)
         if note is not None:
-            sets.append("note=?"); params.append(CONTROL_CHARS.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
+            new_note = CONTROL_CHARS.sub("", note).strip()[:1000].rstrip()  # the cut can end on a blank
+            sets.append("note=?"); params.append(new_note)
         # archive: the device leaves the list and the mail queue; the same state again changes nothing
         arch_change = archived is not None and (cur["archived_ts"] is not None) != archived
         if arch_change:
@@ -488,10 +492,20 @@ class Database:
         if sets:
             params.append(mac)
             c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
+            who = f"by {actor}" if actor else ""
+            by = f" (by {actor})" if actor else ""
             if ack_change:
-                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "acked" if acked else "unacked", ""))
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "acked" if acked else "unacked", who))
             if arch_change:
-                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "archived" if archived else "restored", ""))
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (now, mac, "archived" if archived else "restored", who))
+            # only a real change of the cleaned text is an event; the same value again writes nothing
+            old_name, old_note = cur["name"] or "", cur["note"] or ""
+            if new_name is not None and new_name != old_name:
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
+                          (now, mac, "renamed", f"{old_name[:40] or '(none)'} -> {new_name[:40] or '(none)'}{by}"))
+            if new_note is not None and new_note != old_note:
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
+                          (now, mac, "note", f"note changed ({len(old_note)} -> {len(new_note)} chars){by}"))
         return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()), ack_change or arch_change
 
     def stats(self, new_days: int) -> dict:
