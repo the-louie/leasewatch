@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
-Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting),
-under Kea also the reservation search, under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting;
+dnsmasq's IPv6 leases too when IPv6 is on), under Kea also the reservation search, under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class Sighting:
     vendor: str
     vlan: str          # human name of the interface (LAN, IOT, ...)
     iface: str         # OPNsense identifier (opt3, ...)
-    source: str        # "dhcp" | "arp" | "ndp"
+    source: str        # "dhcp" | "dhcp6" | "arp" | "ndp"
     lease_type: str    # "dynamic" | "static" | "" (arp only)
     online: bool
     client_id: str = ""  # as the server sends it (ISC: already hex); connectors.merge.norm_client_id normalises it
@@ -132,14 +132,20 @@ def kea_leases(rows: list[dict]) -> list[dict]:
     return out
 
 
-def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
+def dnsmasq_leases(rows: list[dict], now: float, ipv6: bool = False) -> list[dict]:
     """dnsmasq rows (/api/dnsmasq/leases/search) in the common shape. They use the Kea key names but have no "state"
-    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname and client id, and include IPv6 leases, which leasewatch does not track. As in the contrib dnsmasq_leases connector, skipped: a hardware address with a type prefix
+    (every listed lease counts as active, kea_leases' default), write "*" for an empty hostname and client id, and include IPv6 leases. As in the contrib dnsmasq_leases connector, skipped: a hardware address with a type prefix
     ("<type>-<bytes>": not Ethernet, or empty; norm_mac would turn a 5-byte one into a fake MAC) and a lease whose
-    "expire" is not 0 (infinite) and not after `now` (dnsmasq prunes it only later)."""
+    "expire" is not 0 (infinite) and not after `now` (dnsmasq prunes it only later).
+    IPv6 leases are dropped, unless ipv6 is set: then one whose hwaddr is a MAC (not empty, "*" or type-prefixed) is
+    kept, after the IPv4 rows, with the address in "ip6" and "address" empty, so IPv4 code never sees it."""
     out = []
+    out6 = []
     for l in rows:
-        if not isinstance(l, dict) or ":" in _s(l.get("address")) or "-" in _s(l.get("hwaddr")):
+        if not isinstance(l, dict) or "-" in _s(l.get("hwaddr")):
+            continue
+        v6 = ":" in _s(l.get("address"))
+        if v6 and not (ipv6 and norm_mac(_s(l.get("hwaddr")))):
             continue
         try:
             expire = int(l.get("expire") or 0)
@@ -147,8 +153,8 @@ def dnsmasq_leases(rows: list[dict], now: float) -> list[dict]:
             expire = 0
         if expire and expire <= now:
             continue
-        out.append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
-    return kea_leases(out)
+        (out6 if v6 else out).append({**l, **{k: "" for k in ("hostname", "client_id") if _s(l.get(k)) == "*"}})
+    return kea_leases(out) + [{**r, "ip6": r["address"], "address": ""} for r in kea_leases(out6)]
 
 
 def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
@@ -414,7 +420,7 @@ class Fw1Client:
                     self._ndp_warned = True
                 ndp_unavailable = True
         try:
-            out, stats = self._sightings(leases, arp, skip, reservations, ndp)
+            out, stats = self._sightings(leases, arp, skip, reservations, ndp, ipv6)
         except (TypeError, AttributeError, KeyError) as e:
             raise Fw1Error("fw1: unexpected field type in leases/arp") from e
         if labels_unavailable:
@@ -425,12 +431,15 @@ class Fw1Client:
         return out, stats
 
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None,
-                   ndp: list | None = None) -> tuple[list[Sighting], dict]:
+                   ndp: list | None = None, ipv6: bool = False) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
         if self.dhcp_backend == "dnsmasq":
-            lease_rows = dnsmasq_leases(leases, time.time())  # the clock read here keeps the parser pure
+            lease_rows = dnsmasq_leases(leases, time.time(), ipv6=ipv6)  # the clock read here keeps the parser pure
         else:
             lease_rows = {"kea": kea_leases}.get(self.dhcp_backend, isc_leases)(leases)
+        lease6 = [l for l in lease_rows if l.get("ip6")]  # dnsmasq IPv6 leases stay out of the IPv4 lease logic
+        if lease6:
+            lease_rows = [l for l in lease_rows if not l.get("ip6")]
         if reservations:
             # an active lease already carries what its reservation says, except the description (label);
             # only lease-less reservations are added as rows
@@ -462,6 +471,19 @@ class Fw1Client:
                 source="dhcp", lease_type=lease_type,
                 online=l.get("status") == "online", client_id=_s(l.get("client_id")),
                 label=_s(l.get("label"))[:LABEL_MAX],
+            ))
+        kept6 = 0
+        for l in lease6:
+            mac = norm_mac(_s(l.get("mac")))
+            if not mac or skip(l.get("if"), l.get("if_dev"), l.get("if_descr")):
+                continue
+            lease_type = _s(l.get("type")).lower()
+            kept6 += 1
+            out.append(Sighting(
+                mac=mac, ip="", hostname=_s(l.get("hostname")), vendor="",
+                vlan=_s(l.get("if_descr")) or _s(l.get("if")), iface=_s(l.get("if")),
+                source="dhcp6", lease_type=lease_type if lease_type in ("dynamic", "static") else "dynamic",
+                online=False, client_id=_s(l.get("client_id")), ip6=_s(l.get("ip6")).split("%", 1)[0],
             ))
         own: set[str] = set()  # MACs of permanent ARP entries: the firewall's own interfaces
         for a in arp:
@@ -506,6 +528,8 @@ class Fw1Client:
         stats = {"leases": len(leases), "arp": len(arp)}
         if reservations is not None:
             stats["reservations"] = len(reservations)
+        if ipv6 and self.dhcp_backend == "dnsmasq":
+            stats["leases6"] = kept6
         if ndp is not None:
             stats["ndp"] = kept
         return out, stats
