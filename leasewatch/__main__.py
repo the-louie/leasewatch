@@ -576,12 +576,18 @@ def types_line() -> str:
 class _JsonFormatter(logging.Formatter):
     """One JSON object per record on one line: ts (local time, ms, UTC offset), level, logger, msg, exc (if any)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        # a non-UTF-8 stderr would turn raw characters into \xNN, which is not JSON
+        enc = (getattr(sys.stderr, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        self._ascii = enc != "utf8"
+
     def format(self, record: logging.LogRecord) -> str:
         out = {"ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
                "level": record.levelname, "logger": record.name, "msg": record.getMessage()}
         if record.exc_info:
             out["exc"] = self.formatException(record.exc_info)
-        return json.dumps(out, ensure_ascii=False, default=str)
+        return json.dumps(out, ensure_ascii=self._ascii, default=str)
 
 
 def _log_setup(level: str, fmt: str) -> bool:

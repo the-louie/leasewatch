@@ -724,14 +724,17 @@ def _auto_archive(rows: dict[str, dict], cfg: Config, state: MergeState, now: in
     # PRUNE_DAYS: archive what has been offline that long and was never named or marked known; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
     # PRUNE_PRIVATE_DAYS: a shorter threshold for a private MAC that never merged (no name, note, ack, split origin
-    # or alias pointing at it)
+    # or alias pointing at it), never longer than PRUNE_DAYS
     if (cfg.prune_days > 0 or cfg.prune_private_days > 0) and not state.first_run:
         ref = now if state.prune_now is None else state.prune_now
         targets = set(state.aliases.values())
         for mac, row in rows.items():
             private = (cfg.prune_private_days > 0 and is_private_mac(mac) and not row["name"] and not row.get("note")
                        and not row.get("split_from") and mac not in targets)
-            days = cfg.prune_private_days if private else cfg.prune_days
+            if private:
+                days = min(cfg.prune_private_days, cfg.prune_days) if cfg.prune_days > 0 else cfg.prune_private_days
+            else:
+                days = cfg.prune_days
             if days <= 0:
                 continue
             since = row["last_online"] or row["first_seen"]

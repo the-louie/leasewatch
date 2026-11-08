@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodySeparatorDefect
@@ -792,6 +793,15 @@ class Server(ThreadingHTTPServer):
         self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
         self._refused_lock = threading.Lock()
         self._refused = 0  # refused since the last accepted connection
+
+    def handle_error(self, request: object, client_address: object) -> None:  # type: ignore[override]
+        # socketserver's default prints a dashed block and a raw traceback to stderr: not one log record per line
+        exc = sys.exc_info()[1]
+        who = client_address[0] if isinstance(client_address, tuple) and client_address else client_address
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)):
+            log.debug("client %s: %s", who, exc)  # the client went away mid-request: nothing to fix here
+        else:
+            log.error("request from %s failed", who, exc_info=True)
 
     def process_request(self, request: socket.socket, client_address: object) -> None:  # type: ignore[override]
         if not self._slots.acquire(blocking=False):

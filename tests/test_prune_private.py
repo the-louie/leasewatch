@@ -32,7 +32,7 @@ class PrunePrivateTests(unittest.TestCase):
         return merge({r["mac"]: r for r in prev}, {"fw1": Batch(sightings=[])}, Config(), NOW, MergeState(**state))
 
     def off(self, days, mac=PRIV, **kw):
-        return row(mac, online=0, last_online=NOW - days * DAY, **kw)
+        return row(mac, online=0, last_online=NOW - int(days * DAY), **kw)
 
     def archived(self, res):
         return sorted((m, d) for m, k, d in res.events if k == "archived")
@@ -68,10 +68,16 @@ class PrunePrivateTests(unittest.TestCase):
     def test_first_run_never_archives(self):
         self.assertEqual(self.run_merge([self.off(100)], 7, 0, first_run=True).rows, {})
 
-    def test_fold_window_not_archived(self):
-        # within its first day a private row cannot be archived: the minimum of 2 days leaves the fold window open
-        prev = [row(PRIV, online=0, first_seen=NOW - DAY, last_online=None)]
-        self.assertEqual(self.run_merge(prev, 2, 0).rows, {})
+    def test_two_day_boundary(self):
+        # the minimum of 2 days: a private row offline 1.5 days stays, one offline 2.5 days is archived
+        self.assertEqual(self.run_merge([self.off(1.5)], 2, 0, prune_now=NOW).rows, {})
+        res = self.run_merge([self.off(2.5)], 2, 0, prune_now=NOW)
+        self.assertEqual(self.archived(res), [(PRIV, "auto (private): not online for 2 days")])
+
+    def test_never_longer_than_prune_days(self):
+        self.assertEqual(self.run_merge([self.off(6)], 30, 7).rows, {})
+        res = self.run_merge([self.off(10)], 30, 7)
+        self.assertEqual(self.archived(res), [(PRIV, "auto (private): not online for 10 days")])
 
     def validate(self, value):
         os.environ["PRUNE_PRIVATE_DAYS"] = value

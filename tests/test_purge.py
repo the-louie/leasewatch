@@ -123,6 +123,21 @@ class PurgeTests(Base):
         self.assertIsNone(d["archived_ts"])
         self.assertIn("back", [e["kind"] for e in self.db.events(GONE)])
 
+    def test_a_device_still_listed_offline_is_not_purged(self):
+        self.build(PURGE_DAYS="180")
+        self.poll(T0)
+        listed = "aa:bb:cc:00:00:31"
+        self.seed(GONE)
+        self.seed(listed)
+        # a static reservation: listed every poll, so last_seen moves, while it stays offline
+        self.client.sightings_data.append(S(listed, "10.0.0.31", lt="static", online=False))
+        self.poll(T0 + 120)
+        d = self.db.device(listed)
+        self.assertIsNotNone(d)
+        self.assertEqual((d["online"], d["last_seen"]), (0, T0 + 120))
+        self.assertIsNotNone(d["archived_ts"])
+        self.assertEqual(self.counts(GONE), self.NONE)
+
     def test_never_at_the_first_poll(self):
         self.build(PURGE_DAYS="180")
         self.seed(GONE)
@@ -146,13 +161,17 @@ class PurgeTests(Base):
         self.poll(T0)
         base = row("x", first_seen=T0 - 400 * DAY, last_seen=T0 - 300 * DAY, last_online=T0 - 300 * DAY, online=0,
                    archived_ts=T0 - 200 * DAY)
-        rows = [tuple({**base, "mac": f"02:00:00:00:{i // 256:02x}:{i % 256:02x}"}.values()) for i in range(1001)]
+        # the hint counts rows, not devices: 20 devices with 60 history rows each are 1220 rows
+        macs = [f"02:00:00:00:00:{i:02x}" for i in range(20)]
         with self.db.tx() as c:
-            c.executemany(f"INSERT INTO devices({','.join(base)}) VALUES({','.join('?' * len(base))})", rows)
+            c.executemany(f"INSERT INTO devices({','.join(base)}) VALUES({','.join('?' * len(base))})",
+                          [tuple({**base, "mac": mac}.values()) for mac in macs])
+            c.executemany("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)",
+                          [(mac, T0 - 300 * DAY + k, "10.0.0.9", "", "Clients", "") for mac in macs for k in range(60)])
         with self.assertLogs("leasewatch", "INFO") as logs:
             self.poll(T0 + 120)
         lines = [r.getMessage() for r in logs.records]
-        self.assertIn("purged 1001 archived devices (PURGE_DAYS=180)", lines)
+        self.assertIn("purged 20 archived devices (1220 rows, PURGE_DAYS=180)", lines)
         self.assertIn('run "python -m leasewatch vacuum" to give the space back to the file system', lines)
         self.assertEqual(self.db.q("SELECT COUNT(*) FROM devices")[0][0], 1)  # the anchor
 
@@ -163,7 +182,7 @@ class PurgeTests(Base):
         with self.assertLogs("leasewatch", "INFO") as logs:
             self.poll(T0 + 120)
         lines = [r.getMessage() for r in logs.records]
-        self.assertIn("purged 1 archived devices (PURGE_DAYS=180)", lines)
+        self.assertIn("purged 1 archived devices (6 rows, PURGE_DAYS=180)", lines)
         self.assertFalse([x for x in lines if "vacuum" in x])
 
 

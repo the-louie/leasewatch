@@ -182,6 +182,49 @@ class ClientGoneTests(Base):
         self.assertEqual(errors, [])
 
 
+class HandleErrorTests(Base):
+    def test_G1_handle_error_is_overridden_and_logs_one_record(self) -> None:
+        import socketserver
+        self.assertIsNot(web.Server.handle_error, socketserver.BaseServer.handle_error)
+        srv = web.Server(("127.0.0.1", 0), self.H)
+        try:
+            with self.assertLogs("leasewatch.web", "DEBUG") as cm:
+                try:
+                    raise ConnectionResetError("reset by peer")
+                except ConnectionResetError:
+                    srv.handle_error(None, ("127.0.0.1", 1))
+            self.assertEqual([r.levelno for r in cm.records], [logging.DEBUG])
+            self.assertIn("127.0.0.1", cm.records[0].getMessage())
+            with self.assertLogs("leasewatch.web", "DEBUG") as cm:
+                try:
+                    raise RuntimeError("boom")
+                except RuntimeError:
+                    srv.handle_error(None, ("127.0.0.1", 1))
+            self.assertEqual([r.levelno for r in cm.records], [logging.ERROR])
+            self.assertTrue(cm.records[0].exc_info)
+        finally:
+            srv.server_close()
+
+    def test_G1_partial_request_line_then_reset_logs_at_debug(self) -> None:
+        srv = web.Server(("127.0.0.1", 0), self.H)
+        t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        t.start()
+        try:
+            with self.assertLogs("leasewatch.web", "DEBUG") as cm:
+                s = socket.create_connection(srv.server_address, timeout=5)
+                s.sendall(b"GET /api/sta")
+                time.sleep(0.3)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                s.close()
+                time.sleep(0.5)
+                logging.getLogger("leasewatch.web").debug("end")  # assertLogs fails on zero records
+        finally:
+            srv.shutdown(); srv.server_close(); t.join(timeout=5)
+        client = [r for r in cm.records if r.getMessage().startswith("client ")]
+        self.assertEqual([r.levelno for r in client], [logging.DEBUG])
+        self.assertIn("127.0.0.1", client[0].getMessage())
+
+
 class RequestTargetTests(Base):
     def test_R99_absolute_form_root_serves_the_page(self) -> None:
         for path in ("http://127.0.0.1:8080/", "http://127.0.0.1:8080/?x=1"):

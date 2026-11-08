@@ -12,8 +12,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import S  # noqa: E402
-from test_collector import FakeClient  # noqa: E402
+from _fixtures import S, FakeClient  # noqa: E402
 from leasewatch.collector import EVENT_DAYS, HISTORY_PER_MAC, Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
@@ -114,6 +113,11 @@ class WarningTests(Base):
         out = self.collector_logs(EVENT_DAYS="30", PRUNE_DAYS="90")
         self.assertEqual(len(out), 1)
         self.assertIn("EVENT_DAYS=30", out[0])
+
+    def test_warns_against_prune_private_days_with_prune_days_off(self):
+        out = self.collector_logs(EVENT_DAYS="7", PRUNE_DAYS="0", PRUNE_PRIVATE_DAYS="30")
+        self.assertEqual(len(out), 1)
+        self.assertIn("EVENT_DAYS=7 is below PRUNE_PRIVATE_DAYS=30", out[0])
 
     def test_silent_for_defaults_and_for_prune_off(self):
         self.assertEqual(self.collector_logs(), [])

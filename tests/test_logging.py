@@ -1,9 +1,11 @@
+import io
 import json
 import logging
 import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from leasewatch.__main__ import _JsonFormatter  # noqa: E402
@@ -26,6 +28,11 @@ class LogFormatTest(unittest.TestCase):
         d = json.loads(first)
         self.assertEqual(set(d), {"ts", "level", "logger", "msg"})
         self.assertRegex(d["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$")
+
+    def test_json_line_stays_json_when_stderr_is_not_utf8(self):
+        first = run_service(LOG_FORMAT="json", LOG_LEVEL="DEB\u00dcG", PYTHONIOENCODING="ascii").splitlines()[0]
+        self.assertIn("\\u00dc", first)
+        self.assertIn("DEB\u00dcG", json.loads(first)["msg"])
 
     def test_plain_and_auto_differ_under_journald(self):
         plain = run_service(LOG_FORMAT="plain", LOG_LEVEL="verbose").splitlines()[0]
@@ -51,6 +58,17 @@ class LogFormatTest(unittest.TestCase):
         line = _JsonFormatter().format(record("host %s åäö ✓", ("räv",)))
         self.assertNotIn("exc", json.loads(line))
         self.assertIn("host räv åäö ✓", line)
+
+    def test_formatter_with_ascii_stderr_escapes(self):
+        with mock.patch.object(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="ascii")):
+            line = _JsonFormatter().format(record("ä"))
+        self.assertIn("\\u00e4", line)
+        self.assertEqual(json.loads(line)["msg"], "ä")
+
+    def test_formatter_with_utf8_stderr_keeps_raw(self):
+        with mock.patch.object(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
+            line = _JsonFormatter().format(record("ä"))
+        self.assertIn("ä", line)
 
 
 if __name__ == "__main__":
