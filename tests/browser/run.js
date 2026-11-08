@@ -93,6 +93,22 @@ const scenarios = {
     }
     return { chips, per, rows_after: (await rowNames(page)).length };
   },
+  // ?lang= is not a filter: a filter click and Clear filters keep it in the address
+  async lang_param(page, base) {
+    await page.goto(`${base}?lang=en`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    const res = await page.evaluate(() => ({ html_lang: document.documentElement.lang, data_lang: document.documentElement.dataset.lang,
+      strings: typeof window.LW_STRINGS?.en }));
+    await page.click('.card[data-filter="new"]');
+    await page.waitForFunction(() => new URLSearchParams(location.search).get('filter') === 'new');
+    res.filtered = await page.evaluate(() => location.search);
+    await page.type('#q', 'zzz-nothing');
+    await page.waitForSelector('#empty:not(.hidden) #emptyClear:not(.hidden)');
+    await page.click('#emptyClear');
+    await page.waitForFunction(() => !new URLSearchParams(location.search).has('filter'));
+    res.cleared = await page.evaluate(() => location.search);
+    return res;
+  },
   async search(page) {
     const res = {};
     for (const q of ['ipad', '10.0.2.', '02:00:00:00:00:0c', 'zzz-nothing']) {

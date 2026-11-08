@@ -515,8 +515,9 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         with open(path, "rb") as f:
             body = f.read()
-        if path == INDEX:  # VERSION first: a site name containing "{{VERSION}}" stays literal
+        if path == INDEX:  # SITE_NAME last: a site name containing "{{VERSION}}" or "{{UI_LANG}}" stays literal
             body = (body.replace(b"{{VERSION}}", html.escape(self.app_version).encode())
+                    .replace(b"{{UI_LANG}}", html.escape(self.cfg.ui_lang).encode())
                     .replace(b"{{SITE_NAME}}", html.escape(self.cfg.site_name).encode()))
         self._send(200, body, ctype, {"Cache-Control": "no-cache"})
 

@@ -809,6 +809,28 @@ class ServerEdgeCaseTests(WebTestCase):
         st, _, body = self.req("GET", "/")
         self.assertEqual(st, 200); self.assertIn(b"A{{VERSION}}B", body)
 
+    def test_site_name_with_ui_lang_placeholder_stays_literal(self):
+        self.cfg.site_name = "A{{UI_LANG}}B"
+        st, _, body = self.req("GET", "/")
+        self.assertEqual(st, 200); self.assertIn(b"<title>A{{UI_LANG}}B</title>", body)
+        self.assertIn(b'data-lang="auto"', body)
+
+    def test_index_carries_the_ui_language(self):
+        st, _, body = self.req("GET", "/")
+        self.assertEqual(st, 200); self.assertIn(b'<html lang="en" data-lang="auto">', body)
+        self.cfg.ui_lang = "sv"
+        st, _, body = self.req("GET", "/")
+        self.assertEqual(st, 200); self.assertIn(b'<html lang="en" data-lang="sv">', body)
+        # the strings load before the app (both deferred, so in document order)
+        self.assertLess(body.index(b'<script src="/static/i18n.js" defer>'), body.index(b'<script src="/static/app.js" defer>'))
+
+    def test_strings_file_is_served_with_the_csp(self):
+        st, headers, body = self.req("GET", "/static/i18n.js")
+        self.assertEqual(st, 200)
+        self.assertIn(headers["Content-Type"], ("text/javascript; charset=utf-8", "application/javascript; charset=utf-8"))
+        self.assertEqual(headers["Content-Security-Policy"], CSP)
+        self.assertIn(b"window.LW_STRINGS", body)
+
     def test_connector_labels(self):
         # the switch's NAME and "Wi-Fi" as dot text, the instance name stays in "name"
         self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("switch", "snmp_switch", {"name": "sw-rack"}),

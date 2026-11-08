@@ -4,6 +4,28 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
+  // ---------- language ----------
+  // the strings come from i18n.js (window.LW_STRINGS); without it every text falls back to its key
+  const T = window.LW_STRINGS || { en: {} };
+  // ?lang= in the address, then UI_LANG from the server (data-lang; "auto" goes on), then the browser's first language
+  function pickLang() {
+    const q = new URLSearchParams(location.search).get("lang");
+    if (q === "en" || q === "sv") return q;
+    const d = document.documentElement.dataset.lang;
+    if (d === "en" || d === "sv") return d;
+    return String((navigator.languages || [navigator.language || ""])[0] || "").toLowerCase().startsWith("sv") ? "sv" : "en";
+  }
+  const lang = pickLang();
+  // a ?lang= the address had (a valid one decided the language): syncUrl() keeps it, so a filter click does not drop it
+  const langParam = new URLSearchParams(location.search).get("lang") === lang ? lang : null;
+  // the text of a key in the page's language, else English, else the key. A plural value picks its form by p.n;
+  // {x} takes p.x, a missing parameter stays as written. Plain text: callers escape it for HTML
+  function t(key, p) {
+    let v = T[lang]?.[key] ?? T.en?.[key] ?? key;
+    if (v && typeof v === "object") v = v[new Intl.PluralRules(lang).select(p?.n ?? 0)] ?? v.other;
+    return String(v).replace(/\{(\w+)\}/g, (m, x) => (p && p[x] !== undefined ? String(p[x]) : m));
+  }
+
   const state = {
     devices: [], meta: null, stats: null, events: [],
     evNext: null, // id to pass as before= for the next events page (null: the list is complete)
@@ -449,9 +471,9 @@
   // its column widths
   function copyable(el, text) {
     el.textContent = text;
-    const rest = el.title || "Click to copy"; // the title back after "Copied" or the Ctrl+C hint
-    let t = 0; // a second copy restarts the "Copied" time: an earlier copy's timer would end it early
-    const done = () => { clearTimeout(t); el.classList.add("copied"); el.title = "Copied"; t = setTimeout(() => { el.classList.remove("copied"); el.title = rest; }, 900); };
+    const rest = el.title || t("app.click_to_copy"); // the title back after "Copied" or the Ctrl+C hint
+    let timer = 0; // a second copy restarts the "Copied" time: an earlier copy's timer would end it early
+    const done = () => { clearTimeout(timer); el.classList.add("copied"); el.title = t("app.copied"); timer = setTimeout(() => { el.classList.remove("copied"); el.title = rest; }, 900); };
     // plain HTTP to a LAN address has no clipboard API, and a secure page can refuse the write (permission, focus):
     // select the text so Ctrl+C copies it, and try the old copy command
     const fallback = () => {
@@ -459,7 +481,7 @@
       let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
       if (ok) done();
       // the hint is for this click or key: it goes when the pointer or the keyboard focus leaves
-      else { el.title = "selected: press Ctrl+C to copy"; el.onmouseleave = el.onblur = () => { el.title = rest; el.onmouseleave = el.onblur = null; }; }
+      else { el.title = t("app.copy_hint"); el.onmouseleave = el.onblur = () => { el.title = rest; el.onmouseleave = el.onblur = null; }; }
     };
     const copy = ev => { ev.stopPropagation(); /* not the row's drawer */ if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fallback); else fallback(); };
     el.onclick = copy;
@@ -835,6 +857,7 @@
     if (state.ssid !== null) { p.set("ssid", state.ssid); if (state.ssidNow) p.set("ssidnow", "1"); }
     if (state.tag !== null) p.set("tag", state.tag);
     if (state.evKind) p.set("ek", state.evKind); if (state.evFrom) p.set("es", state.evFrom); if (state.evTo) p.set("eu", state.evTo);
+    if (langParam) p.set("lang", langParam); // not a filter: clearFilters() keeps it
     // the open drawer is part of the address, so a copied URL shows the same device; a link not yet opened stays
     const dev = state.open || state.deepLink;
     // WebKit throws after ~100 calls in a short window (fast typing): retry until the window ends, or the URL keeps
@@ -914,6 +937,7 @@
   });
   const store = { get: k => { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} } };
   const theme = store.get("theme"); if (theme) document.documentElement.dataset.theme = theme;
+  if (document.documentElement.lang !== lang) document.documentElement.lang = lang;
   $("#themeBtn").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; store.set("theme", next); };
 
   readUrl(); load().then(openDeepLink);

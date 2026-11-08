@@ -54,6 +54,15 @@ def _smtp_tls_env() -> str:
     return _env("SMTP_TLS", "starttls").lower() or "starttls"
 
 
+def _ui_lang_env() -> str:
+    # the page's language: a typo must not stop the start, so it warns and lets the browser choose
+    v = _env("UI_LANG", "auto").lower() or "auto"
+    if v not in ("auto", "en", "sv"):
+        log.warning("UI_LANG=%r is not auto, en or sv: using auto", v[:40])
+        return "auto"
+    return v
+
+
 def _smtp_port_env() -> int:
     # empty: -1, the default for SMTP_TLS (set in __post_init__); a junk value falls back to that same default, so
     # its warning names the port actually used
@@ -244,6 +253,8 @@ class Config:
     listen_host: str = field(default_factory=lambda: _env("LISTEN_HOST", "0.0.0.0"))
     listen_port: int = field(default_factory=lambda: _env_int("LISTEN_PORT", 8080))
     site_name: str = field(default_factory=lambda: _env("SITE_NAME", "Leasewatch"))
+    # UI language: auto (the browser's: Swedish or English), en or sv
+    ui_lang: str = field(default_factory=_ui_lang_env)
     new_days: int = field(default_factory=lambda: _env_int("NEW_DAYS", 7))
     # a device not seen for this long is "offline" even if a lease is still active
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))

@@ -146,6 +146,21 @@ class SettingDefaultsTests(unittest.TestCase):
         os.environ["LEASE_TYPE_MODE"] = "forever"
         self.assertIn("LEASE_TYPE_MODE must be keep, grace or immediate", Config().validate())
 
+    def test_ui_lang_default_values_and_fallback(self):
+        self.assertEqual(Config().ui_lang, "auto")
+        for value, want in (("en", "en"), ("sv", "sv"), ("SV", "sv"), ("auto", "auto"), ("", "auto")):
+            os.environ["UI_LANG"] = value
+            with self.assertNoLogs("leasewatch.config", "WARNING"):
+                c = Config()
+            self.assertEqual((c.ui_lang, c.validate()), (want, []), value)
+        # a typo does not stop the start: a warning, and the browser picks the language
+        os.environ["UI_LANG"] = "xx"
+        with self.assertLogs("leasewatch.config", "WARNING") as logs:
+            c = Config()
+        self.assertEqual(c.ui_lang, "auto")
+        self.assertEqual(c.validate(), [])
+        self.assertIn("UI_LANG='xx' is not auto, en or sv: using auto", logs.output[0])
+
     def test_lan_proxy_default_off(self):
         from leasewatch.connectors import build_instance, instances_context
         spec = Config().instances[0]

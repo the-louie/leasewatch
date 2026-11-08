@@ -122,12 +122,21 @@ def _extract(src: str, name: str) -> str:
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
         "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
-        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf"]
+        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t"]
+
+# the page globals the language code reads, a block outside the rest: a test's own "const location" or
+# "const navigator" shadows them instead of clashing. Mutable, so a test can change them and call pickLang() again
+PAGE = r"""
+const window = { LW_STRINGS: { en: { "app.copied": "Copied", "app.click_to_copy": "Click to copy",
+  "app.copy_hint": "selected: press Ctrl+C to copy", "count.devices": { one: "{n} device", other: "{n} devices" } }, sv: {} } };
+const location = { pathname: "/", search: "" };
+const navigator = { languages: ["en-US"] };
+"""
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
 DOM = r"""
 const focusLog = [];
-const document = { activeElement: null, getElementById: id => byId[id] || null,
+const document = { activeElement: null, getElementById: id => byId[id] || null, documentElement: { lang: "en", dataset: { lang: "" } },
   createDocumentFragment: () => ({ kids: [], appendChild(x) { this.kids.push(x); } }),
   createRange: () => ({ selectNodeContents() {} }), execCommand: () => { calls.exec = (calls.exec || 0) + 1; return false; } };
 const calls = {};
@@ -185,8 +194,8 @@ def _run(names: list[str], script: str) -> dict:
     src = _read("leasewatch", "static", "app.js")
     code = "\n".join(_extract(src, n) for n in dict.fromkeys(BASE + names))
     # wrapped in a function: the stubs (navigator, setTimeout, location, ...) shadow node's own globals
-    prog = f"(async () => {{\n'use strict';\nconst out = {{}};\n{DOM}\n{script.split('//--')[0]}\n{code}\n" \
-           f"{script.split('//--')[1] if '//--' in script else script}\nconsole.log(JSON.stringify(out));\n}})()" \
+    prog = f"(async () => {{\n'use strict';\nconst out = {{}};\n{PAGE}\n{{\n{DOM}\n{script.split('//--')[0]}\n{code}\n" \
+           f"{script.split('//--')[1] if '//--' in script else script}\nconsole.log(JSON.stringify(out));\n}}\n}})()" \
            ".catch(e => { console.error(e); process.exit(3); });"
     p = subprocess.run([NODE, "-e", prog], capture_output=True, text=True, timeout=30)
     if p.returncode:
@@ -412,6 +421,60 @@ mac.onmouseleave?.(); out.after = mac.title;
 """)
         self.assertEqual(out["hint"], "selected: press Ctrl+C to copy")
         self.assertEqual(out["after"], "Click to copy")
+
+    # the language: ?lang= first, then the server's data-lang (auto and junk go on), then the browser's first language
+    def test_pick_lang_order(self) -> None:
+        out = _run([], r"""//--
+const el = document.documentElement, pick = (search, data, langs) => {
+  location.search = search; el.dataset.lang = data; navigator.languages = langs; return pickLang(); };
+out.v = [
+  pick("", "", ["en-US"]), pick("", "", ["sv-SE", "en"]), pick("", "", ["SV"]), pick("", "", ["en", "sv"]), pick("", "", []),
+  pick("", "sv", ["en-US"]), pick("", "en", ["sv-SE"]), pick("", "auto", ["sv-SE"]), pick("", "xx", ["sv"]),
+  pick("?lang=sv", "en", ["en-US"]), pick("?q=a&lang=en", "sv", ["sv-SE"]), pick("?lang=de", "sv", ["en"]), pick("?lang=", "", ["sv"]),
+];
+navigator.languages = undefined; navigator.language = "sv-FI"; location.search = ""; el.dataset.lang = ""; out.single = pickLang();
+navigator.language = undefined; out.none = pickLang();
+out.lang = lang; out.param = langParam;
+""")
+        self.assertEqual(out["v"], ["en", "sv", "sv", "en", "en", "sv", "en", "sv", "sv", "sv", "en", "sv", "sv"])
+        self.assertEqual((out["single"], out["none"]), ("sv", "en"))
+        self.assertEqual((out["lang"], out["param"]), ("en", None))  # no ?lang= in the address: nothing to keep
+
+    def test_t_fallbacks_plurals_and_params(self) -> None:
+        out = _run([], r"""location.search = "?lang=sv";
+window.LW_STRINGS.sv = { "a.only_sv": "bara {name}", "count.devices": { one: "{n} enhet", other: "{n} enheter" } };
+window.LW_STRINGS.en["a.params"] = "{a} and {b}";
+//--
+out.lang = lang; out.param = langParam;
+out.v = [t("a.only_sv", { name: "x<y" }), t("app.copied"), t("no.such_key"), t("count.devices", { n: 1 }), t("count.devices", { n: 3 }),
+         t("count.devices"), t("a.params", { a: 1 }), t("a.params", { a: 0, b: "" }), t("a.only_sv")];
+""")
+        self.assertEqual((out["lang"], out["param"]), ("sv", "sv"))
+        self.assertEqual(out["v"], ["bara x<y", "Copied", "no.such_key", "1 enhet", "3 enheter", "{n} enheter",
+                                    "1 and {b}", "0 and ", "bara {name}"])
+
+    def test_t_english_plural_and_no_strings_file(self) -> None:
+        out = _run([], r"""//--
+out.v = [t("count.devices", { n: 1 }), t("count.devices", { n: 0 }), t("count.devices", { n: 2 })];
+""")
+        self.assertEqual(out["v"], ["1 device", "0 devices", "2 devices"])
+        # i18n.js failed to load: every text is its key, nothing throws
+        out = _run([], r"""window.LW_STRINGS = undefined;
+//--
+out.v = [t("app.copied"), t("count.devices", { n: 2 })];
+""")
+        self.assertEqual(out["v"], ["app.copied", "count.devices"])
+
+    # a ?lang= from the address stays through a filter change and a clear; it is not a filter
+    def test_lang_param_survives_url_writes(self) -> None:
+        out = _run(["urlRetry", "syncUrl"], r"""location.search = "?lang=en&q=old"; let url = null;
+const history = { replaceState: (_, __, u) => { url = u; } };
+//--
+state.q = "ap"; syncUrl(); out.filtered = url;
+state.q = ""; syncUrl(); out.cleared = url;
+""")
+        self.assertEqual(out["filtered"], "?q=ap&lang=en")
+        self.assertEqual(out["cleared"], "?lang=en")
 
     # a replaceState the browser throttles is written once the throttle ends, so the URL is not left stale
     def test_throttled_url_write_is_retried(self) -> None:

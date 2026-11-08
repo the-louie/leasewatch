@@ -53,7 +53,7 @@ NAMES = {d[1] for d in DEVICES}
 NEW = {d[1] for d in DEVICES if d[4]}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-SCENARIOS = ("load", "nossid", "rows", "status", "chips", "search", "csv", "trap", "columns", "baseline", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
+SCENARIOS = ("load", "nossid", "rows", "status", "chips", "search", "lang_param", "csv", "trap", "columns", "baseline", "etag", "dirty", "saving", "drawer")  # the ones that change server state last
 
 
 def mac(n: int) -> str:
@@ -203,6 +203,12 @@ class BrowserUITest(_BrowserCase):
             self.assertEqual(per["pressed"], "true")
             self.assertIn(f"vlan={net}", per["url"])
         self.assertEqual(d["rows_after"], 16)
+
+    def test_lang_param_survives_filters(self) -> None:
+        d = self.result("lang_param")
+        self.assertEqual((d["html_lang"], d["data_lang"], d["strings"]), ("en", "auto", "object"))
+        self.assertEqual(d["filtered"], "?filter=new&lang=en")
+        self.assertEqual(d["cleared"], "?lang=en")
 
     def test_search_filters(self) -> None:
         d = self.result("search")
