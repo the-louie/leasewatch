@@ -4,8 +4,9 @@ FROM python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca252
 RUN apk add --no-cache tzdata && addgroup -S -g 10001 app && adduser -S -u 10001 -G app -h /app app && mkdir -p /data && chown 10001:10001 /data
 WORKDIR /app
 # the only non-stdlib dependency: pysnmp (SNMPv3 to the switch) and its crypto backend
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
+COPY requirements.txt requirements.lock /app/
+# requirements.txt holds the ranges for developers; the lock pins the wheels the image installs (docs/image-build.md)
+RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r requirements.lock
 COPY leasewatch/ /app/leasewatch/
 USER 10001:10001
 ENV DATA_DIR=/data LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

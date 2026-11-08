@@ -1,0 +1,17 @@
+# Hash-locked wheels for the image (pip install --require-hashes -r requirements.lock).
+# Generated 2026-11-08 from requirements.txt for python:3.12-alpine (musl, CPython 3.12),
+# platforms linux/amd64 (musllinux_1_2_x86_64) and linux/arm64 (musllinux_1_2_aarch64).
+# Platform wheels (cffi, cryptography) carry one hash per platform; pure-Python wheels one hash.
+# requirements.txt stays the source of the version ranges. Refresh: docs/image-build.md.
+cffi==2.1.1 \
+    --hash=sha256:210019b6c7cf07f081b4c54635c8cf744377001350e29cc0f81c4377b4797735 \
+    --hash=sha256:208f941bb9d18e768138677f0a6d2ce01f590df56043dda1df1535ac57c88517
+cryptography==50.0.2 \
+    --hash=sha256:85d0d9a31b9098e98534226d5686b47264b95e62ce459dc2e62fdfc809f9fe93 \
+    --hash=sha256:25784ce8b9621c90c643efb9e1e2162ab3b0224cae446ad5e70e7fcb1ce18b51
+pyasn1==0.6.5 \
+    --hash=sha256:4017b0fce125096b8573b39c989fdb1a4b19cf761e683398184550fea0e66587
+pycparser==3.12 \
+    --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+pysnmp==7.1.32 \
+    --hash=sha256:61cb6530194e4f3385d472df741c3f6071b3bae04935ef6b8e64e2e61a969f84
