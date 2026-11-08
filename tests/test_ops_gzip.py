@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
@@ -76,8 +77,10 @@ class GzipTests(QW.Base):
 
     def test_head_has_headers_and_no_body(self) -> None:
         self.seed(2000)
-        gh, gbody = self.get("/api/devices", "gzip")
-        h, body = self.get("/api/devices", "gzip", command="HEAD")
+        # Clock frozen: the body carries the time, so the two gzip lengths differ across a second boundary.
+        with mock.patch("leasewatch.web.time.time", return_value=1_800_000_000.0):
+            gh, gbody = self.get("/api/devices", "gzip")
+            h, body = self.get("/api/devices", "gzip", command="HEAD")
         self.assertEqual(body, b"")
         self.assertEqual(h["content-encoding"], "gzip")
         self.assertEqual(h["vary"], "Accept-Encoding")
