@@ -226,8 +226,14 @@ class KeaTests(StubCase):
         self.assertNotIn(KEA_RES, [p for _, p, _, _ in fw.requests])
         self.assertNotIn("reservations", stats)
 
+    def test_isc_never_reads_dnsmasq_hosts(self):
+        fw = self.stub({LEASES: js({"rows": []}), ARP: js([])})
+        Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="isc").sightings()
+        self.assertNotIn(DNSMASQ_HOSTS, [p for _, p, _, _ in fw.requests])
+
 
 DNSMASQ_LEASES = "/api/dnsmasq/leases/search"
+DNSMASQ_HOSTS = "/api/dnsmasq/settings/search_host"
 NOW_DM = 1_800_000_000
 
 
@@ -239,8 +245,9 @@ class DnsmasqTests(StubCase):
     V6 = {"expire": 0, "hwaddr": "", "iaid": "33554433", "address": "fd00::15", "hostname": "*", "client_id": "*",
           "if": "vlan0110", "if_name": "opt3", "if_descr": "Clients", "mac_info": "", "is_reserved": []}
 
-    def run_dm(self, leases, arp=(), ignore=()):
+    def run_dm(self, leases, arp=(), ignore=(), hosts=()):
         fw = self.stub({DNSMASQ_LEASES: js({"total": len(leases), "rowCount": len(leases), "current": 1, "rows": leases}),
+                        DNSMASQ_HOSTS: js({"total": len(hosts), "rowCount": len(hosts), "current": 1, "rows": list(hosts)}),
                         ARP: js(list(arp))})
         out, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings(ignore)
         return out, stats, fw
@@ -249,7 +256,7 @@ class DnsmasqTests(StubCase):
         out, stats, _ = self.run_dm([self.LEASE])
         self.assertEqual([(s.mac, s.ip, s.hostname, s.vendor, s.iface, s.vlan, s.source, s.lease_type, s.online) for s in out],
                          [("02:00:00:00:02:01", "10.0.110.15", "alexs-ipad", "Acme", "opt3", "Clients", "dhcp", "dynamic", False)])
-        self.assertEqual(stats, {"leases": 1, "arp": 0})
+        self.assertEqual(stats, {"leases": 1, "arp": 0, "reservations": 0})
 
     def test_dnsmasq_ipv6_rows_dropped(self):
         v6_with_mac = {**self.V6, "hwaddr": "02:00:00:00:02:02"}  # a DUID-LL client id gives an IPv6 row a MAC
@@ -302,11 +309,70 @@ class DnsmasqTests(StubCase):
         out, _, _ = self.run_dm([self.LEASE], ignore=("opt4",))
         self.assertEqual(len(out), 1)
 
-    def test_dnsmasq_calls_only_lease_search_and_arp(self):
+    def test_dnsmasq_calls_lease_and_host_search_and_arp(self):
         arp = [{"mac": "02:00:00:00:02:05", "ip": "10.0.110.7", "intf": "vlan0110", "intf_description": "Clients"}]
         _, stats, fw = self.run_dm([self.LEASE], arp)
-        self.assertEqual(sorted(p for _, p, _, _ in fw.requests), sorted([DNSMASQ_LEASES, ARP]))
+        self.assertEqual(sorted(p for _, p, _, _ in fw.requests), sorted([DNSMASQ_LEASES, DNSMASQ_HOSTS, ARP]))
+        post = [(m, json.loads(b)) for m, p, _, b in fw.requests if p == DNSMASQ_HOSTS]
+        self.assertEqual(post, [("POST", {"current": 1, "rowCount": fw1.LEASE_ROWS})])
+        self.assertNotIn("labels_unavailable", stats)
+
+    # shaped from the OPNsense Dnsmasq.xml <hosts> model as searchBase returns it; not seen from a live firewall
+    HOSTS = [
+        {"uuid": "u1", "host": "alexs-ipad", "domain": "lan", "ip": "10.0.110.15", "hwaddr": "02:00:00:00:02:01",
+         "ignore": "0", "descr": "Alex iPad"},                                                   # leased: label copied
+        {"uuid": "u2", "host": "nas", "domain": "", "ip": ["10.0.110.20"], "hwaddr": ["02:00:00:00:02:10"],
+         "ignore": "0", "descr": "NAS\tbox"},                                                   # lease-less, list form
+        {"uuid": "u3", "host": "printer", "ip": "10.0.110.30", "hwaddr": "", "descr": "DNS only"},  # skipped
+        {"uuid": "u4", "host": "laptop", "ip": "10.0.120.40,10.0.120.41",
+         "hwaddr": "02:00:00:00:02:11, 02-00-00-00-02-12", "descr": "Laptop"},                   # two MACs, string form
+        {"uuid": "u5", "host": "banned", "ip": "10.0.110.50", "hwaddr": "02:00:00:00:02:13", "ignore": "1"},  # skipped
+        {"uuid": "u6", "host": "v6only", "ip": "fd00::60", "hwaddr": "02:00:00:00:02:14"},       # kept, no address
+        {"uuid": "u7", "host": "odd", "ip": None, "hwaddr": 42, "ignore": None, "descr": None},  # no valid MAC: skipped
+        "not-a-row",
+    ]
+
+    def test_dnsmasq_host_without_lease_is_listed(self):
+        arp = [{"mac": "02:00:00:00:02:05", "ip": "10.0.120.7", "intf": "vlan0120", "intf_description": "IOT"}]
+        out, stats, _ = self.run_dm([self.LEASE], arp, hosts=self.HOSTS)
+        by = {}
+        for s in out:
+            if s.source == "dhcp":
+                by.setdefault(s.mac, []).append(s)
+        self.assertEqual(sorted(by), ["02:00:00:00:02:01", "02:00:00:00:02:10", "02:00:00:00:02:11",
+                                      "02:00:00:00:02:12", "02:00:00:00:02:14"])
+        leased = by["02:00:00:00:02:01"]
+        self.assertEqual(len(leased), 1)  # a leased host is not duplicated
+        self.assertEqual((leased[0].hostname, leased[0].lease_type, leased[0].label), ("alexs-ipad", "dynamic", "Alex iPad"))
+        nas = by["02:00:00:00:02:10"][0]
+        self.assertEqual((nas.lease_type, nas.online, nas.ip, nas.hostname, nas.iface, nas.vlan, nas.label),
+                         ("static", False, "10.0.110.20", "nas", "opt3", "Clients", "NAS\tbox"))  # interface: lease in the /24
+        for mac in ("02:00:00:00:02:11", "02:00:00:00:02:12"):
+            s = by[mac][0]
+            self.assertEqual((s.ip, s.hostname, s.vlan, s.iface, s.label), ("10.0.120.40", "laptop", "IOT", "", "Laptop"))
+        v6 = by["02:00:00:00:02:14"][0]
+        self.assertEqual((v6.ip, v6.vlan, v6.lease_type, v6.online), ("", "", "static", False))
+        self.assertEqual(stats, {"leases": 1, "arp": 1, "reservations": len(self.HOSTS)})
+
+    def test_dnsmasq_hosts_parser(self):
+        for v in ("1", 1, True, "true"):
+            self.assertEqual(fw1.dnsmasq_hosts([{"hwaddr": "02:00:00:00:02:20", "ignore": v}], {}), [], v)
+        for v in ("0", 0, False, "", None):
+            self.assertEqual(len(fw1.dnsmasq_hosts([{"hwaddr": "02:00:00:00:02:20", "ignore": v}], {})), 1, v)
+        rows = fw1.dnsmasq_hosts([{"hwaddr": "02:00:00:00:02:21,02:00:00:00:02:21", "ip": ["fd00::1", "10.0.1.9"],
+                                   "descr": "x" * 200}], {})
+        self.assertEqual([(r["mac"], r["address"], r["subnet"], len(r["label"])) for r in rows],
+                         [("02:00:00:00:02:21", "10.0.1.9", "", fw1.LABEL_MAX)])
+
+    def test_dnsmasq_host_failure_is_not_fatal(self):
+        arp = [{"mac": "02:00:00:00:02:05", "ip": "10.0.110.7", "intf": "vlan0110", "intf_description": "Clients"}]
+        fw = self.stub({DNSMASQ_LEASES: js({"rows": [self.LEASE]}), DNSMASQ_HOSTS: (403, {}, b"{}"), ARP: js(arp)})
+        with self.assertLogs("leasewatch.fw1", "WARNING") as logs:
+            out, stats = Fw1Client(fw.url, "k", "s", timeout=5, dhcp_backend="dnsmasq").sightings()
+        self.assertEqual({s.mac for s in out}, {"02:00:00:00:02:01", "02:00:00:00:02:05"})
         self.assertNotIn("reservations", stats)
+        self.assertEqual(stats["labels_unavailable"], 1)
+        self.assertIn("HTTP 403", logs.output[0])
 
     def test_dnsmasq_errors_are_fw1_errors(self):
         fw = self.stub({DNSMASQ_LEASES: (403, {}, b"{}"), ARP: js([])})

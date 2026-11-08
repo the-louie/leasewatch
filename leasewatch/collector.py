@@ -933,7 +933,7 @@ class Collector:
         self.db.set_meta("last_error", "", c)
         self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
         last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
-        if "reservations" in raw_stats:  # only a Kea firewall reports them
+        if "reservations" in raw_stats:  # Kea reservations or dnsmasq hosts, when the backend reads them
             last_raw += f", {raw_stats['reservations']} reservations"
         self.db.set_meta("last_raw", last_raw, c)
         if first_run and not waiting:

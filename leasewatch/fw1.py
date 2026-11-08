@@ -1,7 +1,7 @@
 """Read DHCP leases and the ARP table from an OPNsense firewall through its REST API.
 
 Only read-only endpoints are used: the DHCPv4 lease list (ISC, Kea or dnsmasq, the instance's dhcp_backend setting),
-under Kea also the reservation search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
+under Kea also the reservation search, under dnsmasq the static host search, and the ARP table. The API user needs the matching DHCP privilege and "Diagnostics: ARP Table".
 """
 from __future__ import annotations
 
@@ -170,6 +170,43 @@ def kea_reservations(rows: list[dict], cidr_map: dict) -> list[dict]:
     return out
 
 
+def _items(v: Any) -> list[str]:
+    """A model list field (ip, hwaddr) as its items: the API may send a list or a comma-joined string."""
+    if isinstance(v, (list, tuple)):
+        return [x for x in (_s(i) for i in v) if x]
+    return [x.strip() for x in _s(v).split(",") if x.strip()]
+
+
+def _host_ip(row: dict) -> str:
+    """The first IPv4 address of a dnsmasq host row's "ip" list; "" when it has none (empty or IPv6 only)."""
+    return next((t for t in _items(row.get("ip")) if (a := _addr(t)) is not None and a.version == 4), "")
+
+
+def _host_net(ip: str) -> str:
+    """The /24 around a dnsmasq host's address, its cidr_map key ("" for no address). The hosts model has no
+    subnet, so a lease-less host takes the interface of a lease or ARP entry in the same /24."""
+    return str(ipaddress.ip_network(f"{ip}/24", strict=False)) if ip else ""
+
+
+def dnsmasq_hosts(rows: list[dict], cidr_map: dict) -> list[dict]:
+    """dnsmasq static host rows (/api/dnsmasq/settings/search_host) in the kea_reservations shape, one row per MAC in
+    "hwaddr". Skipped: a row with no valid MAC (a DNS-only record) and a row with "ignore" set (dnsmasq ignores that
+    client). An "ip" without an IPv4 address gives address "": the MAC is still a configured device. The hostname is
+    the short "host" name, the label "descr", subnet "" (the model has none). cidr_map is keyed by _host_net."""
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or _s(r.get("ignore")).lower() in ("1", "true", "yes"):
+            continue
+        ip = _host_ip(r)
+        ifc, descr, dev = cidr_map.get(_host_net(ip), ("", "", ""))
+        label = _s(r.get("descr"))[:LABEL_MAX].strip()
+        for mac in dict.fromkeys(m for m in (norm_mac(t) for t in _items(r.get("hwaddr"))) if m):
+            out.append({"mac": mac, "address": ip, "hostname": _s(r.get("host")).rstrip("."), "man": "",
+                        "if": ifc, "if_descr": descr, "if_dev": dev, "type": "static", "status": "",
+                        "label": label, "subnet": ""})
+    return out
+
+
 def _net(text: str):
     """A reservation subnet as an ip_network, or None when it is not a valid CIDR."""
     try:
@@ -286,15 +323,22 @@ class Fw1Client:
 
     def reservations_raw(self) -> list[dict]:
         """Kea reservations; a read-only search, POSTed like the lease search."""
-        r = self._call("/api/kea/dhcpv4/searchReservation", {"current": 1, "rowCount": LEASE_ROWS})
+        return self._search_rows("/api/kea/dhcpv4/searchReservation", "reservation")
+
+    def hosts_raw(self) -> list[dict]:
+        """dnsmasq static hosts (Services > Dnsmasq DNS & DHCP > Hosts); a read-only search, POSTed like the lease search."""
+        return self._search_rows("/api/dnsmasq/settings/search_host", "host")
+
+    def _search_rows(self, path: str, what: str) -> list[dict]:
+        r = self._call(path, {"current": 1, "rowCount": LEASE_ROWS})
         if not isinstance(r, dict) or not isinstance(r.get("rows"), list):
-            raise Fw1Error("fw1 reservations: unexpected response shape")
+            raise Fw1Error(f"fw1 {what}s: unexpected response shape")
         try:
             total = int(r.get("total") or 0)
         except (TypeError, ValueError, OverflowError):  # OverflowError: a JSON 1e999 or Infinity
             total = 0
         if total > len(r["rows"]):
-            log.warning("reservation list truncated: %d of %d rows (raise LEASE_ROWS)", len(r["rows"]), total)
+            log.warning("%s list truncated: %d of %d rows (raise LEASE_ROWS)", what, len(r["rows"]), total)
         return r["rows"]
 
     def arp_raw(self) -> list[dict]:
@@ -307,7 +351,8 @@ class Fw1Client:
 
     # --- normalised --------------------------------------------------------
     def sightings(self, ignore_interfaces: tuple = ()) -> tuple[list[Sighting], dict]:
-        """Return (sightings, stats). Raises Fw1Error if the lease or ARP call fails; the Kea reservation search is best-effort.
+        """Return (sightings, stats). Raises Fw1Error if the lease or ARP call fails; the Kea reservation
+        and dnsmasq host searches are best-effort.
 
         ignore_interfaces matches (case-insensitively) the OPNsense identifier (opt3), the device (vlan0110, igc4)
         or the description (Klienter, WAN), because leases and ARP rows name interfaces differently."""
@@ -316,10 +361,10 @@ class Fw1Client:
         leases = self.leases_raw()
         reservations = None
         labels_unavailable = False
-        if self.dhcp_backend == "kea":
+        if self.dhcp_backend in ("kea", "dnsmasq"):
             # reservations only add lease-less devices; an API key without that privilege must not stop the poll
             try:
-                reservations = self.reservations_raw()
+                reservations = self.reservations_raw() if self.dhcp_backend == "kea" else self.hosts_raw()
             except Fw1Error as e:
                 log.warning("reservations unavailable, listing leases only: %s", e)
                 labels_unavailable = True
@@ -343,7 +388,11 @@ class Fw1Client:
             # an active lease already carries what its reservation says, except the description (label);
             # only lease-less reservations are added as rows
             leased = {norm_mac(_s(l.get("mac"))) for l in lease_rows}
-            res_rows = kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
+            if self.dhcp_backend == "dnsmasq":
+                nets = [{"subnet": _host_net(_host_ip(r))} for r in reservations if isinstance(r, dict)]
+                res_rows = dnsmasq_hosts(reservations, _cidr_map(nets, lease_rows, arp))
+            else:
+                res_rows = kea_reservations(reservations, _cidr_map(reservations, lease_rows, arp))
             by_mac: dict[str, list[dict]] = {}
             for r in res_rows:
                 if (m := norm_mac(_s(r.get("mac")))) in leased:
