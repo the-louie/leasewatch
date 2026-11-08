@@ -40,6 +40,36 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _read_secret(name: str) -> tuple[str, str]:
+    """(value, problem) of a secret given as <NAME> or <NAME>_FILE. The file's stripped content is the value; the
+    problem (never the value or the path) is "" when there is none."""
+    plain, path = _env(name), _env(name + "_FILE")
+    if not path:
+        return plain, ""
+    if plain:
+        return plain, f"set {name} or {name}_FILE, not both"
+    label = f"cannot read {name}_FILE"
+    # a FIFO, a device such as /dev/zero or a huge file would block or stall the start
+    if os.path.exists(path) and not os.path.isfile(path):
+        return "", f"{label} (not a regular file)"
+    try:
+        if os.path.getsize(path) > MAX_SECRET_FILE:
+            return "", f"{label} (larger than 64 KiB)"
+        with open(path, encoding="utf-8-sig") as f:  # utf-8-sig: a BOM would become part of the secret
+            value = f.read(MAX_SECRET_FILE + 1)
+    except (OSError, UnicodeDecodeError) as e:
+        return "", f"{label} ({getattr(e, 'strerror', None) or type(e).__name__})"
+    if len(value) > MAX_SECRET_FILE:
+        return "", f"{label} (larger than 64 KiB)"
+    return value.strip(), ""
+
+
+def _secret_env(name: str) -> str:
+    """The value of a core secret setting <NAME>, or the content of the file <NAME>_FILE names. The core-key
+    counterpart of the connectors' <KEY>_FILE rule. An unreadable file gives "" here; validate() reports why."""
+    return _read_secret(name)[0]
+
+
 def _is_address(addr: str) -> bool:
     """A plain local@domain: exactly one "@" with text on both sides, no blank or control character (a CR/LF would
     inject a header), and none of <>,;:"()[]\\ (the sender wraps it in <...> itself; a list, a "mailto:", quotes or
@@ -305,6 +335,18 @@ class Config:
     webhook_url: str = field(default_factory=lambda: _env("WEBHOOK_URL"), repr=False)
     webhook_secret: str = field(default_factory=lambda: _env("WEBHOOK_SECRET"), repr=False)
     webhook_format: str = field(default_factory=lambda: _env("WEBHOOK_FORMAT", "json").lower() or "json")
+    # MQTT (on when MQTT_URL is set): mqtt:// (1883) or mqtts:// (8883). The raw strings; the flags are properties
+    mqtt_url: str = field(default_factory=lambda: _env("MQTT_URL"))
+    mqtt_user: str = field(default_factory=lambda: _env("MQTT_USER"))
+    mqtt_password: str = field(default_factory=lambda: _secret_env("MQTT_PASSWORD"), repr=False)
+    mqtt_verify_tls: str = field(default_factory=lambda: _env("MQTT_VERIFY_TLS", "1") or "1")
+    mqtt_ca_file: str = field(default_factory=lambda: _env("MQTT_CA_FILE"))
+    mqtt_topic: str = field(default_factory=lambda: _env("MQTT_TOPIC", "leasewatch"))
+    mqtt_client_id: str = field(default_factory=lambda: _env("MQTT_CLIENT_ID"))  # empty = derived (mqtt_client_id_effective)
+    mqtt_discovery: str = field(default_factory=lambda: _env("MQTT_DISCOVERY", "1") or "1")
+    mqtt_discovery_prefix: str = field(default_factory=lambda: _env("MQTT_DISCOVERY_PREFIX", "homeassistant"))
+    mqtt_devices: str = field(default_factory=lambda: _env("MQTT_DEVICES", "watched").lower() or "watched")
+    mqtt_events: str = field(default_factory=lambda: _env("MQTT_EVENTS", "0") or "0")
     # MAIL_ON_SOURCE: the source_down/source_up events also go to the channels (1/0; empty = the default, off).
     # The text as given; the flag is the mail_on_source property
     mail_on_source_raw: str = field(default_factory=lambda: _env("MAIL_ON_SOURCE", "0") or "0")
@@ -376,7 +418,49 @@ class Config:
             out.append("smtp")
         if self.webhook_url:
             out.append("webhook")
+        if self.mqtt_on and self.mqtt_events_on:
+            out.append("mqtt")
         return out
+
+    @property
+    def mqtt_on(self) -> bool:
+        """MQTT_URL is set: leasewatch publishes to the broker."""
+        return bool(self.mqtt_url)
+
+    @property
+    def mqtt_verify_tls_on(self) -> bool:
+        return parse_bool(self.mqtt_verify_tls) is True
+
+    @property
+    def mqtt_discovery_on(self) -> bool:
+        return parse_bool(self.mqtt_discovery) is True
+
+    @property
+    def mqtt_events_on(self) -> bool:
+        """MQTT_EVENTS is on: events also go out as a notification channel."""
+        return parse_bool(self.mqtt_events) is True
+
+    @property
+    def mqtt_endpoint(self) -> tuple[str, int, bool]:
+        """(host, port, tls) of MQTT_URL; the port defaults to 1883 (mqtt) or 8883 (mqtts). ("", 0, False) for a URL
+        validate() refuses."""
+        try:
+            parts = urlparse(self.mqtt_url)
+            scheme = parts.scheme.lower()
+            if scheme not in ("mqtt", "mqtts") or not parts.hostname:
+                return "", 0, False
+            tls = scheme == "mqtts"
+            return parts.hostname, parts.port or (8883 if tls else 1883), tls
+        except ValueError:
+            return "", 0, False
+
+    @property
+    def mqtt_client_id_effective(self) -> str:
+        """MQTT_CLIENT_ID, or leasewatch-<site name as a slug>: lower case, other characters "-", at most 23 characters."""
+        if self.mqtt_client_id:
+            return self.mqtt_client_id
+        slug = re.sub(r"[^a-z0-9]+", "-", self.site_name.lower()).strip("-")[:12].strip("-")
+        return f"leasewatch-{slug}" if slug else "leasewatch"
 
     @property
     def mail_on_source(self) -> bool:
@@ -450,6 +534,50 @@ class Config:
                 self.webhook_secret.encode()
             except UnicodeEncodeError:  # bytes the environment could not decode, kept as surrogates
                 problems.append("WEBHOOK_SECRET is not valid UTF-8")
+        problems += self._mqtt_problems()
+        return problems
+
+    def _mqtt_problems(self) -> list[str]:
+        """MQTT settings, checked only with MQTT_URL set (as SMTP_* with SMTP_HOST). Never echoes a value."""
+        if not self.mqtt_url:
+            return []
+        problems = []
+        low = self.mqtt_url.lower()
+        if not low.startswith(("mqtt://", "mqtts://")):
+            problems.append("MQTT_URL must be a URL (mqtt://<host>[:1883] or mqtts://<host>[:8883])")
+        else:
+            # the same checks as an http URL (host, port, no credentials, no control characters) on the same text
+            problems += url_problems("MQTT_URL", "http://" + self.mqtt_url.split("://", 1)[1], "mqtt://<host>[:1883]")
+            try:
+                parts = urlparse(self.mqtt_url)
+                if parts.path not in ("", "/") or parts.params or parts.query or parts.fragment:
+                    problems.append("MQTT_URL must have no path or query")
+            except ValueError:
+                pass  # reported by url_problems
+        password_problem = _read_secret("MQTT_PASSWORD")[1]
+        if password_problem:
+            problems.append(password_problem)
+        elif bool(self.mqtt_user) != bool(self.mqtt_password):
+            problems.append("MQTT_USER and MQTT_PASSWORD must be set together")
+        if parse_bool(self.mqtt_verify_tls) is None:
+            problems.append("MQTT_VERIFY_TLS must be 1 or 0")
+        if self.mqtt_ca_file:
+            try:
+                with open(self.mqtt_ca_file, "rb"):
+                    pass
+            except OSError:
+                problems.append("MQTT_CA_FILE cannot be read")
+        for key, value in (("MQTT_TOPIC", self.mqtt_topic), ("MQTT_DISCOVERY_PREFIX", self.mqtt_discovery_prefix)):
+            if (not value or any(c in value for c in "+#\0") or value[0] in "$/" or value.endswith("/")):
+                problems.append(f"{key} must be a topic without +, # or a leading $ or /, and no trailing /")
+        if self.mqtt_client_id and not re.fullmatch(r"[0-9a-zA-Z-]{1,23}", self.mqtt_client_id):
+            problems.append("MQTT_CLIENT_ID must be 1-23 characters of 0-9, a-z, A-Z and -")
+        if self.mqtt_devices not in ("watched", "named", "known", "all"):
+            problems.append("MQTT_DEVICES must be watched, named, known or all")
+        if parse_bool(self.mqtt_discovery) is None:
+            problems.append("MQTT_DISCOVERY must be 1 or 0")
+        if parse_bool(self.mqtt_events) is None:
+            problems.append("MQTT_EVENTS must be 1 or 0")
         return problems
 
     @property
