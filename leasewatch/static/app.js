@@ -279,9 +279,10 @@
       if (had != null && had === t.tag) c.focus();
       chips.push(c);
     }
+    let more = null;
     if (shown.length < list.length) {
-      const next = list[shown.length].tag;
-      const more = document.createElement("button");
+      const next = list.find(t => !shown.includes(t)).tag; // not list[shown.length]: an active tag from beyond the cap is in shown
+      more = document.createElement("button");
       more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = `+${list.length - shown.length} more`;
       more.title = "Show every tag";
       // the button goes with the click: the focus moves to the first chip it brought in
@@ -289,6 +290,8 @@
       box.appendChild(more);
       if (fe?.id === "tagMore") more.focus();
     } else if (fe?.id === "tagMore") chips[0]?.focus();
+    // the focused chip is gone (an active chip from beyond the cap, clicked off): the focus stays in the row
+    if (had != null && !chips.some(c => c.dataset.tag === had)) (more || chips[0])?.focus();
   }
 
   function filtered() {
@@ -495,7 +498,7 @@
   const EV_PAGE = 60;
   const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged", "split"]], ["Presence", ["offline", "online"]],
     ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
-    ["Review", ["acked", "unacked", "renamed", "note", "watched", "unwatched"]], ["Sources", ["source_down", "source_up"]]];
+    ["Review", ["acked", "unacked", "renamed", "note", "tags", "watched", "unwatched"]], ["Sources", ["source_down", "source_up"]]];
   // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
   const isDay = v => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -558,7 +561,7 @@
     } catch (err) { showBanner(`Cannot load more events: ${err.message}`); }
     finally { btn.disabled = false; }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up", renamed: "renamed", note: "note changed", watched: "watched", unwatched: "unwatched", offline: "offline", online: "online" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up", renamed: "renamed", note: "note changed", tags: "tags changed",watched: "watched", unwatched: "unwatched", offline: "offline", online: "online" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,

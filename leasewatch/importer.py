@@ -1,4 +1,4 @@
-"""The `import-csv` command: restore name, note, acked, archived and watch from the device CSV export
+"""The `import-csv` command: restore name, note, acked, archived, watch and tags from the device CSV export
 (GET /api/devices.csv), also after a round trip through a spreadsheet. parse_csv is pure; the writing and its policy
 (fill-empty or overwrite, events) are Database.import_user_fields."""
 from __future__ import annotations
@@ -105,7 +105,8 @@ def _header(line: str) -> tuple[str, list[str]]:
 def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
     """Read the device CSV (bytes as UTF-8 with or without BOM, or str). ValueError: too large, not UTF-8, no mac
     column, too many rows or an unknown field. A row with a bad MAC or a bad 0/1 value is skipped and listed;
-    columns other than mac and the chosen fields are ignored. An empty acked, watch or tags cell leaves the field as it is."""
+    columns other than mac and the chosen fields are ignored. An empty acked or watch cell leaves the field as it is;
+    an empty name, note or tags cell is the value "" (fill-empty keeps what is stored, --overwrite clears it)."""
     want = _check_fields(fields)
     if len(data) > MAX_BYTES:
         raise ValueError("file larger than 1 MiB")
@@ -160,8 +161,7 @@ def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
                 if f in ("name", "note"):
                     row[f] = uncell(v)
                 elif f == "tags":
-                    if v.strip():  # an empty cell is not given
-                        row[f] = normalize_tags(uncell(v))
+                    row[f] = normalize_tags(uncell(v))  # an empty cell is "": fill-empty keeps tags, --overwrite clears them
                 elif f == "archived":
                     row[f] = bool(v.strip())
                 elif v.strip():

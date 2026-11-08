@@ -736,6 +736,35 @@ class BrowserTagsTest(_BrowserCase):
         self.assertEqual([c["text"] for c in d["chips"]], ["iot", "speaker"])
         self.assertEqual(d["grp"], [])
 
+    # 14 tags on one device each rank by name: the 12 first as chips, then "+2 more"
+    TAGS14 = sorted(["living-room-speaker-01", "owner:alexandra-long", "upstairs-hallway-ceil", "media-streaming-box",
+                     "firmware-pinned-v2", "kids-bedtime-schedule", "guest-network-allowed", "energy-monitoring-on"]
+                    + [f"printer-{c}" for c in "abcdef"])
+
+    @staticmethod
+    def _plain_first(tags: list[str]) -> list[str]:  # the row order: plain tags, then the owners
+        return [t for t in tags if not t.startswith("owner:")] + [t for t in tags if t.startswith("owner:")]
+
+    def test_twelve_chips_then_more(self) -> None:
+        r = self.result("tags")
+        self.assertEqual(r["capped"]["chips"], self._plain_first(self.TAGS14[:12]))
+        self.assertEqual(r["capped"]["more"], "+2 more")
+        # "+2 more" shows all 14 and goes away; the focus moves to the first chip it brought in
+        self.assertEqual((r["all"]["chips"], r["all"]["more"]), (self._plain_first(self.TAGS14), None))
+        self.assertEqual(r["all"]["focus"], "printer-f")
+
+    def test_active_tag_beyond_the_cap(self) -> None:
+        r = self.result("tags")
+        self.assertEqual(r["far"]["chips"], self._plain_first(self.TAGS14[:12] + ["upstairs-hallway-ceil"]))
+        self.assertEqual(r["far"]["more"], "+1 more")
+        # "+1 more" focuses the one tag it brought in, not the one already shown
+        self.assertEqual((len(r["far_more"]["chips"]), r["far_more"]["more"], r["far_more"]["focus"]), (14, None, "printer-f"))
+
+    def test_clicking_off_a_chip_beyond_the_cap_keeps_the_focus_in_the_row(self) -> None:
+        d = self.result("tags")["far_off"]
+        self.assertEqual((d["chips"], d["more"]), (self._plain_first(self.TAGS14[:12]), "+2 more"))
+        self.assertEqual(d["focus"], "tagMore")
+
     def test_chip_filters_and_reload_keeps_it(self) -> None:
         r = self.result("tags")
         for name in ("filtered", "reloaded"):
@@ -1131,9 +1160,10 @@ class BrowserEventsViewTest(_BrowserCase):
         d = self.result("eventsview")
         values = [o["value"] for o in d["kind_options"]]
         self.assertEqual(values[0], "")
-        self.assertEqual(len(values), 23)  # "All" and the 22 kinds the server writes
-        for k in ("source_down", "source_up", "lease_type", "merged", "split", "offline", "online", "renamed", "note", "watched", "unwatched"):
+        self.assertEqual(len(values), 24)  # "All" and the 23 kinds the server writes
+        for k in ("source_down", "source_up", "lease_type", "merged", "split", "offline", "online", "renamed", "note", "tags", "watched", "unwatched"):
             self.assertIn(k, values)
+        self.assertIn({"value": "tags", "text": "tags changed"}, d["kind_options"])
         self.assertIn({"value": "source_down", "text": "source down"}, d["kind_options"])
         self.assertIn({"value": "split", "text": "split address"}, d["kind_options"])
 

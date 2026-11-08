@@ -143,7 +143,9 @@ Before anything reads it, the host runs `merge.normalise_batch(name, batch)`. It
 - coerces fields of the wrong type: a `str` field `None` becomes `""`, other values `str()`; control and bidi
   characters are removed, tab and line breaks become spaces, and the text is stripped (except `ssid`, `ap`,
   `alias`); `kind` is lower-cased; flags given as text are read with the setting words (`"false"` is `False`);
-  `observed_at` becomes an int or 0; `vlan`/`signal` an int in 64-bit range or `None`.
+  `observed_at` becomes an int or 0; `vlan`/`signal` an int in 64-bit range or `None`;
+- empties `ip` unless it is a dotted IPv4 address (IPv6, a leading zero as in `010.0.0.1` and junk become `""`). It
+  logs one DEBUG line and does not count the record as dropped.
 
 Return correct types anyway: the contract tests check them.
 

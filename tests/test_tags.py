@@ -38,6 +38,21 @@ class NormalizeTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(normalize_tags(text), want)
 
+    def test_combining_marks_and_nfc(self) -> None:
+        nfd, nfc = "café", "café"
+        self.assertEqual(normalize_tags(nfd), nfc)
+        self.assertEqual(normalize_tags(nfc), nfc)
+        self.assertEqual(normalize_tags("İstanbul"), "i̇stanbul")
+        self.assertEqual(normalize_tags("हिंदी"), "हिंदी")
+        self.assertEqual(normalize_tags("தமிழ்"), "தமிழ்")
+        self.assertEqual(normalize_tags("straße, ไทย"), "straße,ไทย")
+        self.assertEqual(normalize_tags("é" * 24), "é" * 24)  # 48 code points, 24 after NFC
+        with self.assertRaises(ValueError):
+            normalize_tags("é" * 25)
+        for bad in ("́a", "tag!", "-iot", "_a"):  # a mark cannot start a tag
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                normalize_tags(bad)
+
     def test_refused(self) -> None:
         for text, msg in (("tag!", "tag tag! contains a character that is not allowed"),
                           ("-leading", "tag -leading contains a character that is not allowed"),

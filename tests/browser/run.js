@@ -977,9 +977,37 @@ const scenarios = {
             .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}:${Math.round(e.getBoundingClientRect().right)}`) };
       }, W);
     }
+    // 14 distinct tags (W's eight and six on B, A's taken off), all on one device each, so they rank by name: 12 chips and
+    // "+2 more"; upstairs-hallway-ceil ranks 14th, printer-f 13th
+    const post = ms => page.evaluate(async ms => { for (const [m, tags] of ms) await fetch(`/api/devices/${m}`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags }) }); }, ms);
+    await page.setViewport({ width: 1280, height: 900 });
+    await post([[A, ''], [B, 'printer-a, printer-b, printer-c, printer-d, printer-e, printer-f']]);
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(() => document.querySelector('#tagMore') && document.querySelectorAll('#tags .chip[data-tag]').length === 12);
+    const cap = () => page.evaluate(() => ({ chips: [...document.querySelectorAll('#tags .chip[data-tag]')].map(c => c.dataset.tag),
+      more: document.querySelector('#tagMore')?.textContent ?? null, focus: document.activeElement.dataset.tag ?? document.activeElement.id }));
+    res.capped = await cap();
+    await page.click('#tagMore');
+    await page.waitForFunction(() => !document.querySelector('#tagMore'));
+    res.all = await cap();
+    // the active tag from beyond the cap joins the 12; "+1 more" brings in printer-f, the one tag left out
+    const far = new URL(page.url()); far.search = '?tag=upstairs-hallway-ceil';
+    await page.goto(far.href, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#tags .chip.active[data-tag]');
+    res.far = await cap();
+    await page.click('#tagMore');
+    await page.waitForFunction(() => !document.querySelector('#tagMore'));
+    res.far_more = await cap();
+    // clicked off from the keyboard, the active chip leaves the row; the focus goes to "+2 more", not the top of the page
+    await page.goto(far.href, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#tags .chip.active[data-tag]');
+    await page.focus('#tags .chip[data-tag="upstairs-hallway-ceil"]');
+    await page.keyboard.press('Enter');
+    await waitUrl(null);
+    res.far_off = await cap();
     // only plain tags left: the row looks as before, no headings
-    await page.evaluate(async ms => { for (const [m, tags] of ms) await fetch(`/api/devices/${m}`, { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags }) }); }, [[A, 'iot'], [W, 'speaker']]);
+    await post([[A, 'iot'], [B, ''], [W, 'speaker']]);
     await page.evaluate(() => window.__lwReload());
     await page.waitForFunction(() => document.querySelectorAll('#tags .chip[data-tag]').length === 2);
     res.plain = await view();

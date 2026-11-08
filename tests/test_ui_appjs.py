@@ -204,7 +204,7 @@ class AppJsTests(unittest.TestCase):
     # every kind the events filter offers has a label (no raw kind name falls through) and a colour
     def test_kind_text_knows_every_filter_kind(self) -> None:
         out = _run(["EV_KINDS"], "//--\nout.kinds = EV_KINDS.flatMap(g => g[1]);")
-        self.assertEqual(len(out["kinds"]), 22)
+        self.assertEqual(len(out["kinds"]), 23)
         css, src = _read("leasewatch", "static", "style.css"), _extract(_read("leasewatch", "static", "app.js"), "kindText")
         for k in out["kinds"]:
             with self.subTest(kind=k):
@@ -875,7 +875,7 @@ out.ids2 = state.events.map(x => x.id); out.paged2 = state.evPaged;
         self.assertIn('state.meta.role === "ro" ? "Read-only login: this user can look but not change anything"', src)
         self.assertIn("Read-only: changes are off for this address", src)
         self.assertNotRegex(css, r"(^|[},\s])\.note\s*[,{]")  # a bare .note would style <span class="k note"> too
-        self.assertRegex(css, r"\.k\.renamed, \.k\.note\s*\{[^}]*color:")
+        self.assertRegex(css, r"\.k\.renamed, \.k\.note, \.k\.tags\s*\{[^}]*color:")
 
 if __name__ == "__main__":
     unittest.main()

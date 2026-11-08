@@ -7,7 +7,8 @@ the database or to the device it reads from.
 
 What the host does with a Batch (merge.normalise_batch): it sets every record's `source` to the instance name (a
 connector may leave it ""), normalises `mac` with norm_mac() and drops records that fail it (logged once per
-instance, counted in stats["dropped"]). Errors: only a ConnectorError's text is shown in the UI and status; any
+instance, counted in stats["dropped"]), and it empties an `ip` that is not a dotted IPv4 address (one DEBUG line, not
+counted as dropped). Errors: only a ConnectorError's text is shown in the UI and status; any
 other exception from check()/collect() is shown as its type name only (and logged with a traceback).
 """
 from __future__ import annotations

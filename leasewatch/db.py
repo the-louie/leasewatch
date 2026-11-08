@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -112,23 +113,31 @@ CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u202
 
 TAGS_MAX = 8
 TAG_LEN_MAX = 24
-# one tag after lower-casing: letters (any script), digits, _ : . -; the first character a letter or digit
-_TAG_RE = re.compile(r"[^\W_][\w:.-]*")
+# one tag after NFC and lower-casing: letters (any script), digits, _ : . - and combining marks (Mn, Mc; Python's \w
+# does not match them, but Hindi, Tamil and decomposed accents need them); the first character a letter or digit.
+# 'İ'.lower() is 'i' + U+0307; NFC keeps those two code points, so 'İstanbul' is stored as 'i̇stanbul'.
+_TAG_FIRST = re.compile(r"[^\W_]")
+_TAG_REST = re.compile(r"[\w:.-]")
+
+
+def _tag_ok(tag: str) -> bool:
+    return bool(_TAG_FIRST.fullmatch(tag[:1])) and all(
+        _TAG_REST.fullmatch(ch) or unicodedata.category(ch) in ("Mn", "Mc") for ch in tag[1:])
 
 
 def normalize_tags(text: str) -> str:
-    """The stored form of a tags text: split on commas, each tag stripped and lower-cased with inner blanks as '-',
+    """The stored form of a tags text: NFC-normalised, split on commas, each tag stripped and lower-cased with inner blanks as '-',
     empty tags dropped, duplicates dropped (the first stays), joined with ','. Control characters are removed first.
-    Raises ValueError for a tag with a character outside _TAG_RE, a tag longer than TAG_LEN_MAX or more than
+    Raises ValueError for a tag with a character outside the _tag_ok rule, a tag longer than TAG_LEN_MAX or more than
     TAGS_MAX tags."""
     out: list[str] = []
-    for part in CONTROL_CHARS.sub("", text).split(","):
-        tag = re.sub(r"\s+", "-", part.strip().lower())
+    for part in unicodedata.normalize("NFC", CONTROL_CHARS.sub("", text)).split(","):
+        tag = unicodedata.normalize("NFC", re.sub(r"\s+", "-", part.strip().lower()))
         if not tag or tag in out:
             continue
         if len(tag) > TAG_LEN_MAX:
             raise ValueError(f"tag {tag} is longer than {TAG_LEN_MAX} characters")
-        if not _TAG_RE.fullmatch(tag):
+        if not _tag_ok(tag):
             raise ValueError(f"tag {tag} contains a character that is not allowed")
         out.append(tag)
     if len(out) > TAGS_MAX:

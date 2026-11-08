@@ -15,7 +15,7 @@ runs) and rotates DATA_DIR/backups/;
 `python -m leasewatch reset-baseline [--yes] [--clear-acks] [--include-archived]` marks every listed device as baseline
 in place (no events are written);
 `python -m leasewatch import-csv FILE [--dry-run] [--fields LIST] [--fill-empty|--overwrite]` restores name, note,
-acked, archived and watch from the device CSV export (unknown MACs are listed, never added).
+acked, archived, watch and tags from the device CSV export (unknown MACs are listed, never added).
 """
 from __future__ import annotations
 

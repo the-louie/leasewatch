@@ -177,6 +177,24 @@ class ImportCsvTests(unittest.TestCase):
         self.assertEqual(self.run_cmd(path, "--fields", "name")[0], 0)
         self.assertEqual(self.tags()[0], (A, ""))
 
+    def test_empty_tags_cell_clears_only_with_overwrite(self):
+        self.make_db()
+        self.sql("UPDATE devices SET tags='iot' WHERE mac IN (?, ?)", (A, B))
+        path = self.write(f"mac,tags\r\n{A},\r\n")
+        rc, lines, _ = self.run_cmd(path)  # fill-empty: a no-op
+        self.assertEqual(rc, 0)
+        self.assertIn("0 updated", lines[0])
+        self.assertEqual(self.tags()[:2], [(A, "iot"), (B, "iot")])
+        self.assertEqual(self.sql("SELECT count(*) FROM events WHERE kind='tags'"), [(0,)])
+        rc, dry, _ = self.run_cmd(path, "--overwrite", "--dry-run")
+        self.assertEqual(self.tags()[:2], [(A, "iot"), (B, "iot")])
+        rc, real, _ = self.run_cmd(path, "--overwrite")
+        self.assertEqual(rc, 0)
+        self.assertEqual(dry[0].replace(" (dry run)", ""), real[0])
+        self.assertIn("1 updated", real[0])
+        self.assertEqual(self.tags()[:2], [(A, ""), (B, "iot")])
+        self.assertEqual(self.sql("SELECT count(*) FROM events WHERE kind='tags'"), [(1,)])
+
     def test_swedish_excel_file(self):
         # "CSV UTF-8" from Excel with a ';' list separator: ';', CRLF, the BOM dropped by a later editor
         self.make_db()
