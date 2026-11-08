@@ -2,10 +2,11 @@ import os, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore, sources, swap_client
+from _fixtures import S
 from leasewatch.collector import Collector, merge
 from leasewatch.config import Config
 from leasewatch.db import Database
-from leasewatch.fw1 import Sighting, Fw1Error
+from leasewatch.fw1 import Fw1Error
 
 
 class FakeClient:
@@ -14,10 +15,6 @@ class FakeClient:
     def sightings(self, ignore=()):
         if self.fail: raise Fw1Error("boom")
         return list(self.sightings_data), {"leases": 1, "arp": 1}
-
-
-def S(mac, ip, host="", src="dhcp", vlan="Clients", lt="dynamic", online=True, vendor="Acme"):
-    return Sighting(mac=mac, ip=ip, hostname=host, vendor=vendor, vlan=vlan, iface="opt3", source=src, lease_type=lt if src == "dhcp" else "", online=online)
 
 
 def cfg_with(*names):

@@ -4,23 +4,16 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore
+from _fixtures import row
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, Sighting
-from leasewatch.connectors.merge import (ROW_DEFAULTS, ConnectorFailure, MergeState, merge, merge_sightings,
+from leasewatch.connectors.merge import (ConnectorFailure, MergeState, merge, merge_sightings,
                                          normalise_batch)
 from leasewatch.fw1 import Sighting as Fw1Sighting
 
 NOW = 1_700_000_000
 A = "02:00:00:00:00:01"
 CTRL = frozenset({"unifi"})
-
-
-def row(mac, **kw):
-    r = {"mac": mac, "first_seen": NOW - 5000, "last_seen": NOW - 60, "last_online": NOW - 60, "ip": "10.0.0.5", "hostname": "",
-         "vendor": "Acme", "vlan": "Clients", "iface": "opt3", "lease_type": "", "sources": "arp", "online": 1, "baseline": 0,
-         "acked": 0, "acked_at": None, "name": "", "note": "", **ROW_DEFAULTS}
-    r.update(kw)
-    return r
 
 
 def sight(mac=A, ip="10.0.0.5", kind="arp", presence=True, **kw):

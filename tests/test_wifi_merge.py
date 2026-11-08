@@ -3,22 +3,15 @@ import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore
+from _fixtures import row
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, Sighting
-from leasewatch.connectors.merge import ROW_DEFAULTS, ConnectorFailure, MergeState, merge
+from leasewatch.connectors.merge import ConnectorFailure, MergeState, merge
 
 NOW = 1_700_000_000
 A = "02:00:00:00:20:01"
 ALIAS = "06:00:00:00:20:02"
 CTRL = frozenset({"unifi", "unifi2"})
-
-
-def row(mac, **kw):
-    r = {"mac": mac, "first_seen": NOW - 5000, "last_seen": NOW - 60, "last_online": NOW - 60, "ip": "10.0.0.5", "hostname": "",
-         "vendor": "Acme", "vlan": "Clients", "iface": "opt3", "lease_type": "", "sources": "arp", "online": 1, "baseline": 0,
-         "acked": 0, "acked_at": None, "name": "", "note": "", **ROW_DEFAULTS}
-    r.update(kw)
-    return r
 
 
 def arp(mac=A, ip="10.0.0.5"):

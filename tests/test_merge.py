@@ -5,10 +5,11 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore
+from _fixtures import row
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, HostContext, Sighting
 from leasewatch.connectors import merge as merge_mod
-from leasewatch.connectors.merge import ROW_DEFAULTS, UPDATE_COLUMNS, ConnectorFailure, MergeState, merge, normalise_batch
+from leasewatch.connectors.merge import UPDATE_COLUMNS, ConnectorFailure, MergeState, merge, normalise_batch
 from leasewatch.connectors.snmp_switch import SnmpSwitchConnector
 from leasewatch.switch import build_snapshot
 
@@ -24,14 +25,6 @@ def S(mac, ip, host="", kind="dhcp", net="Clients", lt="dynamic", presence=True,
 
 def arp(mac, ip="10.0.0.5", **kw):
     return S(mac, ip, kind="arp", **kw)
-
-
-def row(mac, **kw):
-    r = {"mac": mac, "first_seen": NOW - 5000, "last_seen": NOW - 60, "last_online": NOW - 60, "ip": "10.0.0.5", "hostname": "",
-         "vendor": "Acme", "vlan": "Clients", "iface": "opt3", "lease_type": "", "sources": "arp", "online": 1, "baseline": 0,
-         "acked": 0, "acked_at": None, "name": "", "note": "", **ROW_DEFAULTS}
-    r.update(kw)
-    return r
 
 
 def port(mac, label, via="", uplink=False):

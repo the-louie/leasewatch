@@ -15,10 +15,11 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore  # noqa: E402
+from _fixtures import S  # noqa: E402
 from leasewatch.collector import Collector  # noqa: E402
 from leasewatch.config import Config  # noqa: E402
 from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Fw1Error, Sighting  # noqa: E402
+from leasewatch.fw1 import Fw1Error  # noqa: E402
 from leasewatch.connectors import InstanceSpec  # noqa: E402
 from leasewatch.web import MAX_BODY, serve  # noqa: E402
 
@@ -46,11 +47,6 @@ class FakeClient:
         if self.fail:
             raise Fw1Error("boom")
         return list(self.sightings_data), {"leases": 1, "arp": 1}
-
-
-def S(mac, ip, host="", src="dhcp", vlan="Clients", lt="dynamic", online=True, vendor="Acme"):
-    return Sighting(mac=mac, ip=ip, hostname=host, vendor=vendor, vlan=vlan, iface="opt3", source=src,
-                    lease_type=lt if src == "dhcp" else "", online=online)
 
 
 class WebTestCase(unittest.TestCase):
