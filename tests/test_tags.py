@@ -119,7 +119,7 @@ class TagsApiTests(_Base):
         st, _, body = self.get("/api/devices.csv")
         rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
         head = rows[0]
-        self.assertEqual(head[-1], "tags")
+        self.assertGreater(head.index("tags"), head.index("watch"))  # appended after watch; later columns may follow
         self.assertEqual(rows[1][0], QW.MAC)
         self.assertEqual(rows[1][head.index("tags")], "iot,owner:alex")
         st, _, body = self.get(f"/api/devices/{QW.MAC}")

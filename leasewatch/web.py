@@ -62,7 +62,7 @@ _ETAG_ITEM = re.compile(r'\*|(?:W/)?"[^"]*"')
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
-               "archived", "note", "aliases", "watch", "tags"]
+               "archived", "note", "aliases", "watch", "tags", "baseline", "acked_at", "split_from"]
 _WIFI_CSV_HEADER = ["mac", "name", "vendor", "last_ip", "private", "archived", "first_seen", "last_seen", "hours_seen", "polls_seen", "last_ap"]
 
 
@@ -163,7 +163,7 @@ def _csv_row(d: dict) -> list:
             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))),
             ts(d["archived_ts"]), cell(d["note"]),
             cell(" ".join(d["aliases"])),  # a space, as Excel with a ; separator splits on ;
-            d["watch"], cell(d["tags"])]  # new columns go last, so no earlier column moves
+            d["watch"], cell(d["tags"]), d["baseline"], ts(d["acked_at"]), d["split_from"] or ""]  # new columns go last, so no earlier column moves
 
 
 class _DeadlineRaw(io.RawIOBase):
