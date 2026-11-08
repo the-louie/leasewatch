@@ -19,6 +19,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -317,3 +318,144 @@ class UnifiClient:
                     pass
             self._drop()
             self._last_login = None  # a deliberate logout: the next login is not a re-login
+
+
+INTEGRATION_PREFIX = "/proxy/network/integration"  # + /v1/...: the Integration API of a UniFi OS console
+PAGE_LIMIT = 200   # the API's maximum page size
+MAX_PAGES = 50     # per list read; past this the read stops with a warning (10 000 rows at PAGE_LIMIT)
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+class _NotFound(RuntimeError):
+    """An Integration API read answered 404."""
+
+
+def _count(v: object) -> int | None:
+    """A non-negative int envelope field, or None (a bool is no count)."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+class UnifiKeyClient:
+    """The Integration API of a UniFi OS console with an API key (AUTH=apikey). Stateless apart from the resolved site
+    id: no session, no cookies, no login. The key is sent as X-API-KEY on every request and appears in no error text,
+    log line or repr. The error body is never parsed or echoed: errors come from the HTTP status only."""
+
+    def __init__(self, url: str, site: str, api_key: str, verify_tls: bool = True, proxy: bool = False,
+                 timeout: float | None = None) -> None:
+        self.url = url
+        self.site = site
+        self._key = api_key
+        self.timeout = timeout  # None: the module TIMEOUT at call time
+        self._ctx = ssl.create_default_context()
+        if not verify_tls:
+            self._ctx.check_hostname = False
+            self._ctx.verify_mode = ssl.CERT_NONE
+        # no cookie jar and no redirects: a 3xx would carry the key to wherever it points
+        handlers: list[urllib.request.BaseHandler] = [urllib.request.HTTPSHandler(context=self._ctx), _NoRedirect()]
+        if not proxy:  # the console is on the LAN: ignore http(s)_proxy unless the instance's proxy setting is set
+            handlers.append(urllib.request.ProxyHandler({}))
+        self._op = urllib.request.build_opener(*handlers)
+        self._site_cache: str | None = None
+        self._lock = threading.Lock()
+
+    def __repr__(self) -> str:
+        return f"UnifiKeyClient(site={self.site!r})"
+
+    def _get(self, path: str) -> dict:
+        """One GET of /v1/...; the body is capped at MAX_BODY and must be a JSON object."""
+        req = urllib.request.Request(self.url + INTEGRATION_PREFIX + path,
+                                     headers={"X-API-KEY": self._key, "Accept": "application/json"})
+        where = path.split("?")[0]
+        try:
+            with self._op.open(req, timeout=TIMEOUT if self.timeout is None else self.timeout) as r:
+                raw = r.read(MAX_BODY + 1)
+        except urllib.error.HTTPError as e:
+            e.close()  # the error carries the open response; release its socket (its body is never read)
+            if e.code in (401, 403):
+                raise RuntimeError(f"unifi: API key rejected (HTTP {e.code})") from None
+            if e.code == 404:
+                raise _NotFound(f"unifi: HTTP 404 on {where}") from None
+            raise RuntimeError(f"unifi: HTTP {e.code} on {where}") from None
+        if len(raw) > MAX_BODY:
+            raise RuntimeError("unifi: response too large")
+        body = json.loads(raw.decode())
+        if not isinstance(body, dict):
+            raise RuntimeError("unifi: unexpected response shape")
+        return body
+
+    def _page(self, path: str) -> list:
+        """Every row of a paged list: offset += count until offset >= totalCount or count == 0, at most MAX_PAGES."""
+        rows: list = []
+        offset = 0
+        for _ in range(MAX_PAGES):
+            body = self._get(f"{path}?offset={offset}&limit={PAGE_LIMIT}")
+            data = body.get("data")
+            if not isinstance(data, list):
+                raise RuntimeError("unifi: unexpected response shape")
+            rows += data
+            count = _count(body.get("count"))
+            count = len(data) if count is None else count
+            total = _count(body.get("totalCount"))
+            offset += count
+            if count == 0 or total is None or offset >= total:
+                return rows
+        log.warning("unifi: %s has more than %d pages; read stopped there", path.split("?")[0], MAX_PAGES)
+        return rows
+
+    def _resolve(self) -> str:
+        """The site id for the SITE setting: an id as is; else the one site whose internalReference, then name
+        (case-sensitive, then case-insensitive) equals it."""
+        want = self.site
+        if _UUID_RE.fullmatch(want):
+            return want
+        try:
+            sites = self._page("/v1/sites")
+        except _NotFound:
+            raise RuntimeError("unifi: no Integration API at this URL (UniFi OS console needed)") from None
+        rows = [s for s in sites if isinstance(s, dict) and isinstance(s.get("id"), str) and s["id"]]
+        tests = (lambda s: s.get("internalReference") == want,
+                 lambda s: s.get("name") == want,
+                 lambda s: isinstance(s.get("name"), str) and s["name"].casefold() == want.casefold())
+        for test in tests:
+            hits = {s["id"] for s in rows if test(s)}
+            if len(hits) == 1:
+                return hits.pop()
+            if hits:
+                raise RuntimeError(f"unifi: site name {want} is ambiguous, use its id")
+        raise RuntimeError(f"unifi: site {want} not found (use the site's internal reference, name or id)")
+
+    def _read(self, site_id: str) -> dict[str, WifiInfo]:
+        base = f"/v1/sites/{urllib.parse.quote(site_id, safe='')}"
+        return parse_integration_clients(self._page(base + "/clients"), self._page(base + "/devices"))
+
+    def _clients(self) -> dict[str, WifiInfo]:
+        fresh = self._site_cache is None
+        if fresh:
+            self._site_cache = self._resolve()
+        try:
+            return self._read(self._site_cache)
+        except _NotFound:
+            if fresh or _UUID_RE.fullmatch(self.site):  # nothing to look up again: an error, not a loop
+                raise
+        self._site_cache = None  # the cached site is gone (removed or recreated): look it up once more
+        self._site_cache = self._resolve()
+        return self._read(self._site_cache)
+
+    def clients(self) -> dict[str, WifiInfo]:
+        """Blocking. Raises RuntimeError on failure."""
+        with self._lock:
+            try:
+                return self._clients()
+            except _NotFound as e:
+                raise RuntimeError(str(e)) from None
+            except urllib.error.HTTPError as e:  # not expected (_get maps them), kept for parity
+                e.close()
+                raise RuntimeError(f"unifi: HTTP {e.code}") from None
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError, json.JSONDecodeError, OSError) as e:
+                raise RuntimeError(f"unifi: {e}") from e
+            except (TypeError, AttributeError, ValueError, OverflowError, RecursionError, http.client.HTTPException):
+                # no exception text and no chained cause: an invalid header value (a malformed key) or an InvalidURL echoes it
+                raise RuntimeError("unifi: unexpected response") from None
+
+    def close(self) -> None:
+        """Nothing to release: there is no session."""
