@@ -143,7 +143,9 @@ class Collector:
         self.cfg = cfg
         self.db = db
         # a restore by hand holds against PRUNE_DAYS and PRUNE_PRIVATE_DAYS only while its `restored` event exists
-        prune = max([(d, n) for d, n in ((cfg.prune_days, "PRUNE_DAYS"), (cfg.prune_private_days, "PRUNE_PRIVATE_DAYS"))
+        # by the effective thresholds: the merge caps PRUNE_PRIVATE_DAYS at PRUNE_DAYS when both are on
+        private = min(cfg.prune_private_days, cfg.prune_days) if cfg.prune_days > 0 else cfg.prune_private_days
+        prune = max([(d, n) for d, n in ((cfg.prune_days, "PRUNE_DAYS"), (private, "PRUNE_PRIVATE_DAYS"))
                      if d > 0] or [(0, "")])
         if prune[0] > 0 and cfg.event_days < prune[0]:
             log.warning("EVENT_DAYS=%d is below %s=%d: a device restored by hand is protected for %d days only",
@@ -163,6 +165,7 @@ class Collector:
         self._mail_failing = False  # the queue could not be cleared since the last send that worked: warned once
         self._alert_failing = False  # alerts could not be sent since the last send that worked: warned once
         self._alert_mark_cleared = False  # alerts off: the mark was removed once in this process
+        self._alert_started = False  # the first alert pass of this process has read the pending events
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
@@ -501,7 +504,7 @@ class Collector:
 
     def _fail(self, msg: str, status: dict[str, str] | None = None) -> dict:
         now = int(time.time())
-        with self.db.tx() as c:
+        with self.db.tx(immediate=True) as c:  # writes after reads (_count_poll): wait for another writer
             for k, v in (status or {}).items():
                 self.db.set_meta(k, v, c)
             self.db.set_meta("last_error", msg, c)
@@ -585,13 +588,13 @@ class Collector:
 
     def _purge(self, c: sqlite3.Connection, ref: int) -> tuple[int, int]:
         """Delete every device archived longer than PURGE_DAYS by the prune clock that is offline, that no source
-        has listed for that long, has no name and no note and is not marked known, with all its rows. Other devices'
+        has listed for that long, has no name and no note and is not marked known or watched, with all its rows. Other devices'
         events that name it in detail stay. Returns (devices, rows), rows counting every deleted row."""
         cutoff = ref - self.cfg.purge_days * 86400
         # last_seen: a static reservation is listed every poll while offline; purged, it would come back as new
         macs = [r[0] for r in c.execute(
             "SELECT mac FROM devices WHERE archived_ts IS NOT NULL AND archived_ts<? AND online=0 "
-            "AND last_seen<? AND name='' AND note='' AND acked=0", (cutoff, cutoff)).fetchall()]
+            "AND last_seen<? AND name='' AND note='' AND acked=0 AND watch=0", (cutoff, cutoff)).fetchall()]
         rows = 0
         for i in range(0, len(macs), self._PURGE_CHUNK):
             chunk = macs[i:i + self._PURGE_CHUNK]
@@ -713,8 +716,9 @@ class Collector:
     def _alert(self) -> None:
         """Send the alert events written since the mark (meta notify.alert_event_id: the events up to this id were
         considered) as one message, at most ALERT_BATCH per poll, oldest first; on delivery the mark moves to the
-        newest one sent; with none to send it moves to the newest event, so an event that was no alert when it was
-        considered (a device watched later, a flag turned on later) is never sent as new. Alert events: the
+        newest one sent when more are pending, else (and with none to send) to the newest event, so an event that was
+        no alert when it was considered (a device watched later, a flag turned on later) is never sent as new. At the
+        first pass of a process more than ALERT_BATCH pending are skipped with a WARNING (a stale mark). Alert events: the
         ALERT_KINDS with MAIL_ON_SOURCE=1, and the WATCH_KINDS of devices with watch=1 with MAIL_ON_WATCH=1 (one mark
         for both). Only with a channel. No mark yet (first start with alerts on): the mark is set to the newest event
         and nothing is sent, so old events are not sent at an upgrade. While both are off the mark is removed (once
@@ -736,6 +740,7 @@ class Collector:
                 with self.db.tx() as c:
                     top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
                     self.db.set_meta(ALERT_MARK, str(top), c)
+                self._alert_started = True  # a fresh mark is no stale one
                 return
             where, args = [], []
             if source:
@@ -747,14 +752,29 @@ class Collector:
                 args += WATCH_KINDS
             with self.db.tx() as c:  # one read: no event written between the two lands behind a moved mark unseen
                 rows = c.execute(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND "
-                                 f"({' OR '.join(where)}) ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH)).fetchall()
+                                 f"({' OR '.join(where)}) ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH + 1)).fetchall()
                 top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                # the first pass of a process: more than one batch pending means a stale mark (an older version ran
+                # in between and wrote events without moving it), not a short restart, so they are not sent
+                skipped = 0
+                if not self._alert_started and len(rows) > ALERT_BATCH:
+                    skipped = c.execute(f"SELECT COUNT(*) FROM events WHERE id > ? AND ({' OR '.join(where)})",
+                                        (int(mark), *args)).fetchone()[0]
+                    self.db.set_meta(ALERT_MARK, str(top), c)
+                # more than one batch pending: only up to the last one sent was considered; else every event up to
+                # the newest was, so an event that was no alert then (an unwatched device's) is not sent later
+                full = len(rows) > ALERT_BATCH
+                rows = rows[:ALERT_BATCH]
                 # nothing to send: every event up to the newest was considered, so a device watched later (or a flag
                 # turned on later) gets only what is written after it
-                if not rows:
-                    if top > int(mark):
-                        self.db.set_meta(ALERT_MARK, str(top), c)
-                    return
+                if not rows and top > int(mark):
+                    self.db.set_meta(ALERT_MARK, str(top), c)
+            self._alert_started = True
+            if skipped:
+                log.warning("alerts: skipped %d events written before this start", skipped)
+                return
+            if not rows:
+                return
             names = self._alert_names(rows)
             src = [r for r in rows if r["kind"] in ALERT_KINDS]
             msg = notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
@@ -780,7 +800,7 @@ class Collector:
         self._write_notify_state()
         try:
             with self.db.tx() as c:
-                self.db.set_meta(ALERT_MARK, str(rows[-1]["id"]), c)
+                self.db.set_meta(ALERT_MARK, str(rows[-1]["id"] if full else top), c)
         except sqlite3.Error as e:  # sent again at the next poll (at-least-once)
             log.warning("%s sent but not recorded (%d event(s) will be sent again): %s", what, len(rows),
                         db_error_text(e))
@@ -956,7 +976,9 @@ class Collector:
             return waiting
         batches = {n: got[n] for n in self._runs if n in got}
         state = self._merge_state(first_run, prev_ok, producers, waiting)
-        with self.db.tx() as c:
+        # immediate: it reads the devices and then writes, so a deferred transaction would fail at its first write
+        # when another writer (import-csv, reset-baseline) committed in between; this one waits up to busy_timeout
+        with self.db.tx(immediate=True) as c:
             res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
         self._source_events_written()
         self._alert()

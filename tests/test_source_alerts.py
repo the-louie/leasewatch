@@ -187,6 +187,36 @@ class SourceAlertTests(Base):
         self.assertEqual(self.msgs, [])
         self.assertEqual(db2.get_meta(ALERT_MARK), str(db2.q("SELECT MAX(id) FROM events")[0][0]))
 
+    def pending(self, db, n):
+        with db.tx() as c:
+            c.executemany("INSERT INTO events(ts, mac, kind, detail) VALUES(?, '', 'source_down', ?)",
+                          [(self.clock.t, f"y{i}: down") for i in range(n)])
+        return db.q("SELECT MAX(id) FROM events")[0][0]
+
+    def test_more_than_a_batch_pending_at_a_start_is_skipped(self):
+        col, db = self.start()
+        col.close()
+        top = self.pending(db, ALERT_BATCH + 5)  # e.g. an older version wrote them without moving the mark
+        col2 = Collector(col.cfg, db, self.client)
+        self.addCleanup(col2.close)
+        with self.assertLogs("leasewatch.collector", "WARNING") as cm:
+            self.poll(col2)
+        self.assertIn(f"alerts: skipped {ALERT_BATCH + 5} events written before this start", "\n".join(cm.output))
+        self.assertEqual(self.msgs, [])
+        self.assertEqual(db.get_meta(ALERT_MARK), str(top))
+        self.pending(db, ALERT_BATCH + 5)  # later in the same process: sent in batches, not skipped
+        self.poll(col2, 2)
+        self.assertEqual([m.subject for m in self.msgs], [f"{ALERT_BATCH} source events", "5 source events"])
+
+    def test_a_few_pending_at_a_start_are_still_sent(self):
+        col, db = self.start()
+        col.close()
+        self.pending(db, 3)
+        col2 = Collector(col.cfg, db, self.client)
+        self.addCleanup(col2.close)
+        self.poll(col2)
+        self.assertEqual([m.subject for m in self.msgs], ["3 source events"])
+
     def test_turned_off_and_on_again_sends_no_old_events(self):
         col, db = self.start()
         col.close()

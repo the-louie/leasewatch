@@ -98,7 +98,8 @@ class PurgeTests(Base):
         self.seed(GONE)
         keep = {"aa:bb:cc:00:00:21": {"name": "Printer"}, "aa:bb:cc:00:00:22": {"note": "the neighbour's"},
                 "aa:bb:cc:00:00:23": {"acked": 1}, "aa:bb:cc:00:00:24": {"online": 1, "last_online": T0},
-                "aa:bb:cc:00:00:25": {"archived_days": 100}, "aa:bb:cc:00:00:26": {"archived_days": None}}
+                "aa:bb:cc:00:00:25": {"archived_days": 100}, "aa:bb:cc:00:00:26": {"archived_days": None},
+                "aa:bb:cc:00:00:27": {"watch": 1}}
         for mac, kw in keep.items():
             self.seed(mac, **kw)
         # another device's merged event names the purged MAC only in its detail

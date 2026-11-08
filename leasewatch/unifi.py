@@ -107,33 +107,41 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
     return out
 
 
-def parse_integration_clients(clients: list, devices: list) -> dict[str, WifiInfo]:
-    """Pure function over the Integration API client and device lists. A row that is not a dict, is not a WIRED or
-    WIRELESS client, has a non-string name or has no usable MAC is dropped; it never raises. The API has no SSID, signal,
-    radio or channel, so those stay empty. A wired client has no AP (as in parse_clients). A name equal to the client's
-    own MAC is the controller's fallback, not an alias. A later row with the same MAC replaces an earlier one."""
+def parse_integration_clients(clients: list, devices: list, stats: dict | None = None) -> dict[str, WifiInfo]:
+    """Pure function over the Integration API client and device lists; it never raises. Only WIRED and WIRELESS rows
+    are clients (VPN, TELEPORT and unknown types are skipped, not counted). A WIRED or WIRELESS row with a usable MAC is
+    kept whatever its name: a name that is not a usable string gives alias "", since a dropped row would read as a
+    device the controller no longer lists. A row that is not a dict, or a WIRED/WIRELESS row without a usable MAC, is
+    dropped and counted in stats["dropped"] when stats is given. The API has no SSID, signal, radio or channel, so those
+    stay empty. A wired client has no AP (as in parse_clients). A name equal to the client's own MAC is the
+    controller's fallback, not an alias. A later row with the same MAC replaces an earlier one."""
     dev_names: dict[str, str] = {}
     for d in devices or []:
         if isinstance(d, dict) and isinstance(d.get("id"), str) and d["id"]:
             name = d.get("name")
             dev_names[d["id"]] = name if isinstance(name, str) else ""
     out: dict[str, WifiInfo] = {}
+    dropped = 0
     for c in clients or []:
-        if not isinstance(c, dict) or c.get("type") not in ("WIRED", "WIRELESS"):
+        if not isinstance(c, dict):
+            dropped += 1
+            continue
+        if c.get("type") not in ("WIRED", "WIRELESS"):
             continue
         raw, name = c.get("macAddress"), c.get("name")
-        if not isinstance(raw, str) or not isinstance(name, str):  # name is a required field: a malformed one is a bad row
-            continue
-        mac = norm_mac(raw)
+        mac = norm_mac(raw) if isinstance(raw, str) else ""
         if not mac:
+            dropped += 1
             continue
         wired = c["type"] == "WIRED"
         up = c.get("uplinkDeviceId")
-        name = name.strip()
+        name = name.strip() if isinstance(name, str) else ""
         out[mac] = WifiInfo(
             ap="" if wired or not isinstance(up, str) else dev_names.get(up, ""),
             wired=wired, alias="" if not name or norm_mac(name) == mac else name,
         )
+    if stats is not None:
+        stats["dropped"] = stats.get("dropped", 0) + dropped
     return out
 
 
@@ -424,28 +432,29 @@ class UnifiKeyClient:
                 raise RuntimeError(f"unifi: site name {want} is ambiguous, use its id")
         raise RuntimeError(f"unifi: site {want} not found (use the site's internal reference, name or id)")
 
-    def _read(self, site_id: str) -> dict[str, WifiInfo]:
+    def _read(self, site_id: str, stats: dict | None = None) -> dict[str, WifiInfo]:
         base = f"/v1/sites/{urllib.parse.quote(site_id, safe='')}"
-        return parse_integration_clients(self._page(base + "/clients"), self._page(base + "/devices"))
+        return parse_integration_clients(self._page(base + "/clients"), self._page(base + "/devices"), stats)
 
-    def _clients(self) -> dict[str, WifiInfo]:
+    def _clients(self, stats: dict | None = None) -> dict[str, WifiInfo]:
         fresh = self._site_cache is None
         if fresh:
             self._site_cache = self._resolve()
         try:
-            return self._read(self._site_cache)
+            return self._read(self._site_cache, stats)
         except _NotFound:
             if fresh or _UUID_RE.fullmatch(self.site):  # nothing to look up again: an error, not a loop
                 raise
         self._site_cache = None  # the cached site is gone (removed or recreated): look it up once more
         self._site_cache = self._resolve()
-        return self._read(self._site_cache)
+        return self._read(self._site_cache, stats)
 
-    def clients(self) -> dict[str, WifiInfo]:
-        """Blocking. Raises RuntimeError on failure."""
+    def clients(self, stats: dict | None = None) -> dict[str, WifiInfo]:
+        """Blocking. Raises RuntimeError on failure. stats["dropped"] counts the malformed client rows (see
+        parse_integration_clients)."""
         with self._lock:
             try:
-                return self._clients()
+                return self._clients(stats)
             except _NotFound as e:
                 raise RuntimeError(str(e)) from None
             except urllib.error.HTTPError as e:  # not expected (_get maps them), kept for parity

@@ -34,6 +34,16 @@ class BackupTests(unittest.TestCase):
             rc = m.main(list(argv))
         return rc, out.getvalue(), err.getvalue()
 
+    def test_import_csv_with_stdout_closed(self):
+        # the import did its work: 0 stays; a dry run's only result is the report it could not print: 1
+        self.make_db(0)
+        path = os.path.join(self.dir, "in.csv")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("mac,name\r\n02:00:00:00:00:01,x\r\n")
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertEqual(m.main(["import-csv", "--dry-run", path]), 1)
+            self.assertEqual(m.main(["import-csv", path]), 0)
+
     def backups(self) -> list[str]:
         d = os.path.join(self.dir, "backups")
         return sorted(os.listdir(d)) if os.path.isdir(d) else []

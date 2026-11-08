@@ -138,6 +138,39 @@ class WriteTests(Base):
             col._write(c, {}, self.res(), now + 60)
         self.assertEqual(db.q("SELECT COUNT(*) n FROM events")[0]["n"], 5)
 
+    def test_poll_waits_for_a_writer_that_commits_after_it_read_the_devices(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
+        col.run_once()  # the baseline
+        committed = threading.Event()
+        errors = []
+
+        def other_writer():  # e.g. import-csv: its own connection, committing while the poll's transaction is open
+            c = sqlite3.connect(col.cfg.db_path, timeout=10)
+            try:
+                c.execute("INSERT INTO meta(key, value) VALUES('other_writer', '1')")
+                c.commit()
+                committed.set()
+            except sqlite3.Error as e:
+                errors.append(e)
+            finally:
+                c.close()
+
+        real = col._prune_reference
+        writer = threading.Thread(target=other_writer)
+
+        def prune_reference(c, now):  # after the poll has read the devices, before its first write
+            writer.start()
+            committed.wait(1)  # a poll holding the write lock keeps it waiting: the wait times out
+            return real(c, now)
+
+        with mock.patch.object(col, "_prune_reference", prune_reference):
+            res = col.run_once()
+        writer.join(10)
+        self.assertTrue(res["ok"])
+        self.assertEqual(errors, [])
+        self.assertEqual(db.get_meta("other_writer"), "1")
+        self.assertEqual(db.get_meta("last_poll_ok"), "1")
+
 
 class LoopTests(Base):
     def test_failure_of_fail_is_logged(self):

@@ -222,6 +222,21 @@ class WatchAlertTests(Base):
         self.poll(col)
         self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: ip"])  # only what is written after the watch
 
+    def test_unwatched_event_above_a_sent_one_is_not_sent_once_watched(self):
+        col, db = self.start(rows=[arp(MAC, "10.0.0.5"), arp(MAC2, "10.0.0.6")])
+        self.watch(db, MAC)
+        self.client.rows = [arp(MAC, "10.0.0.15"), arp(MAC2, "10.0.0.16")]
+        with mock.patch.object(col, "_alert"):
+            self.poll(col)  # both ip events written, the alert pass held back
+        ids = {r["mac"]: r["id"] for r in db.q("SELECT id, mac FROM events WHERE kind='ip'")}
+        self.assertGreater(ids[MAC2], ids[MAC])  # the unwatched device's event lies above the one sent
+        self.poll(col)
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: ip"])
+        self.assertEqual(db.get_meta("notify.alert_event_id"), str(db.q("SELECT MAX(id) FROM events")[0][0]))
+        self.watch(db, MAC2)
+        self.poll(col, 2)
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: ip"])
+
     def test_watch_turned_on_after_source_alone_sends_nothing_old(self):
         col, db = self.start({**ON, "MAIL_ON_WATCH": "0", "MAIL_ON_SOURCE": "1"})
         self.watch(db, MAC)

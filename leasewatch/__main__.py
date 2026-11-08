@@ -645,8 +645,10 @@ def main(argv: list[str] | None = None) -> int:
             if sys.stdout is not None:
                 raise
             # started with stdout closed (>&-): nowhere to write the output; a code the command set stays
-            # (backup, vacuum, reset-baseline and import-csv have done their work by then: their code stays, 0 included)
-            return 1 if not rc and argv[0] not in ("backup", "vacuum", "reset-baseline", "import-csv") else rc
+            # (backup, vacuum, reset-baseline and import-csv have done their work by then: their code stays, 0 included;
+            # an import-csv --dry-run is not exempt, its only result is the report)
+            done = ("backup", "vacuum", "reset-baseline") + (("import-csv",) if "--dry-run" not in argv else ())
+            return 1 if not rc and argv[0] not in done else rc
         except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
             return 130  # 128 + SIGINT, as the shell reports an interrupted command
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()

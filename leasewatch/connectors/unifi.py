@@ -100,8 +100,13 @@ class UnifiConnector(SettingsMixin):
 
     def collect(self) -> Batch:
         try:
-            wifi = self.client.clients()
+            # the key client counts its malformed rows: dropped > 0 tells the merge the list is partial, so a device
+            # missing from it keeps its Wi-Fi link and AP
+            parsed: dict = {}
+            wifi = self.client.clients(parsed) if isinstance(self.client, UnifiKeyClient) else self.client.clients()
             stats = {"clients": len(wifi)}
+            if parsed.get("dropped"):
+                stats["dropped"] = parsed["dropped"]
             if self.settings["auth"] == "apikey":
                 stats["ssid_unavailable"] = 1  # the Integration API lists no SSID, signal or radio
             return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats=stats)

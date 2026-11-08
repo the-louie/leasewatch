@@ -877,7 +877,8 @@ const scenarios = {
     res.cleared = await view();
     return res;
   },
-  // long SSIDs and a NEW private-MAC row at phone widths: the page and the table must not scroll sideways
+  // long SSIDs, a NEW private-MAC row and a NEW watched row with a long name at phone widths: the page and the table must
+  // not scroll sideways
   async ssidwidth(page, base) {
     const res = {};
     const cases = { none: '', ever32: '?ssid=Guest-Network-Long-SSID-Name-32c', now32: '?ssid=Guest-Network-Long-SSID-Name-32c&ssidnow=1',
@@ -891,6 +892,8 @@ const scenarios = {
         res[`${name}_${width}`] = await page.evaluate(() => {
           const wrap = document.querySelector('.table-wrap'), de = document.documentElement;
           return { rows: document.querySelectorAll('#rows tr').length, table_scroll: wrap.scrollWidth - wrap.clientWidth,
+            watched_new: [...document.querySelectorAll('#rows tr')].filter(t => t.querySelector('.badge.new') && t.querySelector('.badge.watch'))
+              .map(t => t.querySelector('.nm').textContent),
             page_scroll: de.scrollWidth - de.clientWidth,
             over: [...wrap.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > wrap.getBoundingClientRect().right + 0.5 && e.offsetWidth > 0)
               .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}:${Math.round(e.getBoundingClientRect().right)}`) };

@@ -124,12 +124,14 @@ class UnknownDevices(LookupError):
 @dataclass
 class ImportResult:
     """What import_user_fields did: devices changed, devices already holding the values, MACs that are no device,
-    MACs of rows replaced by a later row for the same device, and the events written."""
+    the device key of each device more than one row resolved to (once per device), the events written, and the row
+    count of each of those devices."""
     updated: int = 0
     unchanged: int = 0
     unknown: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
     events: int = 0
+    duplicate_rows: dict[str, int] = field(default_factory=dict)  # last: positional construction stays as it was
 
 
 class Database:
@@ -478,15 +480,17 @@ class Database:
     def import_user_fields(self, rows, *, overwrite: bool = False, actor: str = "") -> ImportResult:
         """Set name, note, acked, archived and watch from rows (dicts with a normalised `mac` and any of those keys;
         an absent key is not touched) in one transaction. An alias MAC counts as its device. A MAC that is no device
-        is listed and writes nothing; no devices row is ever inserted. When two rows resolve to one device the later
-        row wins whole and both MACs are listed in `duplicates`. Without overwrite a value only fills a gap: name and
+        is listed and writes nothing; no devices row is ever inserted. Rows that resolve to one device merge field by
+        field: a later row's value wins, but an empty one (an absent key, an empty name or note, archived False, which
+        is what an empty archived cell reads as) never replaces an earlier row's value; the device key is listed once
+        in `duplicates` and its row count is in `duplicate_rows`. Without overwrite a value only fills a gap: name and
         note when the stored text is empty, and acked, archived and watch only when True (never clears, restores or
         unwatches). With overwrite every present key is applied as given. The shared cleaning, the unchanged-value
         rule and the events (named by actor) are those of _apply_user_fields."""
         res = ImportResult()
         with self.tx(immediate=True) as c:  # reads then writes: wait for a poll's write lock instead of failing
-            last: dict[str, dict] = {}
-            first_mac: dict[str, str] = {}
+            merged: dict[str, dict] = {}
+            count: dict[str, int] = {}
             for row in rows:
                 mac = row["mac"]
                 key = self._resolve(c, mac)
@@ -494,14 +498,16 @@ class Database:
                     if mac not in res.unknown:
                         res.unknown.append(mac)
                     continue
-                if key in last:
-                    for m in (first_mac[key], mac):
-                        if m not in res.duplicates:
-                            res.duplicates.append(m)
-                last[key] = row
-                first_mac[key] = mac
+                count[key] = count.get(key, 0) + 1
+                into = merged.setdefault(key, {})
+                for f, v in row.items():
+                    empty = v is None or v == "" or (f == "archived" and v is False)
+                    if f != "mac" and (f not in into or not empty):
+                        into[f] = v
+            res.duplicates = [k for k, n in count.items() if n > 1]
+            res.duplicate_rows = {k: count[k] for k in res.duplicates}
             now = int(time.time())  # one time for the whole import
-            for key, row in last.items():
+            for key, row in merged.items():
                 cur = c.execute("SELECT name, note FROM devices WHERE mac=?", (key,)).fetchone()
                 name, note = row.get("name"), row.get("note")
                 acked, archived, watch = row.get("acked"), row.get("archived"), row.get("watch")

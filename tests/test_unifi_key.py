@@ -35,9 +35,28 @@ class ParseIntegrationClients(unittest.TestCase):
         self.assertEqual((g.ap, g.alias), ("", "guest-tablet"))
 
     def test_odd_page(self):
-        out = parse_integration_clients(load("clients_odd.json"), self.devices)
-        self.assertEqual(list(out), ["02:00:00:00:00:34"])
+        stats = {}
+        out = parse_integration_clients(load("clients_odd.json"), self.devices, stats)
+        # a list as name keeps the row (alias ""); the integer MAC is dropped and counted; MATTER is no client
+        self.assertEqual(list(out), ["02:00:00:00:00:33", "02:00:00:00:00:34"])
+        self.assertEqual((out["02:00:00:00:00:33"].alias, out["02:00:00:00:00:33"].ap), ("", "ap-hall"))
         self.assertEqual(out["02:00:00:00:00:34"].ap, "ap-hall")
+        self.assertEqual(stats, {"dropped": 1})
+
+    def test_valid_mac_is_kept_whatever_the_name(self):
+        row = {"type": "WIRED", "macAddress": "02:00:00:00:00:51"}
+        for extra in ({}, {"name": None}, {"name": 7}, {"name": ""}):
+            stats = {}
+            out = parse_integration_clients([dict(row, **extra)], self.devices, stats)
+            self.assertEqual((list(out), out["02:00:00:00:00:51"].alias), (["02:00:00:00:00:51"], ""), extra)
+            self.assertEqual(stats, {"dropped": 0})
+
+    def test_dropped_rows_are_counted(self):
+        stats = {"dropped": 2}
+        rows = ["x", None, {"type": "WIRELESS", "name": "a"}, {"type": "WIRELESS", "macAddress": "zz"},
+                {"type": "VPN", "macAddress": "zz"}, {"type": "TELEPORT"}, {"name": "no type"}]
+        self.assertEqual(parse_integration_clients(rows, None, stats), {})
+        self.assertEqual(stats, {"dropped": 6})
 
     def test_bad_input_does_not_raise(self):
         self.assertEqual(parse_integration_clients(["x", None, 3], None), {})
@@ -327,6 +346,18 @@ class KeyConnector(KeyBase):
             self.assertEqual((a.ssid, a.signal, a.present, a.source, a.observed_at), ("", None, True, "unifi", 1762400000))
         self.assertTrue(all({k.lower(): v for k, v in h.items()}.get("x-api-key") == KEY for _, _, h in self.con.requests))
         c.close()
+
+    def test_collect_reports_dropped_rows(self):
+        odd = raw("clients_odd.json")
+        default = self.con.handle
+
+        def handle(h):
+            if urlsplit(h.path).path.endswith("/clients"):
+                return h.js(odd)
+            return default(h)
+        self.con.handle = handle
+        b = self.conn().collect()
+        self.assertEqual(b.stats, {"clients": 2, "dropped": 1, "ssid_unavailable": 1})
 
     def test_401_text_is_masked(self):
         from leasewatch.connectors import ConnectorError

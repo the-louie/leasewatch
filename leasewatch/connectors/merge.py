@@ -759,16 +759,16 @@ def _seen_rows(ok: dict[str, Batch], rows: dict[str, dict], now: int) -> list[tu
 def _auto_archive(rows: dict[str, dict], cfg: Config, state: MergeState, now: int) -> list[tuple[str, str, str]]:
     """Archives (in place) each row PRUNE_DAYS prunes this poll; returns their `archived` events."""
     events: list[tuple[str, str, str]] = []
-    # PRUNE_DAYS: archive what has been offline that long and was never named or marked known; the
+    # PRUNE_DAYS: archive what has been offline that long and was never named, marked known or watched; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
-    # PRUNE_PRIVATE_DAYS: a shorter threshold for a private MAC that never merged (no name, note, ack, split origin
-    # or alias pointing at it), never longer than PRUNE_DAYS
+    # PRUNE_PRIVATE_DAYS: a shorter threshold for a private MAC that never merged (no name, note, ack, watch, split
+    # origin or alias pointing at it), never longer than PRUNE_DAYS
     if (cfg.prune_days > 0 or cfg.prune_private_days > 0) and not state.first_run:
         ref = now if state.prune_now is None else state.prune_now
         targets = set(state.aliases.values())
         for mac, row in rows.items():
             private = (cfg.prune_private_days > 0 and is_private_mac(mac) and not row["name"] and not row.get("note")
-                       and not row.get("split_from") and mac not in targets)
+                       and not row.get("split_from") and not row.get("watch") and mac not in targets)
             if private:
                 days = min(cfg.prune_private_days, cfg.prune_days) if cfg.prune_days > 0 else cfg.prune_private_days
             else:
@@ -778,7 +778,7 @@ def _auto_archive(rows: dict[str, dict], cfg: Config, state: MergeState, now: in
             since = row["last_online"] or row["first_seen"]
             # a restore by hand since it was last online holds until it has been online again
             if (row["archived_ts"] is None and not row["online"] and since < ref - days * 86400 and not row["name"]
-                    and not row["acked"] and state.restored.get(mac, 0) < since):
+                    and not row["acked"] and not row.get("watch") and state.restored.get(mac, 0) < since):
                 row["archived_ts"] = now
                 label = "auto (private)" if private else "auto"
                 events.append((mac, "archived", f"{label}: not online for {(ref - since) // 86400} days"))

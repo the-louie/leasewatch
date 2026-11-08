@@ -4,18 +4,16 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ## Unreleased
 
-### Fixed
-- the device table no longer scrolls sideways at 400 px (the meta line wraps below 560 px).
-
 ### Added
 - UniFi: `AUTH=apikey` with `API_KEY` (Integration API on UniFi OS consoles, Network 9.3+): a revocable key instead of a login. No SSID, signal, radio or channel in that mode (the host clears them); built from the public spec, untested on hardware.
+- For connector authors: the UniFi connector reports version 1.2, and a new stat `ssid_unavailable` (> 0 when the controller cannot report SSIDs, signal or radio this poll) makes the host clear the stored values instead of keeping them, with one `wifi` event `SSID unknown (controller reports none)` per device that had an SSID.
 - **Pinned base image:** the Dockerfile pins the base image by digest, and Dependabot proposes the weekly refresh of the base image (docker), the GitHub actions and the pip ranges.
 - **Hash-locked install:** the image installs the Python packages from `requirements.lock` (`--require-hashes`, wheels only; amd64 and arm64); [docs/image-build.md](docs/image-build.md) explains how to refresh it.
 - **Published image:** a `v*` tag publishes the image to `ghcr.io/the-louie/leasewatch` (tags `<version>`, `<major>.<minor>` and `latest`; linux/amd64 and linux/arm64, with provenance) after the tests and the Docker build pass; the package is made public by the owner after the first publish.
-- **dnsmasq static hosts:** with `DHCP_BACKEND=dnsmasq` the OPNsense static hosts (Services > Dnsmasq DNS & DHCP > Hosts, `/api/dnsmasq/settings/search_host`, same privilege) are read like Kea reservations: a host without a lease is listed as static and offline (interface from a lease or ARP entry in the same /24), its description as label; a host with several MACs gives one device per MAC; DNS-only and ignored hosts are skipped. Built from the OPNsense model, not yet verified against a live firewall; when the search fails the poll lists the leases only and keeps the stored labels.
+- **dnsmasq static hosts:** with `LW_CONNECTOR__<NAME>__DHCP_BACKEND=dnsmasq` the OPNsense static hosts (Services > Dnsmasq DNS & DHCP > Hosts, `/api/dnsmasq/settings/search_host`, same privilege) are read like Kea reservations: a host without a lease is listed as static and offline (interface from a lease or ARP entry in the same /24), its description as label; a host with several MACs gives one device per MAC; DNS-only and ignored hosts are skipped. Built from the OPNsense model, not yet verified against a live firewall; when the search fails the poll lists the leases only and keeps the stored labels.
 - `/api/status` lists `types` (every loaded connector type with its origin and how many instances use it), `refused` (a plugin that declares a built-in type name; the built-in stays) and `broken`; `python -m leasewatch check` prints `plugin: <type> refused: <reason>` for the refused ones.
 - **Watch alerts:** `MAIL_ON_WATCH=1` (default `0`) sends the `offline`, `online`, `ip`, `vlan`, `port` and `wifi` events of watched devices through the channels, one digest per poll (webhook `event` `watch`), with a link to each device's page (on Discord after the code block; with one device also ntfy's `click` and the JSON `url`). New `offline` (after the grace) and `online` (back within a day) events, for watched devices only, written on the first poll after the grace in which every source answered: during an outage nothing is written, and a device that left meanwhile is reported once the sources are back (new column `devices.watch_online`, what was last reported). A device watched later gets only events written after that.
-- `AUTH_RO_USER` + `AUTH_RO_PASSWORD_HASH` (both or neither; needs `AUTH_USER`, a different name): a second login that can look but not change anything. The page hides the edit controls (`can_write` false), a POST gets 403 `read-only`; both logins share the password-check limit and the cache.
+- `AUTH_RO_USER` + `AUTH_RO_PASSWORD_HASH` (both or neither; needs `AUTH_USER`, a different name): a second login that can look but not change anything. The page hides the edit controls (`can_write` false), a POST gets 403 `read-only`; both logins share the password-check limit and the cache. `AUTH_RO_PASSWORD_HASH` must use the same iteration count as `AUTH_PASSWORD_HASH` (make both with the same `hash-password --iterations`).
 - **Watch:** a per-device `watch` flag. The device page has a Watch / Unwatch button next to Archive (saved at once; hidden for a client that may not write), a watched device has a `watch` badge in the list, `POST /api/devices/<mac>` takes `"watch": bool` (the bulk route refuses it), the device JSON carries `watch` (0 or 1), the CSV has a last column `watch`, and a change writes a `watched` or `unwatched` event with who did it.
 - `renamed` and `note` events: a changed name (`old -> new`, 40 characters each) or note (the lengths only, never the text) is written to the event log, with who did it. The same value again writes nothing.
 - `PRUNE_PRIVATE_DAYS` (0 or 2-3650, default 0 = use `PRUNE_DAYS`): rotating phone addresses (private MACs) that never merged, with no name, note, ack, split origin or merged address, are archived after that many days offline (never longer than `PRUNE_DAYS`); it works with `PRUNE_DAYS` off. The `archived` event reads `auto (private): not online for N days`.
@@ -23,13 +21,17 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - `PURGE_DAYS` (0-3650, default 0 = off): deletes, once per poll, devices archived longer than that by the prune clock that are offline, not listed by any source for that long, unnamed, without a note and not marked known, with their history, events, Seen-by rows, Wi-Fi history and merged addresses. A purged MAC seen again is a new device. Never at the first poll or while the baseline waits; `python -m leasewatch vacuum` gives the space back.
 - `MAIL_ON_SOURCE=0|1` (default 0): the `source_down`/`source_up` events (a source down 3 polls, and back) are also sent by mail or webhook, one message per poll (webhook `event` `source_down` or `source_up`; one event's subject carries the error or the outage length, e.g. `fw1 is down: connection refused`, `fw1 is back after 2h0m`); a restart during an outage sends nothing new, and old events are not sent when it is turned on.
 - `LOG_FORMAT=plain|json|auto`: JSON log lines for log drivers; under journald the timestamp is left out (journald adds its own).
-- `import-csv` command: restores name, note, acked, archived and watch from the device CSV export (also after a `;` re-save in a spreadsheet); fills empty values by default, `--overwrite`, `--fields` and `--dry-run` available.
+- `import-csv` command: restores name, note, acked, archived and watch from the device CSV export (also after a `;` re-save in a spreadsheet); fills empty values by default, `--overwrite`, `--fields` and `--dry-run` available. Rows for one device merge field by field (an empty cell never replaces an earlier row's value) and are listed as `duplicate: <mac> (N rows)`.
 - `reset-baseline` command: marks every listed device as baseline without deleting the database (`--yes`, `--clear-acks`, `--include-archived`).
 - The `owner: <name>` note convention is documented; the note field's placeholder shows it.
 
 ### Changed
 - the README's reset recipe names everything a file delete loses.
 - acked/unacked/archived/restored event details name the client address (and user) instead of being empty.
+- `split` events name who split the address off (`(by <actor>)`), as the other user-field events do.
+
+### Fixed
+- the device table no longer scrolls sideways at 400 px (the meta line, and the name line with its badges, wrap below 560 px).
 
 ## 1.3.0 (2026-11-07)
 

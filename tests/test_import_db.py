@@ -102,9 +102,26 @@ class ImportTests(unittest.TestCase):
     def test_two_rows_one_device_last_wins(self):
         r = self.imp([{"mac": A, "name": "First"}, {"mac": ALIAS, "name": "Second"}])
         self.assertEqual(self.dev()["name"], "Second")
-        self.assertEqual(r.duplicates, [A, ALIAS])
+        self.assertEqual((r.duplicates, r.duplicate_rows), ([A], {A: 2}))
         self.assertEqual((r.updated, r.unchanged), (1, 0))
         self.assertEqual(self.kinds(), ["renamed"])
+
+    def test_rows_for_one_device_merge_field_by_field(self):
+        # a later empty or absent field keeps the earlier row's value; a later non-empty value wins
+        rows = [{"mac": A, "name": "Kept", "note": "old", "archived": True, "acked": True},
+                {"mac": ALIAS, "name": "", "note": "new", "archived": False},
+                {"mac": A, "acked": False},
+                {"mac": B, "name": "Other"}]
+        r = self.imp(rows, overwrite=True)
+        d = self.dev()
+        self.assertEqual((d["name"], d["note"], d["archived_ts"] is not None, d["acked"]), ("Kept", "new", True, 0))
+        self.assertEqual((r.duplicates, r.duplicate_rows), ([A], {A: 3}))
+        self.assertEqual(self.dev(B)["name"], "Other")
+
+    def test_empty_later_value_still_applies_when_alone(self):
+        self.imp([{"mac": A, "name": "Set"}])
+        self.imp([{"mac": A, "name": ""}, {"mac": A, "note": ""}], overwrite=True)
+        self.assertEqual(self.dev()["name"], "")
 
     def test_second_identical_run_changes_nothing(self):
         rows = [{"mac": A, "name": "N", "note": "x", "acked": True, "archived": True, "watch": True}]

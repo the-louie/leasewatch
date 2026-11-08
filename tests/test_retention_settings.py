@@ -119,6 +119,13 @@ class WarningTests(Base):
         self.assertEqual(len(out), 1)
         self.assertIn("EVENT_DAYS=7 is below PRUNE_PRIVATE_DAYS=30", out[0])
 
+    def test_compares_the_effective_private_threshold(self):
+        # PRUNE_DAYS caps PRUNE_PRIVATE_DAYS: 400 acts as 30, which EVENT_DAYS=100 covers
+        self.assertEqual(self.collector_logs(EVENT_DAYS="100", PRUNE_DAYS="30", PRUNE_PRIVATE_DAYS="400"), [])
+        out = self.collector_logs(EVENT_DAYS="100", PRUNE_DAYS="0", PRUNE_PRIVATE_DAYS="400")
+        self.assertEqual(len(out), 1)
+        self.assertIn("EVENT_DAYS=100 is below PRUNE_PRIVATE_DAYS=400", out[0])
+
     def test_silent_for_defaults_and_for_prune_off(self):
         self.assertEqual(self.collector_logs(), [])
         self.assertEqual(self.collector_logs(EVENT_DAYS="30"), [])

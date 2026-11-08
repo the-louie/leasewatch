@@ -50,6 +50,13 @@ class PrunePrivateTests(unittest.TestCase):
         self.assertEqual(self.archived(res), [(PRIV, "auto (private): not online for 8 days")])
         self.assertEqual({m for m, r in res.rows.items() if r["archived_ts"]}, {PRIV})
 
+    def test_watched_device_is_never_archived(self):
+        # watch spares a device like a name or an ack: by PRUNE_PRIVATE_DAYS and by PRUNE_DAYS
+        for res in (self.run_merge([self.off(8, watch=1)], 7, 0),
+                    self.run_merge([self.off(31, watch=1), self.off(31, HW, watch=1)], 7, 30)):
+            self.assertEqual(self.archived(res), [])
+            self.assertEqual([m for m, r in res.rows.items() if r["archived_ts"]], [])
+
     def test_not_old_enough(self):
         self.assertEqual(self.run_merge([self.off(6)], 7, 0).rows, {})
 

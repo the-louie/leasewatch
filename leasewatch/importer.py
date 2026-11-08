@@ -23,7 +23,7 @@ from .maintenance import _fail, _say
 FIELDS = ("name", "note", "acked", "archived", "watch")
 MAX_BYTES = 1024 * 1024  # the export of a large home network is well below this
 MAX_ROWS = 20_000
-MAX_LISTED = 10  # unknown MACs, and apart from them skipped lines, printed after the summary
+MAX_LISTED = 10  # unknown MACs, and apart from them duplicates and skipped lines, printed after the summary
 _TRUE = ("1", "true", "yes")
 _FALSE = ("0", "false", "no")
 _SEPARATORS = ";\r\n"  # the places _csv_cell in web.py guards besides the cell start
@@ -244,7 +244,9 @@ def import_csv_cmd(argv: list[str], out: Callable[[str], None]) -> int:
     if plan.bad:
         parts.append(f"{len(plan.bad)} skipped (bad row)")
     lines = [("import-csv (dry run): " if args.dry_run else "import-csv: ") + ", ".join(parts)]
-    for group in ([f"  unknown: {m}" for m in res.unknown], [f"  skipped line {n}: {r}" for n, r in plan.bad]):
+    for group in ([f"  unknown: {m}" for m in res.unknown],
+                  [f"  duplicate: {k} ({res.duplicate_rows[k]} rows)" for k in res.duplicates],
+                  [f"  skipped line {n}: {r}" for n, r in plan.bad]):
         lines += group[:MAX_LISTED]
         if len(group) > MAX_LISTED:
             lines.append(f"  … and {len(group) - MAX_LISTED} more")

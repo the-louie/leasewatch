@@ -126,8 +126,8 @@ the documented string key `"strategy"`.
 | `macs` | switch | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
 | `clients` | controller | Accepted and not shown (the 1.0 status alias was removed in 1.2). |
 | `strategy` (`str`) | switch | Copied to the instance's status (`conn.<name>.strategy`). |
-| `labels_unavailable` | sighting producers | Set it (> 0) when the source of your `label` values could not be read this poll (the built-in OPNsense connector sets it when the Kea reservation search fails). The host then keeps every device's stored label instead of replacing it with an empty one. |
-| `ssid_unavailable` | attachment producers | Set it (> 0) when your controller cannot report SSIDs, signal or radio this poll; the host then clears the stored values instead of keeping them. The built-in UniFi connector sets it in key mode. |
+| `labels_unavailable` | sighting producers | Set it (> 0) when the source of your `label` values could not be read this poll (the built-in OPNsense connector sets it when the Kea reservation or dnsmasq host search fails). The host then keeps every device's stored label instead of replacing it with an empty one. |
+| `ssid_unavailable` | attachment producers | Set it (> 0) when your controller cannot report SSIDs, signal or radio this poll; the host then clears the stored values instead of keeping them, and writes one `wifi` event, `SSID unknown (controller reports none)`, for each device whose stored SSID it clears. The built-in UniFi connector sets it in key mode. |
 | `dropped` | you and the host | Records you skipped as unusable. The host adds the records it dropped itself. **A batch with `dropped > 0` is not a complete list**: for a controller, and for the switch that holds a device, it counts as failed in the merge (see below). |
 
 The status count of an instance is always `len(sightings) + len(attachments)`, whatever `stats` says.
@@ -402,7 +402,8 @@ services:
 
   Added so far inside API 1: 1.3 added `Sighting.label` (optional, default `""`). A connector that sets it needs a 1.3
   host: on a 1.2 host the `Sighting(...)` call fails with an unexpected keyword. Guard it with `"label" in
-  Sighting.__dataclass_fields__` or require host 1.3 in your package metadata.
+  Sighting.__dataclass_fields__` or require host 1.3 in your package metadata. 1.4 added the stat
+  `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs).
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional

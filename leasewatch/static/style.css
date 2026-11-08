@@ -231,6 +231,7 @@ footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--m
   .dev-meta { display: flex; flex-wrap: wrap; }
   .dev-meta .where, .dev-meta .last { overflow-wrap: anywhere; min-width: 0; }
   .c-dev { max-width: none; }
+  .dev-name { flex-wrap: wrap; row-gap: 2px; } /* a long name and its badges: the badges move to a second line */
   td, th { padding-left: 8px; padding-right: 8px; }
   .c-act { width: auto; }
   .status span:last-child { display: none; }

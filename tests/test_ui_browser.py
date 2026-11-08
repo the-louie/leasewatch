@@ -647,9 +647,10 @@ class BrowserLongTextTest(_BrowserCase):
 
 
 class BrowserSsidWidthTest(_BrowserCase):
-    """Long SSID names and a NEW private-MAC row: no sideways scroll at phone widths, filtered or not."""
+    """Long SSID names, a NEW private-MAC row and a NEW watched row with a 19-character name (two badges beside it):
+    no sideways scroll at phone widths, filtered or not."""
     S32, S40 = "Guest-Network-Long-SSID-Name-32c", "VeryLongNetworkNameWithoutAnyBreaksAtAll"
-    MACS = ("02:00:00:00:31:01", "02:00:00:00:31:02", "02:00:00:00:31:03")
+    MACS = ("02:00:00:00:31:01", "02:00:00:00:31:02", "02:00:00:00:31:03", "02:00:00:00:31:04")
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -658,8 +659,11 @@ class BrowserSsidWidthTest(_BrowserCase):
         def s(m: str, n: int, host: str) -> Sighting:
             return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
                             source="dhcp", lease_type="dynamic", online=True)
-        a, b, c = cls.MACS
-        base, db = start(cls, [s(a, 40, "laptop"), s(b, 41, "phone")], [s(c, 42, "newcomer")])  # c appears after the baseline: NEW
+        a, b, c, w = cls.MACS
+        # c and w appear after the baseline: NEW
+        base, db = start(cls, [s(a, 40, "laptop"), s(b, 41, "phone")],
+                         [s(c, 42, "newcomer"), s(w, 43, "living-room-speaker")])
+        db.q("UPDATE devices SET watch=1 WHERE mac=?", (w,))
         now = int(time.time())
         for m, ssid in ((a, cls.S32), (b, cls.S40), (c, cls.S32)):
             db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
@@ -674,6 +678,8 @@ class BrowserSsidWidthTest(_BrowserCase):
                 with self.subTest(case=name, width=width):
                     r = d[f"{name}_{width}"]
                     self.assertGreater(r["rows"], 0, r)
+                    if name == "none":
+                        self.assertEqual(r["watched_new"], ["living-room-speaker"], r)
                     self.assertLessEqual(r["table_scroll"], 0, r)
                     self.assertLessEqual(r["page_scroll"], 0, r)
                     self.assertEqual(r["over"], [], r)

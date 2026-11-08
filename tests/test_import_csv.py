@@ -181,8 +181,24 @@ class ImportCsvTests(unittest.TestCase):
         self.make_db()
         path = self.write(f"mac,note\r\n{C},one\r\n{C},two\r\n")  # one MAC twice: listed once, the later row wins
         rc, lines, _ = self.run_cmd(path)
-        self.assertEqual(lines, ["import-csv: 2 rows, 1 updated, 0 unchanged, 1 duplicates"])
+        self.assertEqual(lines, ["import-csv: 2 rows, 1 updated, 0 unchanged, 1 duplicates",
+                                 f"  duplicate: {C} (2 rows)"])
         self.assertEqual(self.sql("SELECT note FROM devices WHERE mac=?", (C,)), [("two",)])
+
+    def test_duplicate_empty_later_row_keeps_the_earlier_name(self):
+        self.make_db()
+        self.sql(WIPE)
+        path = self.write(f"mac,name,note\r\n{C},Speaker,\r\n{C},,later\r\n{C},,\r\n")
+        rc, lines, _ = self.run_cmd(path, "--overwrite")
+        self.assertEqual(lines, ["import-csv: 3 rows, 1 updated, 0 unchanged, 1 duplicates",
+                                 f"  duplicate: {C} (3 rows)"])
+        self.assertEqual(self.sql("SELECT name, note FROM devices WHERE mac=?", (C,)), [("Speaker", "later")])
+
+    def test_duplicates_listed_inside_the_cap(self):
+        self.make_db()
+        rows = "".join(f"{m},x\r\n{m},y\r\n" for m in (A, B, C, D))
+        rc, lines, _ = self.run_cmd(self.write("mac,note\r\n" + rows))
+        self.assertEqual(lines[1:], [f"  duplicate: {m} (2 rows)" for m in (A, B, C, D)])
 
     def test_dry_run_writes_nothing(self):
         self.make_db()
