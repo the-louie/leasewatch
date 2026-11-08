@@ -877,6 +877,28 @@ const scenarios = {
     res.cleared = await view();
     return res;
   },
+  // long SSIDs and a NEW private-MAC row at phone widths: the page and the table must not scroll sideways
+  async ssidwidth(page, base) {
+    const res = {};
+    const cases = { none: '', ever32: '?ssid=Guest-Network-Long-SSID-Name-32ch', now32: '?ssid=Guest-Network-Long-SSID-Name-32ch&ssidnow=1',
+      ever40: '?ssid=VeryLongNetworkNameWithoutAnyBreaksAtAll' };
+    for (const [name, qs] of Object.entries(cases)) {
+      await page.setViewport({ width: 1280, height: 900 });
+      await page.goto(new URL(qs, base).href, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#rows tr');
+      for (const width of [400, 360]) {
+        await page.setViewport({ width, height: 900 });
+        res[`${name}_${width}`] = await page.evaluate(() => {
+          const wrap = document.querySelector('.table-wrap'), de = document.documentElement;
+          return { rows: document.querySelectorAll('#rows tr').length, table_scroll: wrap.scrollWidth - wrap.clientWidth,
+            page_scroll: de.scrollWidth - de.clientWidth,
+            over: [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > wrap.getBoundingClientRect().right + 0.5 && e.offsetWidth > 0 && !e.closest('.vlans, .drawer'))
+              .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}:${Math.round(e.getBoundingClientRect().right)}`) };
+        });
+      }
+    }
+    return res;
+  },
   // a device archived after it was on the guest network: not in its list under the default status filter, listed under
   // "Archived", and not in the chip's count
   async ssidarchived(page, base) {

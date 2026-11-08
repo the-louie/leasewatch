@@ -646,6 +646,38 @@ class BrowserLongTextTest(_BrowserCase):
         self.assertEqual(cells[self.PLAIN]["where"]["title"], "")
 
 
+class BrowserSsidWidthTest(_BrowserCase):
+    """Long SSID names and a NEW private-MAC row: no sideways scroll at phone widths, filtered or not."""
+    S32, S40 = "Guest-Network-Long-SSID-Name-32ch", "VeryLongNetworkNameWithoutAnyBreaksAtAll"
+    MACS = ("02:00:00:00:31:01", "02:00:00:00:31:02", "02:00:00:00:31:03")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        a, b, c = cls.MACS
+        base, db = start(cls, [s(a, 40, "laptop"), s(b, 41, "phone")], [s(c, 42, "newcomer")])  # c appears after the baseline: NEW
+        now = int(time.time())
+        for m, ssid in ((a, cls.S32), (b, cls.S40), (c, cls.S32)):
+            db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
+                 (m, ssid, now - 86400, now, 3600, 1, "ap-1"))
+            db.q("UPDATE devices SET wifi_ssid=?, online=1 WHERE mac=?", (ssid, m))
+        cls.run_scenarios(base, ("ssidwidth",))
+
+    def test_no_horizontal_scroll_at_400_and_360_px(self) -> None:
+        d = self.result("ssidwidth")
+        for name in ("none", "ever32", "now32", "ever40"):
+            for width in (400, 360):
+                with self.subTest(case=name, width=width):
+                    r = d[f"{name}_{width}"]
+                    self.assertGreater(r["rows"], 0, r)
+                    self.assertLessEqual(r["table_scroll"], 0, r)
+                    self.assertLessEqual(r["page_scroll"], 0, r)
+
+
 class BrowserSsidTest(_BrowserCase):
     """The Wi-Fi network chips and the SSID filter, on presence rows seeded straight into the DB. One SSID name carries
     markup and quotes, as anyone in radio range can name a network that way."""
