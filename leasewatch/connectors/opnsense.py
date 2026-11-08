@@ -13,7 +13,7 @@ from . import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, S
 
 
 def to_sighting(s: Fw1Sighting, source: str, observed_at: int) -> Sighting:
-    """fw1's record in the connector shape: its "source" (dhcp/arp) is the kind, "online" the presence claim,
+    """fw1's record in the connector shape: its "source" (dhcp/arp/ndp) is the kind, "online" the presence claim,
     "vlan" the network name; source becomes the instance name."""
     return Sighting(mac=s.mac, source=source, kind=s.source, presence=s.online, observed_at=observed_at,
                     ip=s.ip, hostname=s.hostname, vendor=s.vendor, network=s.vlan, iface=s.iface, lease_type=s.lease_type,
@@ -32,6 +32,8 @@ class OpnsenseConnector(SettingsMixin):
                     help="DHCPv4 server to read leases from (dnsmasq: leases only, no reservation search)"),
             Setting("ignore_interfaces", default="wan,lo0", help="comma-separated identifiers, devices or descriptions"),
             Setting("proxy", default="0", help="honour http(s)_proxy for this connection"),
+            Setting("ipv6", default="0",
+                    help="also read the NDP table (IPv6 neighbours) and DHCPv6 leases; needs the Diagnostics: NDP Table privilege"),
         ),
     )
 
@@ -50,7 +52,7 @@ class OpnsenseConnector(SettingsMixin):
         problems = self._generic_problems()
         if self.settings["url"]:
             problems += url_problems("url", self.settings["url"], "https://<opnsense>")
-        for key in ("verify_tls", "proxy"):
+        for key in ("verify_tls", "proxy", "ipv6"):
             if parse_bool(self.settings[key]) is None:
                 problems.append(f"{key} must be a boolean (1/0, true/false, yes/no, on/off)")
         return problems
@@ -63,7 +65,11 @@ class OpnsenseConnector(SettingsMixin):
 
     def collect(self) -> Batch:
         try:
-            sightings, stats = self.client.sightings(self.ignore_interfaces)
+            # the keyword only when on: a client (or stand-in) without the NDP read keeps its old signature working
+            if parse_bool(self.settings["ipv6"]):
+                sightings, stats = self.client.sightings(self.ignore_interfaces, ipv6=True)
+            else:
+                sightings, stats = self.client.sightings(self.ignore_interfaces)
         except Fw1Error as e:
             raise ConnectorError(mask_url_host(str(e), self.settings["url"])) from e
         now = self.ctx.now()

@@ -48,7 +48,7 @@ class Sighting:
     vendor: str
     vlan: str          # human name of the interface (LAN, IOT, ...)
     iface: str         # OPNsense identifier (opt3, ...)
-    source: str        # "dhcp" | "arp"
+    source: str        # "dhcp" | "arp" | "ndp"
     lease_type: str    # "dynamic" | "static" | "" (arp only)
     online: bool
     client_id: str = ""  # as the server sends it (ISC: already hex); connectors.merge.norm_client_id normalises it
@@ -368,10 +368,23 @@ class Fw1Client:
             raise Fw1Error("fw1 arp: unexpected response shape")
         return r
 
+    def ndp_raw(self) -> list[dict]:
+        """The NDP table (IPv6 neighbours); needs "Diagnostics: NDP Table"."""
+        r = self._call("/api/diagnostics/interface/get_ndp")
+        if isinstance(r, dict):
+            r = r.get("rows", r.get("data"))
+        if not isinstance(r, list):
+            raise Fw1Error("fw1 ndp: unexpected response shape")
+        return r
+
     # --- normalised --------------------------------------------------------
-    def sightings(self, ignore_interfaces: tuple = ()) -> tuple[list[Sighting], dict]:
+    def sightings(self, ignore_interfaces: tuple = (), ipv6: bool = False) -> tuple[list[Sighting], dict]:
         """Return (sightings, stats). Raises Fw1Error if the lease or ARP call fails; the Kea reservation
         and dnsmasq host searches are best-effort.
+
+        With ipv6, the NDP table is also read (best-effort) into "ndp" sightings with ip6 set and online False;
+        skipped are rows without a MAC, on an ignored interface, with a link-local or unparsable address, and
+        rows whose MAC is in a permanent ARP entry of this poll (the firewall's own interfaces).
 
         ignore_interfaces matches (case-insensitively) the OPNsense identifier (opt3), the device (vlan0110, igc4)
         or the description (Klienter, WAN), because leases and ARP rows name interfaces differently."""
@@ -388,16 +401,31 @@ class Fw1Client:
                 log.warning("reservations unavailable, listing leases only: %s", e)
                 labels_unavailable = True
         arp = self.arp_raw()
+        ndp = None
+        ndp_unavailable = False
+        if ipv6:
+            # the NDP table only adds IPv6 addresses; an API key without that privilege must not stop the poll
+            try:
+                ndp = self.ndp_raw()
+                self._ndp_warned = False
+            except Fw1Error as e:
+                if not getattr(self, "_ndp_warned", False):  # one WARNING per spell, not one per poll
+                    log.warning("NDP table unavailable, listing IPv4 only: %s", e)
+                    self._ndp_warned = True
+                ndp_unavailable = True
         try:
-            out, stats = self._sightings(leases, arp, skip, reservations)
+            out, stats = self._sightings(leases, arp, skip, reservations, ndp)
         except (TypeError, AttributeError, KeyError) as e:
             raise Fw1Error("fw1: unexpected field type in leases/arp") from e
         if labels_unavailable:
             # the labels come from the reservations: an empty one this poll is no evidence, so the merge keeps the stored labels
             stats["labels_unavailable"] = 1
+        if ndp_unavailable:
+            stats["ndp_unavailable"] = 1
         return out, stats
 
-    def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None) -> tuple[list[Sighting], dict]:
+    def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None,
+                   ndp: list | None = None) -> tuple[list[Sighting], dict]:
         out: list[Sighting] = []
         if self.dhcp_backend == "dnsmasq":
             lease_rows = dnsmasq_leases(leases, time.time())  # the clock read here keeps the parser pure
@@ -435,10 +463,13 @@ class Fw1Client:
                 online=l.get("status") == "online", client_id=_s(l.get("client_id")),
                 label=_s(l.get("label"))[:LABEL_MAX],
             ))
+        own: set[str] = set()  # MACs of permanent ARP entries: the firewall's own interfaces
         for a in arp:
             if not isinstance(a, dict):
                 continue
             mac = norm_mac(_s(a.get("mac")))
+            if mac and a.get("permanent"):
+                own.add(mac)
             if not mac or a.get("permanent") or a.get("expired"):
                 continue
             iface = _s(a.get("intf"))
@@ -450,7 +481,31 @@ class Fw1Client:
                 vlan=_s(a.get("intf_description")) or iface, iface=iface,
                 source="arp", lease_type="", online=True,
             ))
+        kept = 0
+        for n in ndp or ():
+            if not isinstance(n, dict):
+                continue
+            mac = norm_mac(_s(n.get("mac")))
+            if not mac:  # "(incomplete)"
+                continue
+            iface = _s(n.get("intf"))
+            if skip(iface, n.get("intf_description")):
+                continue
+            ip6 = _s(n.get("ip")).split("%", 1)[0]  # a link-local row may carry its %scope
+            addr = _addr(ip6)
+            if addr is not None and addr.version == 6 and addr.is_link_local:
+                continue
+            if mac in own or addr is None or addr.version != 6:
+                continue
+            kept += 1
+            out.append(Sighting(
+                mac=mac, ip="", hostname="", vendor=_s(n.get("manufacturer")),
+                vlan=_s(n.get("intf_description")) or iface, iface=iface,
+                source="ndp", lease_type="", online=False, ip6=ip6,
+            ))
         stats = {"leases": len(leases), "arp": len(arp)}
         if reservations is not None:
             stats["reservations"] = len(reservations)
+        if ndp is not None:
+            stats["ndp"] = kept
         return out, stats
