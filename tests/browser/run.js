@@ -128,10 +128,10 @@ const scenarios = {
     await waitOpen(page, MAC);
     res.bg_open = await bg();
     res.tab = [];
-    for (let i = 0; i < 7; i++) { await page.keyboard.press('Tab'); res.tab.push(await where()); }
+    for (let i = 0; i < 8; i++) { await page.keyboard.press('Tab'); res.tab.push(await where()); }
     await page.focus('#dClose');
     res.shift_tab = [];
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 8; i++) {
       await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
       res.shift_tab.push(await where());
     }
@@ -902,6 +902,75 @@ const scenarios = {
     }
     return res;
   },
+  // tags end to end: typed in the drawer, normalised by the server, badges in the row, the chip row and its filter in the
+  // address, a reload, Clear filters, a refused tag, and many badges at phone width
+  async tags(page, base) {
+    const A = '02:00:00:00:50:01', B = '02:00:00:00:50:02', W = '02:00:00:00:50:03';
+    const waitUrl = v => page.waitForFunction(t => new URLSearchParams(location.search).get('tag') === t, {}, v);
+    const view = () => page.evaluate(() => ({
+      hidden: document.querySelector('#tags').classList.contains('hidden'),
+      chips: [...document.querySelectorAll('#tags .chip[data-tag]')].map(c => ({ tag: c.dataset.tag, text: c.querySelector('.tg').textContent,
+        n: c.querySelector('.n').textContent, pressed: c.getAttribute('aria-pressed') })),
+      rows: [...document.querySelectorAll('#rows tr')].map(t => t.dataset.mac).sort(),
+      badges: Object.fromEntries([...document.querySelectorAll('#rows tr')].map(t => [t.dataset.mac,
+        [...t.querySelectorAll('.dev-tags .badge.tag')].map(b => ({ tag: b.dataset.tag, text: b.textContent, owner: b.classList.contains('owner') }))])),
+      tag: new URLSearchParams(location.search).get('tag'),
+    }));
+    const res = { before: await view() };
+    // A: type the tags, Save; the POST carries them with the name and the note
+    let body = null;
+    const onReq = r => { if (r.method() === 'POST') body = r.postData(); };
+    page.on('request', onReq);
+    await page.click(`${row(A)} .c-dev`); await waitOpen(page, A);
+    await page.type('#fTags', 'IoT, owner:alex');
+    await page.click('#fSave');
+    await page.waitForFunction(() => document.querySelector('#fSaved') && document.querySelector('#fSaved').textContent === 'saved');
+    page.off('request', onReq);
+    res.saved = { body: JSON.parse(body), server: (await serverDevice(page, A)).tags, input: await page.$eval('#fTags', e => e.value) };
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await page.waitForSelector('#tags .chip[data-tag]');
+    res.after = await view();
+    // the iot chip filters to A and writes the address; a reload keeps it
+    await page.click('#tags .chip[data-tag="iot"]');
+    await waitUrl('iot');
+    res.filtered = await view();
+    await page.goto(page.url(), { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#tags .chip.active[data-tag]');
+    res.reloaded = await view();
+    // Clear filters (offered when nothing matches) drops the tag too
+    await page.type('#q', 'zzz-nothing');
+    await page.waitForSelector('#empty:not(.hidden) #emptyClear:not(.hidden)');
+    await page.click('#emptyClear');
+    await page.waitForFunction(() => !location.search);
+    res.cleared = await view();
+    // B: a tag the server refuses; the banner says why and the input keeps what was typed
+    page.__allow = [400];
+    await page.click(`${row(B)} .c-dev`); await waitOpen(page, B);
+    await page.type('#fTags', 'tag!');
+    await page.click('#fSave');
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    res.refused = { banner: await page.$eval('#banner', e => e.textContent), input: await page.$eval('#fTags', e => e.value),
+                    open: await drawerOpen(page), server: (await serverDevice(page, B)).tags };
+    page.__allow = null;
+    await page.click('#fTags', { clickCount: 3 }); await page.keyboard.press('Backspace'); // nothing left to discard
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    // W: eight long tags, at phone widths
+    await page.evaluate(async m => { await fetch(`/api/devices/${m}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags: 'living-room-speaker-01, owner:alexandra-long, upstairs-hallway-ceil, media-streaming-box, firmware-pinned-v2, kids-bedtime-schedule, guest-network-allowed, energy-monitoring-on' }) }); }, W);
+    await page.evaluate(() => window.__lwReload());
+    await page.waitForFunction(m => document.querySelectorAll(`#rows tr[data-mac="${m}"] .badge.tag`).length === 8, {}, W);
+    for (const width of [400, 360]) {
+      await page.setViewport({ width, height: 900 });
+      res[width] = await page.evaluate(m => {
+        const wrap = document.querySelector('.table-wrap'), de = document.documentElement, tr = document.querySelector(`#rows tr[data-mac="${m}"]`);
+        return { table_scroll: wrap.scrollWidth - wrap.clientWidth, page_scroll: de.scrollWidth - de.clientWidth,
+          lines: new Set([...tr.querySelectorAll('.badge.tag')].map(b => Math.round(b.getBoundingClientRect().top))).size,
+          over: [...wrap.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > wrap.getBoundingClientRect().right + 0.5 && e.offsetWidth > 0)
+            .slice(0, 10).map(e => `${e.tagName.toLowerCase()}.${e.className}:${Math.round(e.getBoundingClientRect().right)}`) };
+      }, W);
+    }
+    return res;
+  },
   // a device archived after it was on the guest network: not in its list under the default status filter, listed under
   // "Archived", and not in the chip's count
   async ssidarchived(page, base) {
@@ -1013,7 +1082,7 @@ async function runScenario(browser, base, name) {
     // listeners before goto, or the first load's errors are missed
     page.on('console', m => {
       // a scenario that asks for a known 404 (page.__allow) does not fail on Chrome's console line for it
-      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \((Not Found|Service Unavailable)\)/.test(m.text()))) res.console_errors.push(m.text());
+      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \((Not Found|Service Unavailable|Bad Request)\)/.test(m.text()))) res.console_errors.push(m.text());
       if (/^Refused to|Content Security Policy/.test(m.text())) res.csp_violations.push(`console: ${m.text()}`);
     });
     // the page's own report of anything the CSP blocked, from every document the page loads

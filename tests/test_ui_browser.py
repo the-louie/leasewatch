@@ -228,9 +228,9 @@ class BrowserUITest(_BrowserCase):
         d = self.result("trap")
         self.assertEqual(d["bg_before"], [False, False, False])
         self.assertEqual(d["bg_open"], [True, True, True])  # header, main, footer
-        # Tab from Name: Note, Save, the ack, archive and watch buttons, then around to Close and Name again
-        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fSave", "fAck", "fArch", "fWatch", "dClose", "fName"])
-        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fWatch", "fArch", "fAck", "fSave", "fNote", "fName", "dClose"])
+        # Tab from Name: Note, Tags, Save, the ack, archive and watch buttons, then around to Close and Name again
+        self.assertEqual([t["id"] for t in d["tab"]], ["fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "dClose", "fName"])
+        self.assertEqual([t["id"] for t in d["shift_tab"]], ["fWatch", "fArch", "fAck", "fSave", "fTags", "fNote", "fName", "dClose"])
         self.assertTrue(all(t["in_drawer"] for t in d["tab"] + d["shift_tab"]))
         self.assertTrue(d["q_focus"]["in_drawer"], d["q_focus"])
         self.assertEqual(d["bg_closed"], [False, False, False])
@@ -683,6 +683,73 @@ class BrowserSsidWidthTest(_BrowserCase):
                     self.assertLessEqual(r["table_scroll"], 0, r)
                     self.assertLessEqual(r["page_scroll"], 0, r)
                     self.assertEqual(r["over"], [], r)
+
+
+class BrowserTagsTest(_BrowserCase):
+    """Tags: typed in the drawer and normalised by the server, badges in the row, the chip row and its ?tag= filter, a
+    refused tag, and a row with eight long tags at phone widths."""
+    A, B, W = "02:00:00:00:50:01", "02:00:00:00:50:02", "02:00:00:00:50:03"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str, online: bool) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=online)
+        base, _db = start(cls, [s(cls.A, 50, "thermostat", True), s(cls.B, 51, "printer", False),
+                                s(cls.W, 52, "living-room-speaker", True)])
+        cls.run_scenarios(base, ("tags",))
+
+    def test_no_chip_row_without_tags(self) -> None:
+        d = self.result("tags")["before"]
+        self.assertEqual((d["hidden"], d["chips"], d["tag"]), (True, [], None))
+        self.assertEqual(d["badges"], {self.A: [], self.B: [], self.W: []})
+
+    def test_save_posts_tags_and_server_normalises(self) -> None:
+        d = self.result("tags")["saved"]
+        self.assertEqual(d["body"], {"name": "", "note": "", "tags": "IoT, owner:alex"})
+        self.assertEqual(d["server"], "iot,owner:alex")
+        self.assertEqual(d["input"], "iot, owner:alex")  # the drawer shows what was stored
+
+    def test_row_badges_and_chips(self) -> None:
+        d = self.result("tags")["after"]
+        self.assertEqual(d["badges"][self.A], [{"tag": "iot", "text": "iot", "owner": False},
+                                               {"tag": "owner:alex", "text": "\U0001F464alex", "owner": True}])
+        self.assertEqual(d["badges"][self.B], [])
+        self.assertFalse(d["hidden"])
+        # the owner chip keeps its full text
+        self.assertEqual(d["chips"], [{"tag": "iot", "text": "iot", "n": "1/1", "pressed": "false"},
+                                      {"tag": "owner:alex", "text": "owner:alex", "n": "1/1", "pressed": "false"}])
+
+    def test_chip_filters_and_reload_keeps_it(self) -> None:
+        r = self.result("tags")
+        for name in ("filtered", "reloaded"):
+            with self.subTest(step=name):
+                d = r[name]
+                self.assertEqual((d["rows"], d["tag"]), ([self.A], "iot"))
+                self.assertEqual([c["tag"] for c in d["chips"] if c["pressed"] == "true"], ["iot"])
+
+    def test_clear_filters_resets_the_tag(self) -> None:
+        d = self.result("tags")["cleared"]
+        self.assertEqual((d["tag"], d["rows"]), (None, sorted([self.A, self.B, self.W])))
+        self.assertEqual([c for c in d["chips"] if c["pressed"] == "true"], [])
+
+    def test_refused_tag_shows_the_reason_and_keeps_the_input(self) -> None:
+        d = self.result("tags")["refused"]
+        self.assertTrue(d["banner"].startswith("Save failed: "), d["banner"])
+        self.assertIn("tag!", d["banner"])
+        self.assertEqual((d["input"], d["open"], d["server"]), ("tag!", True, ""))
+
+    def test_many_badges_wrap_without_sideways_scroll(self) -> None:
+        r = self.result("tags")
+        for width in ("400", "360"):
+            with self.subTest(width=width):
+                d = r[width]
+                self.assertGreater(d["lines"], 1, d)
+                self.assertLessEqual(d["table_scroll"], 0, d)
+                self.assertLessEqual(d["page_scroll"], 0, d)
+                self.assertEqual(d["over"], [], d)
 
 
 class BrowserSsidTest(_BrowserCase):

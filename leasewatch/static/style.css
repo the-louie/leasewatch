@@ -79,6 +79,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 8px 24px 40px; }
 .ssids .ssid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
 .ssids .chip.toggle { border-style: dashed; color: var(--muted); }
 .ssids .chip.toggle.active { border-style: solid; color: inherit; }
+.tags .chip { padding-left: 11px; }
+.tags .chip.toggle { border-style: dashed; color: var(--muted); }
 
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 .search { position: relative; flex: 1 1 320px; }
@@ -124,6 +126,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .badge.vlan { background: color-mix(in srgb, var(--vc, var(--vlan0)) 14%, transparent); color: var(--vc, var(--vlan0)); }
 .badge.base { background: var(--bg3); color: var(--muted); font-weight: 500; }
 .badge.watch { background: var(--warn-bg); color: var(--warn); }
+/* the tags: a line of their own under the name, wrapping at every width */
+.dev-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 1px; min-width: 0; }
+.dev-tags:empty { display: none; }
+.badge.tag { background: var(--bg3); color: var(--muted); font-weight: 500; font-size: 11px; padding: 1px 7px; }
+.badge.tag .ico { margin-right: 3px; }
 .c-type { color: var(--muted); font-size: 13px; white-space: nowrap; }
 /* a long SSID @ AP or port → device is cut with an ellipsis (the cell's title has it all), so the table never scrolls sideways */
 .c-where { font-size: 13px; white-space: nowrap; color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }

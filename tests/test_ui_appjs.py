@@ -122,7 +122,7 @@ def _extract(src: str, name: str) -> str:
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
         "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
-        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow"]
+        "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf"]
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
 DOM = r"""
@@ -158,16 +158,18 @@ const tpl = { content: { cloneNode: () => ({ firstElementChild: new El("TR") }) 
 const body = new El(); body.parent = null;
 // the drawer body: pick the controls out of the HTML the code writes, as a browser would build them
 body.onHtml = h => {
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) delete byId[id];
+  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) delete byId[id];
   const kv = /<dl class="kv">([\s\S]*?)<\/dl>/.exec(h);
   body.kv = new El("DL"); body.kv.parent = body; body.kv._html = kv ? kv[1] : "";
   const name = /id="fName"[^>]*value="([^"]*)"/.exec(h);
   if (name) { byId.fName = new El("INPUT"); byId.fName.value = name[1]; }
   const note = /<textarea id="fNote"[^>]*>([^<]*)<\/textarea>/.exec(h);
   if (note) { byId.fNote = new El("TEXTAREA"); byId.fNote.value = note[1]; }
+  const tags = /id="fTags"[^>]*value="([^"]*)"/.exec(h);
+  if (tags) { byId.fTags = new El("INPUT"); byId.fTags.value = tags[1]; }
   for (const id of ["fSave", "fAck", "fArch", "fWatch"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
   if (/id="fSaved"/.test(h)) byId.fSaved = new El("SPAN");
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) if (byId[id]) byId[id].parent = body;
+  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) if (byId[id]) byId[id].parent = body;
 };
 const els = { "#rows": rows, "#rowTpl": tpl, "#dBody": body };
 const $ = (s, el) => {
@@ -313,6 +315,45 @@ await byId.fAck.onclick(); out.second = posts[posts.length - 1].acked;
         self.assertEqual(out["label"], "Mark unknown")
         self.assertEqual(out["note"], "typed")
         self.assertIs(out["second"], False)
+
+    # Tags is a form field: Save posts it with Name and Note, and a typed tag is an unsaved edit until then
+    def test_tags_are_a_form_field(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
+out.fields = FORM_FIELDS;
+server.tags = "iot,owner:alex";
+state.open = server.mac; await refreshDrawer(server.mac, true);
+out.shown = byId.fTags.value; out.clean = formEdited(server.mac);
+byId.fTags.value = "iot, printer"; out.dirty = formEdited(server.mac);
+await byId.fSave.onclick();
+out.body = posts[posts.length - 1]; out.after = formEdited(server.mac);
+""")
+        self.assertEqual(out["fields"], {"name": "#fName", "note": "#fNote", "tags": "#fTags"})
+        self.assertEqual(out["shown"], "iot, owner:alex")
+        self.assertEqual((out["clean"], out["dirty"], out["after"]), (False, True, False))
+        self.assertEqual(out["body"], {"name": "", "note": "", "tags": "iot, printer"})
+
+    # the tag chips: archived devices left out, most used first, then by name
+    def test_tag_counts_sorted_by_use_then_name(self) -> None:
+        out = _run(["tagCounts"], r"""//--
+const d = (tags, online, archived) => ({ tags, online, archived_ts: archived ? 1 : null });
+out.list = tagCounts([d("iot,owner:alex", 1), d("iot", 0), d("printer,owner:alex", 0), d("", 1), d("tv", 1, true), d("b", 1), d("a", 0)]);
+out.none = tagCounts([d("", 1), {}]);
+""")
+        self.assertEqual(out["list"], [{"tag": "iot", "online": 1, "n": 2}, {"tag": "owner:alex", "online": 1, "n": 2},
+                                       {"tag": "a", "online": 0, "n": 1}, {"tag": "b", "online": 1, "n": 1},
+                                       {"tag": "printer", "online": 0, "n": 1}])
+        self.assertEqual(out["none"], [])
+
+    # the tag filter matches whole tags; the search box matches tag text too
+    def test_tag_filter_and_search(self) -> None:
+        out = _run(["filtered"], r"""//--
+state.devices = [{ mac: "a", ip: "10.0.0.1", tags: "iot,owner:alex", baseline: 1 }, { mac: "b", ip: "10.0.0.2", tags: "iot-hub", baseline: 1 },
+                 { mac: "c", ip: "10.0.0.3", tags: "", baseline: 1 }];
+state.tag = "iot"; out.tag = filtered().map(d => d.mac);
+state.tag = null; state.q = "alex"; out.q = filtered().map(d => d.mac);
+""")
+        self.assertEqual(out["tag"], ["a"])
+        self.assertEqual(out["q"], ["a"])
 
     # a failed refresh after a save does not wipe text typed while the save ran
     def test_failed_refresh_after_save_keeps_typed_text(self) -> None:

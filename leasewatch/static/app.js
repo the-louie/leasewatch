@@ -12,6 +12,7 @@
     evGen: 0, // bumped by a filter change: a page requested under an older filter is dropped when it arrives
     q: "", status: "all", vlan: null, sort: "first_desc", open: null, returnTo: null, apiDown: false,
     ssid: null, ssidNow: false, // the Wi-Fi network filter: devices ever seen on it, or (ssidNow) online on it now
+    tag: null, tagsAll: false, // the tag filter (one tag); tagsAll: the "+N more" chip has opened the whole tag row
     deepLink: null, // the ?device= MAC from the address, until the first load has opened its drawer
     renderError: null, // kept so the 15 s status refresh does not hide a page error while the table is still broken
     loadSeq: 0, // number of the newest load(): an older one that answers later must not write its snapshot over it
@@ -130,7 +131,7 @@
       state.skew = d.meta?.now ? d.meta.now - Date.now() / 1000 : 0;
       state.apiDown = false; state.devices = d.devices; state.meta = d.meta; state.stats = s.stats; if (gen === state.evGen) { if (bad) clearEvents(); else mergeFirstPage(e); }
       state.renderError = null;
-      try { renderStatus(); renderCards(); renderVlans(); renderSsids(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
+      try { renderStatus(); renderCards(); renderVlans(); renderSsids(); renderTags(); renderTable(); renderEvents(); if (state.open) await refreshDrawer(state.open, false); }
       catch (err) { console.error(err); state.renderError = err.message; showBanner(`Page error: ${err.message}`); return; } // a UI bug, not an unreachable API (refreshDrawer handles its own fetch errors)
       // a ?device= link not opened yet (the first load failed): this render has the list and meta it needs
       if (state.deepLink) await openDeepLink();
@@ -234,11 +235,57 @@
     now.classList.toggle("active", state.ssidNow); now.setAttribute("aria-pressed", state.ssidNow);
   }
 
+  // a device's tags: the server stores them normalised, as a comma list ("" = none)
+  const tagsOf = d => (d.tags || "").split(",").filter(Boolean);
+  // the tag chips from the device list, archived devices left out as the network chips leave them out: [{tag, online,
+  // n}], most used first, then by name
+  function tagCounts(devices) {
+    const m = new Map();
+    for (const d of devices) {
+      if (d.archived_ts != null) continue;
+      for (const t of tagsOf(d)) { const c = m.get(t) || { tag: t, online: 0, n: 0 }; c.n++; if (d.online) c.online++; m.set(t, c); }
+    }
+    return [...m.values()].sort((a, b) => (b.n - a.n) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+  }
+  const TAGS_SHOWN = 12; // chips before "+N more"
+  // the tag row: an owner: tag keeps its full text here, so a later grouping by owner changes only how it is shown
+  function renderTags() {
+    const box = $("#tags");
+    const fe = box.contains(document.activeElement) ? document.activeElement : null, had = fe?.dataset.tag ?? null;
+    box.innerHTML = "";
+    const list = tagCounts(state.devices);
+    // a filter from the address on a tag no device has keeps a chip, so it can be clicked off
+    if (state.tag !== null && !list.some(t => t.tag === state.tag)) list.push({ tag: state.tag, online: 0, n: 0 });
+    box.classList.toggle("hidden", !list.length);
+    // the most used ones, and the active one wherever it ranks
+    const shown = state.tagsAll ? list : list.filter((t, i) => i < TAGS_SHOWN || t.tag === state.tag);
+    const chips = shown.map(t => {
+      const on = state.tag === t.tag, c = document.createElement("button");
+      c.type = "button"; c.className = "chip" + (on ? " active" : ""); c.setAttribute("aria-pressed", on); c.dataset.tag = t.tag;
+      c.innerHTML = `<span class="tg">${esc(t.tag)}</span> <span class="n">${esc(t.online)}/${esc(t.n)}</span>`;
+      c.title = `${t.online} online of ${t.n} devices tagged ${t.tag}`;
+      c.onclick = () => { state.tag = on ? null : t.tag; renderTags(); renderTable(); syncUrl(); };
+      box.appendChild(c);
+      if (had != null && had === t.tag) c.focus();
+      return c;
+    });
+    if (shown.length < list.length) {
+      const more = document.createElement("button");
+      more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = `+${list.length - shown.length} more`;
+      more.title = "Show every tag";
+      // the button goes with the click: the focus moves to the first chip it brought in
+      more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box)[shown.length]?.focus(); };
+      box.appendChild(more);
+      if (fe?.id === "tagMore") more.focus();
+    } else if (fe?.id === "tagMore") chips[0]?.focus();
+  }
+
   function filtered() {
     const q = state.q.trim().toLowerCase();
     const list = state.devices.filter(d => {
       if (state.vlan !== null && d.vlan !== state.vlan) return false; // null = no filter; "" is the unnamed network
       if (state.ssid !== null && !(state.ssidNow ? onSsidNow(d) : ssidRow(d))) return false;
+      if (state.tag !== null && !tagsOf(d).includes(state.tag)) return false;
       if ((d.archived_ts != null) !== (state.status === "archived")) return false; // archived devices only under their own filter
       switch (state.status) {
         case "new": if (!isNew(d)) return false; break;
@@ -253,7 +300,7 @@
         case "wired": if (onWifi(d) || (d.link !== "wired" && !d.sw_port)) return false; break;
       }
       if (q) {
-        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")}`.toLowerCase();
+        const hay = `${d.name} ${d.hostname} ${d.ip} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")} ${tagsOf(d).join(" ")}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -324,6 +371,11 @@
       if (fresh) nm.insertAdjacentHTML("beforeend", '<span class="badge new">NEW</span>');
       else if (!d.acked && !d.baseline) nm.insertAdjacentHTML("beforeend", '<span class="badge base">not yet known</span>');
       if (d.watch) nm.insertAdjacentHTML("beforeend", '<span class="badge watch" title="watched">watch</span>');
+      // the tags on their own line under the name, which wraps: an owner: tag shows the owner after a person glyph
+      $(".dev-tags", tr).innerHTML = tagsOf(d).map(t => {
+        const who = t.startsWith("owner:") && t.length > 6 ? t.slice(6) : null;
+        return `<span class="badge tag${who ? " owner" : ""}" data-tag="${esc(t)}" title="tag ${esc(t)}">${who ? `<span class="ico" aria-hidden="true">\u{1F464}</span>${esc(who)}` : esc(t)}</span>`;
+      }).join("");
       const sub = [];
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
@@ -371,8 +423,8 @@
     $("#empty").classList.toggle("hidden", list.length > 0);
     $("#thFirst").textContent = state.ssid !== null ? "First on SSID" : "First seen";
     $("#thLast").textContent = state.ssid !== null ? "Last on SSID" : "Last online";
-    $("#emptyText").textContent = state.q || state.vlan !== null || state.ssid !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
-    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.ssid !== null || state.status !== "all"));
+    $("#emptyText").textContent = state.q || state.vlan !== null || state.ssid !== null || state.tag !== null ? "Nothing matches." : state.status === "unacked" ? "Every device is known." : state.status === "baseline" ? "Every baseline device is checked." : state.status === "new" ? `No new devices in the last ${state.meta?.new_days ?? 7} days.` : "Nothing matches.";
+    $("#emptyClear").classList.toggle("hidden", !(state.q || state.vlan !== null || state.ssid !== null || state.tag !== null || state.status !== "all"));
   }
 
   // the whole MAC or IP text copies on click, Enter or Space; the feedback is a class and a title, so the table keeps
@@ -504,8 +556,8 @@
     return !formEdited(state.open) || confirm("Discard unsaved changes?");
   }
   // the drawer's text fields, by the key the API takes: a new field is added here and in the form markup only
-  const FORM_FIELDS = { name: "#fName", note: "#fNote" };
-  // the values now typed in the drawer form: {name, note}
+  const FORM_FIELDS = { name: "#fName", note: "#fNote", tags: "#fTags" };
+  // the values now typed in the drawer form: {name, note, tags}
   function formValues() {
     return Object.fromEntries(Object.entries(FORM_FIELDS).map(([k, sel]) => [k, $(sel).value]));
   }
@@ -647,6 +699,7 @@
       <div class="form">
         <label>Name (what this device is)<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="e.g. Alex's iPad"${ro}></label>
         <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="owner: alex, where it lives, anything useful"${ro}>${esc(d.note)}</textarea></label>
+        <label>Tags<input id="fTags" maxlength="232" value="${esc(tagsOf(d).join(", "))}" placeholder="iot, owner:alex"${ro}></label>
         <div class="actions">${ro ? `
           <span class="muted" id="fReadOnly">${state.meta.role === "ro" ? "Read-only login: this user can look but not change anything" : state.meta.read_only ? "Read-only: changes are off on this server" : "Read-only: changes are off for this address"}</span>` : `
           <button class="btn" id="fSave">Save</button>
@@ -760,6 +813,7 @@
     const p = new URLSearchParams();
     if (state.q) p.set("q", state.q); if (state.status !== "all") p.set("filter", state.status); if (state.vlan !== null) p.set("vlan", state.vlan); if (state.sort !== "first_desc") p.set("sort", state.sort);
     if (state.ssid !== null) { p.set("ssid", state.ssid); if (state.ssidNow) p.set("ssidnow", "1"); }
+    if (state.tag !== null) p.set("tag", state.tag);
     if (state.evKind) p.set("ek", state.evKind); if (state.evFrom) p.set("es", state.evFrom); if (state.evTo) p.set("eu", state.evTo);
     // the open drawer is part of the address, so a copied URL shows the same device; a link not yet opened stays
     const dev = state.open || state.deepLink;
@@ -773,6 +827,7 @@
     const p = new URLSearchParams(location.search);
     state.q = p.get("q") || ""; state.status = p.get("filter") || "all"; state.vlan = p.get("vlan"); state.sort = p.get("sort") || "first_desc";
     state.ssid = p.get("ssid") || null; state.ssidNow = state.ssid !== null && p.get("ssidnow") === "1"; // no SSID is empty
+    state.tag = p.get("tag") || null; // no tag is empty
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
     const ek = p.get("ek") || "", es = p.get("es") || "", eu = p.get("eu") || "";
     state.evKind = /^[a-z_]{1,20}$/.test(ek) ? ek : ""; state.evFrom = isDay(es) ? es : ""; state.evTo = isDay(eu) ? eu : "";
@@ -796,7 +851,7 @@
     if (!key) { try { key = (await api(`/api/devices/${m}`)).device.mac; } catch (_) { syncUrl(); return; } }
     await openDrawer(key);
   }
-  function clearFilters() { state.q = ""; state.vlan = null; state.ssid = null; state.ssidNow = false; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderSsids(); renderTable(); syncUrl(); }
+  function clearFilters() { state.q = ""; state.vlan = null; state.ssid = null; state.ssidNow = false; state.tag = null; state.status = "all"; $("#q").value = ""; $("#fStatus").value = "all"; renderCards(); renderVlans(); renderSsids(); renderTags(); renderTable(); syncUrl(); }
 
   // ---------- wiring ----------
   // a table rebuild per key costs ~100 ms at 2000 devices: render (and write the URL) once typing pauses
