@@ -292,6 +292,12 @@ class MergeState:
     # instance names that listed a dhcp sighting when they last answered (only they can hold a lease); None when
     # unknown (first poll), then the producers decide
     lease_holders: frozenset[str] | None = None
+    # instance names that answered at least once while holders were tracked: a failed producer missing from it (added
+    # or renamed since) may hold a lease too. None: not tracked, only lease_holders decides
+    answered: frozenset[str] | None = None
+    # secondary sighting producers (role "controller" or "names"): their sightings count, but their failure is no
+    # lease blindness and they never hold a lease
+    secondary: frozenset[str] = frozenset()
     held_back: bool = False  # first_run, and the baseline is not taken this poll (a producer has not answered yet)
     aliases: dict[str, str] = field(default_factory=dict)  # alias MAC -> device key (devices.mac), from the aliases table
     # new private MAC -> first poll it was held back undecided while a lease producer failed (updated in place)
@@ -324,6 +330,7 @@ class MergeResult:
     # the lease holders after this poll (the input for the next one): an answering instance is one when its batch has
     # a dhcp sighting or none at all; a failed one keeps its last state
     lease_holders: frozenset[str] = frozenset()
+    answered: frozenset[str] = frozenset()  # the primary producers that answered at least once, this poll included
 
 
 def to_fw1(s: Sighting) -> Fw1Sighting:
@@ -581,33 +588,39 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     """prev: every device row (mac -> column dict). batches: this poll's result per connector instance."""
     ok = {n: normalise_batch(n, b) for n, b in batches.items() if isinstance(b, Batch)}
     # an instance that failed may be the one holding the lease: its absence is no evidence that the lease is gone
-    # (a switch or a controller lists no leases, so its failure does not count)
+    # (a switch, a controller or a name source lists no leases, so its failure does not count)
     # holder: judged by what it listed when it last answered (a firewall lists leases, a controller never does); with
-    # no such record yet (first poll) every failed producer counts
-    holders = state.lease_holders
-    lease_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
-                      and (n in holders if holders is not None else state.producers is None or n in state.producers)
-                      for n, b in batches.items())
-    # source-blind: any failed producer, lease holder or not, may be the only one listing a device, so no watch
-    # event is written (offline / online) on this poll
-    src_blind = any(isinstance(b, ConnectorFailure) and n not in state.controllers
-                    and (state.producers is None or n in state.producers) for n, b in batches.items())
-    now_holders = set(holders or ())
+    # no such record yet (first poll) every failed primary producer counts
+    holders, answered = state.lease_holders, state.answered
+    failed = [n for n, b in batches.items() if isinstance(b, ConnectorFailure)]
+    # failed sighting producers but a controller (any instance but a controller when the producers are unknown)
+    sighting_src = [n for n in failed if n not in state.controllers and (state.producers is None or n in state.producers)]
+
+    def primary(n: str) -> bool:  # a sighting producer that is not secondary (controller, name source)
+        return n not in state.controllers and n not in state.secondary and (state.producers is None or n in state.producers)
+    # a failed primary producer that has never answered (added or renamed since) may hold a lease too
+    lease_blind = any(primary(n) and (holders is None or n in holders or (answered is not None and n not in answered))
+                      for n in failed)
+    # source-blind: any failed primary producer, lease holder or not, may be the only one listing a device, so no
+    # watch event is written (offline / online) on this poll (a secondary one asserts no presence of its own)
+    src_blind = any(primary(n) for n in failed)
+    now_holders = {n for n in holders or () if n not in state.controllers and n not in state.secondary}
     for n, b in ok.items():
-        if state.producers is not None and n not in state.producers:
+        if not primary(n):
             continue
         # an empty answer proves nothing, so the instance stays a suspect
         (now_holders.discard if b.sightings and not any(s.kind == "dhcp" for s in b.sightings) else now_holders.add)(n)
     if holders is None:  # unknown: a failed producer stays a suspect until it has answered
-        now_holders |= {n for n, b in batches.items() if isinstance(b, ConnectorFailure) and n not in state.controllers
-                        and (state.producers is None or n in state.producers)}
+        now_holders |= {n for n in failed if primary(n)}
+    now_answered = set(answered or ()) | {n for n in ok if primary(n)}
     # lease-blind: a new private MAC may lack the client-id or hostname the failed instance holds. No alias is
     # decided; the MAC is held back (no row) so a later poll can still merge it, up to MERGE_HOLD_SECONDS. Only with
     # the producers known: otherwise a failed switch would count and hide new devices for nothing
     hold = lease_blind and state.producers is not None
-    # label-blind: the failed instance, or a producer whose reservation search failed (stats labels_unavailable), may
-    # hold a device's label, so an empty label this poll is no evidence that it was removed
-    label_blind = lease_blind or any(type(v := b.stats.get("labels_unavailable")) is int and v > 0 for b in ok.values())
+    # label-blind: any failed sighting producer (a name source too), or a producer whose reservation search failed
+    # (stats labels_unavailable), may hold a device's label, so an empty label this poll is no evidence that it was
+    # removed
+    label_blind = bool(sighting_src) or any(type(v := b.stats.get("labels_unavailable")) is int and v > 0 for b in ok.values())
     raw, keys, new_aliases, folds, folded, prev = _decide_keys(ok, prev, state, hold, now)
     held = _held_back(raw, keys, prev, state, hold, now)
     ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
@@ -617,7 +630,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
     res = MergeResult(aliases=new_aliases + folds, folds=folds,
-                      alias_seen=sorted(m for m, k in keys.items() if k != m), lease_holders=frozenset(now_holders))
+                      alias_seen=sorted(m for m, k in keys.items() if k != m), lease_holders=frozenset(now_holders),
+                      answered=frozenset(now_answered))
     res.events += _merge_events(new_aliases, folds, folded, now)
     rows = {mac: {**ROW_DEFAULTS, **r} for mac, r in prev.items()}
     before = {mac: dict(r) for mac, r in rows.items()}

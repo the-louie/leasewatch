@@ -17,7 +17,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Swedish: the page is shown in Swedish when the browser's language is Swedish, or with `?lang=sv`, or with `UI_LANG=sv`; `UI_LANG=en` pins English (default `auto`). Event details, mails, CSV headers and the API stay English.
 
 ### Changed
-- A failed Wi-Fi controller no longer holds private-MAC merges back; only a source that has listed leases does.
+- A failed source holds private-MAC merges back only if it listed DHCP leases when it last answered, so a second firewall that lists ARP only, or a name source, no longer does. A controller or a name-only source never fails the poll and never holds the baseline.
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
 - A sighting's `ip` that is not a dotted IPv4 address is emptied by the host, and the merge reads an empty `ip` as unknown, so a device keeps its last IPv4 address; only a device none of whose sightings has an IPv4 address ends up with no IP.
 - CI: actions pinned by commit SHA, checkouts without a persisted token, read-only workflow permissions.

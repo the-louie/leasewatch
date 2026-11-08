@@ -8,7 +8,9 @@ import queue
 import socket
 import sys
 import threading
+import struct
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -129,8 +131,19 @@ class SettingsTest(Base):
         info = MdnsConnector.describe()
         self.assertEqual((info.type, info.version, info.api_version), ("mdns", "0.1.0", API_VERSION))
         self.assertEqual(info.produces, frozenset({"sighting"}))
+        self.assertEqual(info.roles, frozenset({"names"}))
         self.assertEqual({s.key: s.default for s in info.settings},
                          {"interface": "", "max_age_days": "7", "max_entries": "4096"})
+
+    def test_needs_device_ips(self) -> None:
+        old_host = types.SimpleNamespace(now=lambda: NOW)  # a host older than 1.5: no device_ips
+        c = MdnsConnector("mdns1", {}, old_host, socket_factory=self.factory)  # type: ignore[arg-type]
+        self.addCleanup(c.close)
+        self.assertEqual(c.validate(), [mc.NEEDS_HOST])
+        with self.assertRaises(ConnectorError) as cm:
+            c.check()
+        self.assertIn("needs leasewatch 1.5 or later", str(cm.exception))
+        self.assertEqual(self.factory.sockets, [])
 
     def test_defaults_valid(self) -> None:
         c = self.conn()
@@ -198,8 +211,8 @@ class LifecycleTest(Base):
         self.assertIsInstance(batch, Batch)
         self.assertEqual(len(self.factory.sockets), 1)
         self.assertEqual(batch.sightings, [])
-        self.assertEqual(batch.stats, {"names": 0, "packets": 0, "malformed": 0, "unmapped": 0, "dropped_rate": 0,
-                                       "errors": 0})
+        self.assertEqual(batch.stats, {"names": 0, "joined": 0, "packets": 0, "malformed": 0, "unmapped": 0,
+                                       "wrong_port": 0, "dropped_rate": 0, "errors": 0})
 
     def test_restart_after_close(self) -> None:
         c = self.conn()
@@ -353,6 +366,15 @@ class PacketPathTest(Base):
         stats = c.collect().stats
         self.assertEqual((stats["packets"], stats["dropped_rate"]), (251, 50))
 
+    def test_wrong_source_port_not_parsed(self) -> None:
+        c = self.conn()
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))) as parse:
+            c._handle(b"announce", (IP_A, 40000))
+        self.assertEqual(parse.call_count, 0)
+        batch = c.collect()
+        self.assertEqual(batch.sightings, [])
+        self.assertEqual((batch.stats["packets"], batch.stats["wrong_port"]), (1, 1))
+
     def test_goodbye_keeps_name(self) -> None:
         # the parser returns a TTL-0 record like any other: the name is heard again, not removed
         c = self.conn()
@@ -428,6 +450,120 @@ class CacheTest(Base):
         c = self.conn()
         c._hear("", IP_A, "", NOW)
         self.assertEqual(self.names(c), {})
+
+
+class RecordingSocket:
+    """Stands in for socket.socket in _default_socket(): records the options set; opens nothing. A join on an
+    interface index in `refuse` fails as the kernel's would; `no_multicast_all` makes IP_MULTICAST_ALL unknown."""
+
+    refuse: set[int] = set()
+    no_multicast_all = False
+    made: list[RecordingSocket] = []
+
+    def __init__(self, family: int, kind: int) -> None:
+        self.options: list[tuple[int, int, object]] = []
+        self.bound: tuple | None = None
+        self.closed = False
+        RecordingSocket.made.append(self)
+
+    def setsockopt(self, level: int, option: int, value: object) -> None:
+        if option == mc.IP_MULTICAST_ALL and self.no_multicast_all:
+            raise OSError(errno.ENOPROTOOPT, os.strerror(errno.ENOPROTOOPT))
+        if option == socket.IP_ADD_MEMBERSHIP and len(value) == 12 and struct.unpack("=4s4si", value)[2] in self.refuse:
+            raise OSError(errno.ENODEV, os.strerror(errno.ENODEV))
+        self.options.append((level, option, value))
+
+    def bind(self, address: tuple) -> None:
+        self.bound = address
+
+    def settimeout(self, value: float) -> None:
+        pass
+
+    def recvfrom(self, bufsize: int) -> tuple[bytes, tuple[str, int]]:
+        time.sleep(0.01)  # nothing ever arrives
+        raise socket.timeout("timed out")
+
+    def close(self) -> None:
+        self.closed = True
+
+    def joins(self) -> list[object]:
+        return [v for level, opt, v in self.options if (level, opt) == (socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP)]
+
+    def multicast_all(self) -> list[object]:
+        return [v for level, opt, v in self.options if (level, opt) == (socket.IPPROTO_IP, mc.IP_MULTICAST_ALL)]
+
+
+GROUP = socket.inet_aton("224.0.0.251")
+ANY = socket.inet_aton("0.0.0.0")
+INTERFACES = [(1, "lo"), (2, "d1"), (3, "d2")]
+
+
+class JoinTest(unittest.TestCase):
+    """_default_socket() against RecordingSocket: which group joins and options it asks the kernel for."""
+
+    def setUp(self) -> None:
+        RecordingSocket.refuse = set()
+        RecordingSocket.no_multicast_all = False
+        RecordingSocket.made = []
+        self.patches = [mock.patch.object(socket, "socket", RecordingSocket),
+                        mock.patch.object(socket, "if_nameindex", lambda: list(INTERFACES)),
+                        mock.patch.object(socket, "if_nametoindex", lambda n: {v: k for k, v in INTERFACES}[n])]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def open(self, interface: str = "") -> tuple[MdnsConnector, RecordingSocket]:
+        c = MdnsConnector("mdns1", {"interface": interface}, HostContext(now=lambda: NOW))
+        sock = c._default_socket()
+        return c, sock
+
+    def test_every_interface_but_loopback(self) -> None:
+        with self.assertLogs("leasewatch.contrib.mdns", "INFO") as logs:
+            c, sock = self.open()
+        self.assertEqual(sock.joins(), [struct.pack("=4s4si", GROUP, ANY, 2), struct.pack("=4s4si", GROUP, ANY, 3)])
+        self.assertEqual(sock.multicast_all(), [])
+        self.assertEqual(sock.bound, ("", 5353))
+        self.assertEqual(c._joined, 2)
+        self.assertIn("mdns: listening on 2 interfaces", [r.getMessage() for r in logs.records])
+
+    def test_refused_interface_skipped(self) -> None:
+        RecordingSocket.refuse = {2}
+        with self.assertLogs("leasewatch.contrib.mdns", "DEBUG") as logs:
+            c, sock = self.open()
+        self.assertEqual(sock.joins(), [struct.pack("=4s4si", GROUP, ANY, 3)])
+        self.assertEqual(c._joined, 1)
+        self.assertEqual(sum("cannot join" in r.getMessage() for r in logs.records), 1)
+
+    def test_no_join_fails_check(self) -> None:
+        RecordingSocket.refuse = {2, 3}
+        c = MdnsConnector("mdns1", {}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        with self.assertRaises(ConnectorError) as cm:
+            c.check()
+        self.assertIn("any interface", str(cm.exception))
+        self.assertTrue(RecordingSocket.made[-1].closed)
+        self.assertIsNone(c._thread)
+
+    def test_named_interface(self) -> None:
+        c, sock = self.open("d1")
+        self.assertEqual(sock.joins(), [struct.pack("=4s4si", GROUP, ANY, 2)])
+        self.assertEqual(sock.multicast_all(), [0])
+        self.assertEqual(c._joined, 1)
+
+    def test_interface_address(self) -> None:
+        _c, sock = self.open("10.0.0.2")
+        self.assertEqual(sock.joins(), [GROUP + socket.inet_aton("10.0.0.2")])
+        self.assertEqual(sock.multicast_all(), [0])
+
+    def test_multicast_all_unknown_is_ignored(self) -> None:
+        RecordingSocket.no_multicast_all = True
+        _c, sock = self.open("d1")
+        self.assertEqual((len(sock.joins()), sock.multicast_all()), (1, []))
+
+    def test_joined_in_stats(self) -> None:
+        c = MdnsConnector("mdns1", {}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        self.assertEqual(c.collect().stats["joined"], 2)
 
 
 class ListenOnlyTest(unittest.TestCase):

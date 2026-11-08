@@ -36,6 +36,10 @@ WARN_INTERVAL = 3600.0  # seconds between two malformed-packet warnings for one 
 MAX_WARNED = 1024  # source addresses remembered for that; the memory is cleared when it is full
 JOIN_TIMEOUT = 2.0  # seconds close() waits for the listener thread
 DAY = 86400
+# Linux: a socket with this option set (the default) also receives the groups that other sockets joined, on any
+# interface; cleared, it hears only its own memberships
+IP_MULTICAST_ALL = getattr(socket, "IP_MULTICAST_ALL", 49)
+NEEDS_HOST = "needs leasewatch 1.5 or later (device_ips)"
 
 # a Linux interface name: at most 15 characters (IFNAMSIZ - 1), no "/", no white space; ":" (an alias) is left out
 # because an alias has no index of its own to join the group on
@@ -64,9 +68,11 @@ def _errno_text(e: OSError) -> str:
 class MdnsConnector(SettingsMixin):
     INFO = ConnectorInfo(
         type="mdns", version="0.1.0", api_version=API_VERSION, produces=frozenset({"sighting"}),
+        # a secondary source: the host never fails a poll or holds the baseline for it
+        roles=frozenset({"names"}),
         settings=(
             Setting("interface", default="",
-                    help="the address or name of the interface to listen on; empty = every interface"),
+                    help="the address or name of the interface to listen on; empty = every non-loopback interface"),
             Setting("max_age_days", default="7", kind="int", min=1, max=90,
                     help="days a name heard is kept without being heard again"),
             Setting("max_entries", default="4096", kind="int", min=64, max=65536,
@@ -85,7 +91,8 @@ class MdnsConnector(SettingsMixin):
         self._lock = threading.Lock()  # the cache, its IP index and the counters
         self._cache: dict[str, _Entry] = {}  # mac -> entry, in the order last heard (oldest first)
         self._by_ip: dict[str, str] = {}  # ip -> the mac whose entry holds it
-        self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "dropped_rate", "errors"), 0)
+        self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "wrong_port", "dropped_rate", "errors"), 0)
+        self._joined = 0  # interfaces the group was joined on by the current socket
         self._window = -1  # the second the rate budget counts in
         self._in_window = 0
         self._warned: dict[str, float] = {}  # source ip -> clock of its last malformed-packet warning
@@ -98,6 +105,8 @@ class MdnsConnector(SettingsMixin):
 
     def validate(self) -> list[str]:
         problems = self._generic_problems()
+        if not hasattr(self.ctx, "device_ips"):
+            problems.append(NEEDS_HOST)
         v = self.interface
         if v:
             try:
@@ -118,27 +127,55 @@ class MdnsConnector(SettingsMixin):
         """A UDP socket on port 5353 that is a member of 224.0.0.251, on every interface or on the configured one.
 
         It binds to the wildcard address even when an interface is configured: on Linux a socket bound to a unicast
-        address receives no multicast. The interface is chosen by the group membership instead."""
+        address receives no multicast. The interface is chosen by the group membership instead. Without an
+        interface the group is joined on each non-loopback interface by its index (one join with the address
+        0.0.0.0 would join on the default-route interface only); an interface that refuses the join is skipped,
+        and no join at all fails the start."""
         group = socket.inet_aton(MDNS_GROUP)
+        any_addr = socket.inet_aton("0.0.0.0")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):  # another responder (avahi) may hold the port as well
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.bind(("", MDNS_PORT))
-            if not self.interface:
-                mreq = group + socket.inet_aton("0.0.0.0")
-            else:
+            if self.interface:
+                try:  # hear only this interface, not the groups another socket joined elsewhere
+                    sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
+                except OSError:  # not Linux
+                    pass
                 try:
                     mreq = group + socket.inet_aton(str(ipaddress.IPv4Address(self.interface)))
                 except ValueError:  # a name: struct ip_mreqn (group, local address any, interface index)
-                    mreq = struct.pack("=4s4si", group, socket.inet_aton("0.0.0.0"),
-                                       socket.if_nametoindex(self.interface))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                    mreq = struct.pack("=4s4si", group, any_addr, socket.if_nametoindex(self.interface))
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                joined = 1
+            else:
+                joined = failed = 0
+                try:
+                    interfaces = socket.if_nameindex()
+                except OSError:
+                    interfaces = []
+                for index, ifname in interfaces:
+                    if ifname == "lo":
+                        continue
+                    try:
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                                        struct.pack("=4s4si", group, any_addr, index))
+                    except OSError as e:  # down, no IPv4, or no multicast: the others still count
+                        failed += 1
+                        log.debug("connector %s: cannot join %s on %s (%s)", self.name, MDNS_GROUP, ifname,
+                                  _errno_text(e))
+                        continue
+                    joined += 1
+                if not joined:
+                    raise ConnectorError(f"mdns: cannot join {MDNS_GROUP} on any interface ({failed} refused)")
             sock.settimeout(RECV_TIMEOUT)
         except BaseException:
             sock.close()
             raise
+        self._joined = joined
+        log.info("mdns: listening on %d interfaces", joined)
         return sock
 
     def _start(self) -> None:
@@ -189,6 +226,9 @@ class MdnsConnector(SettingsMixin):
         second = int(self._clock())
         with self._lock:
             self._counts["packets"] += 1
+            if not (isinstance(addr, tuple) and len(addr) > 1 and addr[1] == MDNS_PORT):
+                self._counts["wrong_port"] += 1  # RFC 6762 6: a response not from port 5353 is not mDNS
+                return
             if second != self._window:
                 self._window, self._in_window = second, 0
             if self._in_window >= RATE_LIMIT:
@@ -255,6 +295,8 @@ class MdnsConnector(SettingsMixin):
     # --- the lifecycle -----------------------------------------------------------------------------------------
 
     def check(self) -> None:
+        if not hasattr(self.ctx, "device_ips"):
+            raise ConnectorError(f"mdns: {NEEDS_HOST}")
         self._start()
 
     def collect(self) -> Batch:
@@ -274,7 +316,7 @@ class MdnsConnector(SettingsMixin):
         sightings = [Sighting(mac=mac, source=self.name, kind="scan", presence=False, observed_at=now,
                               hostname=e.hostname, label=e.label) for mac, e in entries]
         # the counters cover the time since the previous collect()
-        return Batch(sightings=sightings, stats={"names": len(sightings), **counts})
+        return Batch(sightings=sightings, stats={"names": len(sightings), "joined": self._joined, **counts})
 
     def close(self) -> None:
         with self._state:

@@ -5,11 +5,16 @@ A leasewatch connector (type `mdns`) that listens for mDNS/DNS-SD announcements 
 listen-only: it binds the mDNS port, joins the multicast group and receives. It never sends a packet; the only
 frames it causes are the IGMP group joins.
 
+Needs leasewatch 1.5 or later. On an older host the settings check reports "needs leasewatch 1.5 or later
+(device_ips)" and the connector does not start. It is a secondary source of names: a failed listener never fails
+a poll, and the host does not hold its baseline or a lease for it.
+
 ## A device must be known already
 
-The connector attributes a name by address: it maps the source address of an announcement to a device through the
-host's address map (the addresses leasewatch already holds for each device). A device that no other connector has
-seen yet (for example from the firewall's DHCP leases or ARP table) cannot get a name; its announcements are
+The connector attributes a name by address: it maps the address in the announcement's `A` record to a device
+through the host's address map. It does not use the packet's source address, because a sleep proxy that answers
+for another device names that device, not itself. The address map holds the addresses leasewatch already knows
+for each device. A device that no other connector has seen yet (for example from the firewall's DHCP leases or ARP table) cannot get a name; its announcements are
 counted as `unmapped` and dropped. The record it produces has no address and no MAC of its own, and `presence` is
 `False`: hearing a device announce itself never marks it online.
 
@@ -17,7 +22,7 @@ counted as `unmapped` and dropped. The record it produces has no address and no 
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `INTERFACE` | no | empty | Join the group on this interface, given as its IPv4 address or its name (e.g. `eth0`). Empty joins on every interface |
+| `INTERFACE` | no | empty | Join the group on this interface only, given as its IPv4 address or its name (e.g. `eth0`). Empty joins on every non-loopback interface, by index. With avahi on the host, set it to hear one segment only |
 | `MAX_AGE_DAYS` | no | `7` | How long a heard name is kept per device, 1 to 90 days |
 | `MAX_ENTRIES` | no | `4096` | The most devices kept in the cache, 64 to 65536 |
 
@@ -30,7 +35,11 @@ LW_CONNECTOR__NAMES__TYPE=mdns
 ```
 
 The listener binds `0.0.0.0:5353` with `SO_REUSEADDR` and `SO_REUSEPORT`, so another mDNS responder on the same
-host (for example avahi) can run next to it.
+host (for example avahi) can run next to it. At the start it logs "mdns: listening on N interfaces"; an interface
+that refuses the join (down, or without IPv4) is skipped, and the start fails only when no join succeeds. On Linux
+a socket also hears the groups that other sockets joined on other interfaces, so with `INTERFACE` set the
+connector clears `IP_MULTICAST_ALL` to hear that interface only. A response whose source port is not 5353 is not
+mDNS (RFC 6762 section 6) and is counted as `wrong_port` without being read.
 
 ## Running in a container
 
@@ -61,7 +70,11 @@ device's entry. A goodbye (TTL 0) does not remove the name: the name is kept for
 
 The listener thread starts at the first `check()` or `collect()` and parses at most 200 packets a second; the rest
 are counted as `dropped_rate`. The status counts, reset each poll, are `names`, `packets`, `malformed`,
-`unmapped`, `dropped_rate` and `errors`.
+`unmapped`, `wrong_port`, `dropped_rate` and `errors`; `joined` is the number of interfaces the group is joined
+on.
+
+A packet with more than 32 questions, more than 16 compression pointers in one name or more than 16 KiB of names
+in total is counted as `malformed`. A packet with an OPCODE or RCODE other than 0 is ignored.
 
 ## Privacy
 

@@ -104,5 +104,45 @@ TWO_IPS = packet([rr("nas.local", A, a("10.0.0.70")), rr("nas.local", A, a("10.0
 # 100 A records: the parser reads 64
 TOO_MANY = packet([rr(f"host-{i}.local", A, a(f"10.0.1.{i}")) for i in range(100)])
 
+
+
+def _pointer_chains(size: int = 9000) -> bytes:
+    """A hostile response: one question with the root name, then one pointer every 2 bytes, each to the one before.
+    Read as questions, every name is a chain of pointers back to the start (about 1500 questions)."""
+    body = bytearray(b"\x00" + struct.pack("!HH", PTR, IN))
+    prev, off = HEADER, HEADER + len(body)
+    while off + 2 <= size:
+        body += struct.pack("!H", 0xC000 | prev)
+        prev, off = off, off + 2
+    count = 1 + (len(body) - 5) // 6
+    return struct.pack("!6H", 0, 0x8400, count, 0, 0, 0) + bytes(body)
+
+
+PAD = 99  # a record type the parser skips: its rdata can hold names for later pointers to point into
+_PAD_RDATA = HEADER + len(name("pad.local")) + 10  # where the rdata of a first record owned by "pad.local" starts
+
+
+def chain(hops: int) -> bytes:
+    """A response whose A record owner reaches "host.local" through `hops` pointers: hops - 1 of them laid out,
+    each to the one before, in a skipped record, and the owner itself a pointer to the last one."""
+    rdata = bytearray(name("host.local"))
+    prev = _PAD_RDATA
+    for _ in range(hops - 1):
+        here = _PAD_RDATA + len(rdata)
+        rdata += struct.pack("!H", 0xC000 | prev)
+        prev = here
+    return packet([rr("pad.local", PAD, bytes(rdata), rclass=IN), rr(name(pointer=prev), A, a("10.0.0.80"))])
+
+
+def expansion(records: int) -> bytes:
+    """A response with `records` PTR records whose owner and target both point to one 253-byte name."""
+    long_name = ".".join(c * 63 for c in "abc") + "." + "d" * 59
+    target = name(pointer=_PAD_RDATA)
+    return packet([rr("pad.local", PAD, name(long_name), rclass=IN)]
+                  + [rr(target, PTR, target, rclass=IN) for _ in range(records)])
+
+
+QUADRATIC = _pointer_chains()
+
 ALL = {"APPLE": APPLE, "APPLE_NO_SRV": APPLE_NO_SRV, "PRINTER": PRINTER, "CHROMECAST": CHROMECAST, "GOODBYE": GOODBYE, "QUERY": QUERY,
        "TRUNCATED": TRUNCATED, "POINTER_LOOP": POINTER_LOOP, "TWO_IPS": TWO_IPS, "TOO_MANY": TOO_MANY}

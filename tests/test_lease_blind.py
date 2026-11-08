@@ -62,6 +62,42 @@ class LeaseBlindTests(unittest.TestCase):
         res = self.run_merge({"unifi": Batch(sightings=[lease(NEWP)])}, **st)
         self.assertEqual(res.lease_holders, frozenset({"fw1", "unifi"}))
 
+    def test_secondary_producer_never_holds(self):
+        # a name source (or controller) is secondary: no suspect while holders are unknown, never a holder
+        st = {"secondary": frozenset({"unifi"})}
+        res = self.run_merge({"fw1": Batch(sightings=[lease(NEWP)]), "unifi": ConnectorFailure("unifi", "down", NOW)}, **st)
+        self.assertEqual([a[:2] for a in res.aliases], [(NEWP, DEV)])
+        self.assertEqual((res.lease_holders, res.answered), (frozenset({"fw1"}), frozenset({"fw1"})))
+        res = self.run_merge({"fw1": Batch(sightings=[lease(NEWP)]), "unifi": Batch(sightings=[])},
+                             lease_holders=frozenset({"fw1", "unifi"}), **st)
+        self.assertEqual(res.lease_holders, frozenset({"fw1"}))
+
+    def test_primary_that_never_answered_holds_the_merge(self):
+        st = {"producers": frozenset({"fw1", "fw2"}), "lease_holders": frozenset({"fw1"}), "answered": frozenset({"fw1"})}
+        batches = {"fw1": Batch(sightings=[lease(NEWP)]), "fw2": ConnectorFailure("fw2", "down", NOW)}
+        res = merge(dict(self.PREV), batches, Config(), NOW, MergeState(**st))
+        self.assertEqual((res.aliases, res.new), ([], []))
+        self.assertNotIn(NEWP, res.rows)
+        self.assertEqual(res.answered, frozenset({"fw1"}))
+        # fw2 answers once without a lease: it has answered and is no holder, so its next failure holds nothing
+        res = merge(dict(self.PREV), {"fw1": Batch(sightings=[lease(NEWP)]), "fw2": Batch(sightings=[arp(NEWP)])},
+                    Config(), NOW, MergeState(**st))
+        self.assertEqual((res.lease_holders, res.answered), (frozenset({"fw1"}), frozenset({"fw1", "fw2"})))
+        st.update(lease_holders=res.lease_holders, answered=res.answered)
+        res = merge(dict(self.PREV), batches, Config(), NOW, MergeState(**st))
+        self.assertEqual([a[:2] for a in res.aliases], [(NEWP, DEV)])
+
+    def test_failed_name_source_keeps_its_label(self):
+        prev = {DEV: row(DEV, client_id=CID, label="Hall printer")}
+        st = MergeState(producers=frozenset({"fw1", "names"}), secondary=frozenset({"names"}),
+                        lease_holders=frozenset({"fw1"}), answered=frozenset({"fw1"}))
+        res = merge(dict(prev), {"fw1": Batch(sightings=[lease(DEV)]), "names": ConnectorFailure("names", "down", NOW)},
+                    Config(), NOW, st)
+        self.assertEqual(res.rows[DEV]["label"], "Hall printer")
+        # answered without the label: it is gone
+        res = merge(dict(prev), {"fw1": Batch(sightings=[lease(DEV)]), "names": Batch(sightings=[])}, Config(), NOW, st)
+        self.assertEqual(res.rows[DEV]["label"], "")
+
 
 class PersistTests(Base):
     def test_holders_stored_and_read_at_start(self):
@@ -70,14 +106,19 @@ class PersistTests(Base):
             lease_type="dynamic", online=True)])
         self.assertIsNone(col._lease_holders)
         self.assertTrue(col.run_once()["ok"])
-        self.assertEqual(json.loads(db.get_meta("lease_holders")), ["fw1"])
-        self.assertEqual(col._lease_holders, frozenset({"fw1"}))
+        self.assertEqual(json.loads(db.get_meta("lease_holders")), {"holders": ["fw1"], "answered": ["fw1"]})
+        self.assertEqual((col._lease_holders, col._answered), (frozenset({"fw1"}), frozenset({"fw1"})))
         again = Collector(self.cfg({"LW_CONNECTORS": "fw1", **FW1}), db, self.client)
-        self.assertEqual(again._lease_holders, frozenset({"fw1"}))
+        self.assertEqual((again._lease_holders, again._answered), (frozenset({"fw1"}), frozenset({"fw1"})))
+
+    def test_older_list_form_is_holders_and_answered(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
+        db.set_meta("lease_holders", '["fw1"]')
+        self.assertEqual(col._load_lease_holders(), (frozenset({"fw1"}), frozenset({"fw1"})))
 
     def test_bad_meta_is_unknown(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1})
-        for bad in ("not json", '{"a": 1}', "[1]"):
+        for bad in ("not json", '{"a": 1}', "[1]", '{"holders": ["fw1"]}', '{"holders": [], "answered": [2]}', "3"):
             db.set_meta("lease_holders", bad)
             self.assertIsNone(col._load_lease_holders())
 

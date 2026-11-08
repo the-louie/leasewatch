@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import random
 import sys
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,44 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(label("fn=" + "x" * 100), "x" * 64)
         self.assertEqual(label(b"ty=P\xff4"), "P�4")  # not UTF-8: replaced
         self.assertEqual(label("model", "=v", "rp=ipp"), "")
+
+    def test_opcode_or_rcode_not_zero_ignored(self) -> None:
+        for flags in (0xAC00, 0x8403):  # OPCODE 5 (update), RCODE 3 (NXDOMAIN)
+            with self.subTest(flags=hex(flags)):
+                data = bytearray(fx.GOODBYE)
+                data[2:4] = flags.to_bytes(2, "big")
+                self.assertEqual(dns.parse_response(bytes(data)), dns.ParsedPacket())
+
+
+class CostTest(unittest.TestCase):
+    """A hostile packet costs little to read: the question, pointer and expansion caps."""
+
+    def test_pointer_chains_in_questions(self) -> None:
+        self.assertGreater(len(fx.QUADRATIC), 8900)
+        t0 = time.perf_counter()
+        p = dns.parse_response(fx.QUADRATIC)
+        self.assertLess(time.perf_counter() - t0, 0.01)
+        self.assertEqual((p.malformed, p.names), (True, []))
+
+    def test_question_cap(self) -> None:
+        def with_questions(n: int) -> bytes:
+            return fx.packet([rr_a("p.local", "10.0.0.64")], questions=[fx.question("_ipp._tcp.local")] * n)
+        self.assertEqual(dns.parse_response(with_questions(dns.MAX_QUESTIONS)).names, [("p", "10.0.0.64", "")])
+        self.assertTrue(dns.parse_response(with_questions(dns.MAX_QUESTIONS + 1)).malformed)
+
+    def test_hop_cap(self) -> None:
+        self.assertEqual(dns.parse_response(fx.chain(dns.MAX_HOPS)),
+                         dns.ParsedPacket(names=[("host", "10.0.0.80", "")]))
+        self.assertEqual(dns.parse_response(fx.chain(dns.MAX_HOPS + 1)), dns.ParsedPacket(malformed=True))
+
+    def test_expansion_cap(self) -> None:
+        self.assertFalse(dns.parse_response(fx.expansion(25)).malformed)  # 25 * 2 * 254 bytes
+        self.assertTrue(dns.parse_response(fx.expansion(40)).malformed)  # 40 * 2 * 254 > MAX_EXPANSION
+
+    def test_real_fixtures_within_caps(self) -> None:
+        for key, data in fx.ALL.items():
+            with self.subTest(fixture=key):
+                self.assertEqual(dns.parse_response(data).malformed, key in ("TRUNCATED", "POINTER_LOOP"))
 
 
 class FirstLabelLinkTest(unittest.TestCase):
@@ -224,8 +263,8 @@ class ListenerPathTest(unittest.TestCase):
                      hostname="Alex-iPad", label="iPad13,1"),
             Sighting(mac=MAC_PRINTER, source="mdns1", kind="scan", presence=False, observed_at=NOW,
                      hostname="BRW020000000030", label="Brother HL-L2350DW series")])
-        self.assertEqual(batch.stats, {"names": 2, "packets": 2, "malformed": 0, "unmapped": 0, "dropped_rate": 0,
-                                       "errors": 0})
+        self.assertEqual(batch.stats, {"names": 2, "joined": 0, "packets": 2, "malformed": 0, "unmapped": 0,
+                                       "wrong_port": 0, "dropped_rate": 0, "errors": 0})
 
     def test_unmapped_address(self) -> None:
         self.feed((fx.GOODBYE, "10.0.0.50"))  # 10.0.0.50 is not in device_ips

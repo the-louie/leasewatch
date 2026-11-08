@@ -6,7 +6,7 @@ hands leasewatch plain records. Everything here is taken from the code: the cont
 `leasewatch/connectors/__init__.py`, loading in `leasewatch/connectors/loader.py`, the reusable tests in
 `leasewatch/connectors/testing.py` and the merge rules in `leasewatch/connectors/merge.py`.
 
-Two complete connectors serve as worked examples:
+Three complete connectors serve as worked examples:
 
 - [contrib/leasewatch-dnsmasq](../contrib/leasewatch-dnsmasq/): reads a local file, `dhcp` sightings only.
 - [contrib/leasewatch-mikrotik](../contrib/leasewatch-mikrotik/): talks HTTPS to a device with a password,
@@ -198,6 +198,8 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   and `"wired"` means the controller sees it on a cable, so its Wi-Fi details are cleared. A device missing from an
   answered list has left Wi-Fi. While a controller has failed (or its batch has `dropped > 0`), its Wi-Fi devices are
   "blind" and keep their last values. A `"wifi"` attachment from an instance **without** the role is ignored.
+- **The `names` role** (`ConnectorInfo.roles = frozenset({"names"})`). A source of names only (e.g. a listener): the
+  host never fails a poll or holds the baseline for it, and it never holds a lease.
 
 ## 3. Settings
 
@@ -271,7 +273,7 @@ A connector may import only these 15 names, and only as `from leasewatch.connect
 | Name | What it is |
 |---|---|
 | `API_VERSION` | `1`. Put it in `ConnectorInfo.api_version`. |
-| `ConnectorInfo` | What your type is: `type` (`[a-z0-9_]+`), `version` (your own), `api_version`, `produces` (`frozenset` of `"sighting"`/`"attachment"`), `settings`, `roles` (`frozenset()` or `{"controller"}`). |
+| `ConnectorInfo` | What your type is: `type` (`[a-z0-9_]+`), `version` (your own), `api_version`, `produces` (`frozenset` of `"sighting"`/`"attachment"`), `settings`, `roles` (`frozenset()`, `{"controller"}` or `{"names"}`). |
 | `Setting` | One setting key (section 3). |
 | `Sighting`, `Attachment`, `Batch` | The records (section 2). |
 | `ConnectorError` | The one exception to raise. |
@@ -430,7 +432,9 @@ services:
   Sighting.__dataclass_fields__` or require host 1.3 in your package metadata. 1.4 added the stat
   `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs). 1.5 adds the kinds `ndp` and `dhcp6`,
   the Sighting field `ip6` and `HostContext.device_ips()`. 1.5 also widened the description of `scan` to passive
-  discovery; the kind's rank is unchanged. A connector written for 1.4 is unaffected and needs no change.
+  discovery; the kind's rank is unchanged. A connector written for 1.4 is unaffected and needs no change. A connector
+  that needs `device_ips()` should check `hasattr(ctx, "device_ips")` in `validate()` and name the host version it
+  needs (1.5), because the API version stays 1.
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional
@@ -456,7 +460,7 @@ Mix `ConnectorContractTests` into a `unittest.TestCase` and fill in its hooks:
 What it checks (all tests are named `test_contract_*`):
 
 - `describe()`: the type matches `[a-z0-9_]+`, `api_version == API_VERSION`, `produces` is a non-empty subset of
-  `{"sighting", "attachment"}`, `roles` a subset of `{"controller"}`, the setting keys are unique, match
+  `{"sighting", "attachment"}`, `roles` a subset of `{"controller", "names"}`, the setting keys are unique, match
   `[a-z0-9_]+` and are not host keys, every `kind` is `str` or `int`, and no key is `<secret key>_file`.
 - `__init__` and `validate()` open no network connection, send no datagram and look up no name (also when your code
   catches the error the test raises). `valid_settings()` runs before that guard.
@@ -734,7 +738,7 @@ and `lan (ethers): ok (0 ms)`; `collect` prints the output shown in section 10. 
 
 ## 12. README template for a connector package
 
-Each package has a `README.md` with these parts (see the two contrib READMEs):
+Each package has a `README.md` with these parts (see the contrib READMEs):
 
 ````markdown
 # leasewatch-<name>

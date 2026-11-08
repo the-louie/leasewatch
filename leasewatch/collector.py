@@ -16,7 +16,8 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 from .config import Config
 from .db import Database, db_error_text
@@ -40,6 +41,9 @@ SKIPPED = "previous collection has not completed; skipped"
 SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_down event (6 min at default polls)
 ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sends
 WATCH_KINDS = ("offline", "online", "ip", "vlan", "port", "wifi")  # MAIL_ON_WATCH sends these of watched devices
+# a sighting producer of one of these roles is secondary: its sightings count, but its failure does not fail the
+# poll, hold the baseline back or make the merge lease-blind (a Wi-Fi controller, a listen-only name source)
+SECONDARY_ROLES = frozenset({"controller", "names"})
 ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
 ALERT_MARK = "notify.alert_event_id"  # meta: the events up to this id were considered (sent, or no alert then)
 # one event: by its kind, with the error or the outage length from its detail (the subject cut to 80 characters)
@@ -139,6 +143,7 @@ class _Run:
     fail_since: int = 0         # wall clock of the first of those polls
     fail_error: str = ""        # that poll's error: the cause (a timeout), not the SKIPPED symptom of the polls after it
     down_since: int | None = None  # start of the spell a source_down event was written for (conn.<name>.down_since)
+    roles: frozenset = frozenset()  # the type's ConnectorInfo.roles
 
 
 class Collector:
@@ -161,7 +166,11 @@ class Collector:
         self._ctx.device_ips = self._device_ips
         # before the instances are built: a connector may call device_names() in __init__
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
-        self._poll_ips: dict[str, str] = {}  # ip -> mac from this poll's sightings, for _device_ips()
+        self._poll_ips: dict[str, str] = {}  # ip -> mac from this poll's sightings, for the ip map
+        # ip -> device key, read by _device_ips() from any thread: rebuilt once per poll after the commit and handed
+        # over by rebinding (never changed in place); until the first poll, the stored rows
+        self._ip_map: Mapping[str, str] = MappingProxyType({})
+        self._refresh_ip_map()
         self._connectors: dict = {}
         self._closed = False
         self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
@@ -226,18 +235,27 @@ class Collector:
                      pruned, cleared)
         self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
         self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
-        self._lease_holders: frozenset[str] | None = self._load_lease_holders()  # None: never stored (first poll)
+        # None: never stored (first poll). _answered: the primary producers that answered at least once
+        self._lease_holders, self._answered = self._load_lease_holders() or (None, None)
         self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
         self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
 
-    def _load_lease_holders(self) -> frozenset[str] | None:
-        """The instances that listed a lease when they last answered (meta lease_holders, a JSON list), else None."""
+    def _load_lease_holders(self) -> tuple[frozenset[str], frozenset[str]] | None:
+        """(the instances that listed a lease when they last answered, the instances that answered at least once)
+        from meta lease_holders ({"holders": [...], "answered": [...]}; the older plain list is both), else None."""
         raw = self.db.get_meta("lease_holders", "")
         try:
-            names = json.loads(raw) if raw else None
+            value = json.loads(raw) if raw else None
         except ValueError:
             return None
-        return frozenset(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) else None
+        if isinstance(value, list):
+            value = {"holders": value, "answered": value}
+        if not isinstance(value, dict):
+            return None
+        holders, answered = value.get("holders"), value.get("answered")
+        if not all(isinstance(v, list) and all(isinstance(n, str) for n in v) for v in (holders, answered)):
+            return None
+        return frozenset(holders), frozenset(answered)
 
     def close(self) -> None:
         """Close every built connector (a UniFi session logs out), each for at most its instance's TIMEOUT and all
@@ -273,7 +291,7 @@ class Collector:
         """Build one instance; run validate() and disable the instance on problems."""
         cls = registry().get(spec.type)
         run = _Run(spec.name, spec.type, spec.timeout, cls.describe().produces if cls else frozenset(),
-                   self.cfg.poll_seconds)
+                   self.cfg.poll_seconds, roles=frozenset(cls.describe().roles) if cls else frozenset())
         self._runs[spec.name] = run
         conn, problems = setup_instance(spec, self._ctx, client)
         if problems:
@@ -294,15 +312,26 @@ class Collector:
             out[r["mac"]] = out.get(r["device"]) or hosts.get(r["mac"], "")
         return out
 
-    def _device_ips(self) -> dict[str, str]:
-        """ip -> the device's key MAC (IPv4 and IPv6): this poll's sightings, then the stored rows, which win."""
-        aliases = {r["mac"]: r["device"] for r in self.db.q("SELECT mac, device FROM aliases")}
-        out = {ip: aliases.get(mac, mac) for ip, mac in self._poll_ips.items()}
-        for r in self.db.q("SELECT mac, ip, ip6 FROM devices"):
-            for ip in (r["ip"], r["ip6"]):
-                if ip:
-                    out[ip] = r["mac"]
-        return out
+    def _device_ips(self) -> Mapping[str, str]:
+        """ip -> the device's key MAC (IPv4 and IPv6), as of the last good poll (before it, the stored rows). A
+        read-only snapshot: no SQL, safe from any thread."""
+        return self._ip_map
+
+    def _refresh_ip_map(self) -> None:
+        """Rebuild the ip map: the last poll's sightings first (they win), then the stored rows not archived, online
+        before offline and the newest last_online first; an IP already mapped is never overwritten."""
+        try:
+            aliases = {r["mac"]: r["device"] for r in self.db.q("SELECT mac, device FROM aliases")}
+            out = {ip: aliases.get(mac, mac) for ip, mac in self._poll_ips.items()}
+            for r in self.db.q("SELECT mac, ip, ip6 FROM devices WHERE archived_ts IS NULL "
+                               "ORDER BY online DESC, COALESCE(last_online, 0) DESC, mac"):
+                for ip in (r["ip"], r["ip6"]):
+                    if ip:
+                        out.setdefault(ip, r["mac"])
+        except sqlite3.Error as e:  # the previous map stays; the next poll tries again
+            log.warning("cannot read the device addresses: %s", e)
+            return
+        self._ip_map = MappingProxyType(out)
 
     def _work(self, run: _Run, gen: int, conn: object, check: bool) -> None:
         """Worker thread: check() if due, then collect(). Stores (phase, Batch or exception, ms) unless abandoned."""
@@ -945,13 +974,19 @@ class Collector:
             self._mqtt_failing = False
         self._write_notify_state()
 
-    def _sightings(self, producers: list[str]) -> tuple[dict[str, object], dict[str, str], dict[str, Batch]] | dict:
-        """Collect the sighting producers: (every answer, status, the batches), or the failed poll when none answered."""
+    def _primary(self, producers: list[str]) -> list[str]:
+        """The primary sighting producers: those without a secondary role; all of them when every one has one."""
+        return [n for n in producers if not self._runs[n].roles & SECONDARY_ROLES] or producers
+
+    def _sightings(self, producers: list[str], primary: list[str]
+                   ) -> tuple[dict[str, object], dict[str, str], dict[str, Batch]] | dict:
+        """Collect the sighting producers: (every answer, status, the batches), or the failed poll when no primary
+        producer answered."""
         # read again in run_once after the collection; here only to keep a pending baseline's failed check()s from backing off
         got, status = self._collect(producers, self.db.get_meta("first_run_done", "") != "1")
         ok = {n: b for n, b in got.items() if isinstance(b, Batch)}
-        if not ok:  # every sighting producer failed: the poll fails, so nothing stays online forever
-            errors = [(n, b.error) for n, b in got.items()]
+        if not any(n in ok for n in primary):  # every primary producer failed: the poll fails, so nothing stays online forever
+            errors = [(n, b.error) for n, b in got.items() if n in primary]
             msg = errors[0][1] if len(errors) == 1 else "; ".join(f"{n}: {e}" for n, e in errors) or "no sighting connector is enabled"
             return self._fail(msg, status)
         return got, status, ok
@@ -994,13 +1029,15 @@ class Collector:
             self._baseline_wait_logged = True
         return waiting
 
-    def _merge_state(self, first_run: bool, prev_ok: bool, producers: list[str], waiting: list[str]) -> MergeState:
+    def _merge_state(self, first_run: bool, prev_ok: bool, producers: list[str], primary: list[str],
+                     waiting: list[str]) -> MergeState:
         # the controller role, not the type: any instance whose describe() says so (getattr: a type without roles)
         # producers: only an instance that lists sightings can hold a lease, so a failed switch does not hold lease types
         return MergeState(self._no_lease_since, first_run, prev_ok,
                           frozenset(n for n, conn in self._connectors.items()
                                     if "controller" in getattr(conn.describe(), "roles", frozenset())),
-                          producers=frozenset(producers), lease_holders=self._lease_holders, held_back=bool(waiting),
+                          producers=frozenset(producers), lease_holders=self._lease_holders, answered=self._answered,
+                          secondary=frozenset(producers) - frozenset(primary), held_back=bool(waiting),
                           undecided_since=self._undecided_since)
 
     def _commit(self, c: sqlite3.Connection, state: MergeState, batches: dict, now: int, t0: float,
@@ -1015,7 +1052,8 @@ class Collector:
         state.prune_now = self._prune_reference(c, now)
         res = merge_batches(prev, batches, self.cfg, now, state)
         purged = self._write(c, prev, res, now, state.prune_now, purge=not first_run)
-        self.db.set_meta("lease_holders", json.dumps(sorted(res.lease_holders)), c)
+        self.db.set_meta("lease_holders", json.dumps({"holders": sorted(res.lease_holders),
+                                                      "answered": sorted(res.answered)}), c)
         self._write_poll_meta(c, t0, now, raw_stats, first_run, waiting, status)
         self._write_source_events(c)
         return res, purged
@@ -1049,7 +1087,8 @@ class Collector:
     def run_once(self) -> dict:
         t0 = time.time()
         producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
-        collected = self._sightings(producers)
+        primary = self._primary(producers)
+        collected = self._sightings(producers, primary)
         if isinstance(collected, dict):  # the failed poll
             self._mqtt_step(ok=False)
             return collected
@@ -1059,17 +1098,18 @@ class Collector:
         now = int(time.time())
         first_run = self.db.get_meta("first_run_done", "") != "1"
         prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
-        waiting = self._baseline_gate(first_run, sightings, ok, producers, raw_stats, enrich_status)
+        waiting = self._baseline_gate(first_run, sightings, ok, primary, raw_stats, enrich_status)
         if isinstance(waiting, dict):  # the failed poll
             self._mqtt_step(ok=False)
             return waiting
         batches = {n: got[n] for n in self._runs if n in got}
-        state = self._merge_state(first_run, prev_ok, producers, waiting)
+        state = self._merge_state(first_run, prev_ok, producers, primary, waiting)
         # immediate: it reads the devices and then writes, so a deferred transaction would fail at its first write
         # when another writer (import-csv, reset-baseline) committed in between; this one waits up to busy_timeout
         with self.db.tx(immediate=True) as c:
             res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
-        self._lease_holders = res.lease_holders  # only after the commit: it is stored with it
+        self._lease_holders, self._answered = res.lease_holders, res.answered  # only after the commit: stored with it
+        self._refresh_ip_map()
         self._source_events_written()
         # after the commit (the published state is what the page shows) and before the alert and the mail: a
         # reconnect here lets the "mqtt" event channel use the connection in the same poll

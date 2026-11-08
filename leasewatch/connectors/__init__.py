@@ -60,7 +60,9 @@ class ConnectorInfo:
     """What a connector type is: its name ([a-z0-9_]+), its own version, the contract version it was written
     against (must equal API_VERSION), which record kinds it emits ("sighting", "attachment") and its settings.
     roles: "controller" = its attachments are a Wi-Fi controller's complete client list, so a device missing from
-    an answered batch has left Wi-Fi, and a failed poll leaves Wi-Fi devices "blind" (see merge.py)."""
+    an answered batch has left Wi-Fi, and a failed poll leaves Wi-Fi devices "blind" (see merge.py); "names" = a
+    listen-only name source. Both make a sighting producer secondary: its failure does not fail the poll, hold the
+    baseline back or hold merges back as a possible lease holder."""
     type: str
     version: str
     api_version: int

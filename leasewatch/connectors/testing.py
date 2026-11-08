@@ -109,7 +109,7 @@ class ConnectorContractTests(_Base):
         self.assertEqual(info.api_version, API_VERSION)
         self.assertTrue(info.produces, "produces is empty")
         self.assertLessEqual(set(info.produces), {"sighting", "attachment"})
-        self.assertLessEqual(set(info.roles), {"controller"})
+        self.assertLessEqual(set(info.roles), {"controller", "names"})
         keys = [s.key for s in info.settings]
         self.assertEqual(len(keys), len(set(keys)), "setting keys are not unique")
         for k in keys:

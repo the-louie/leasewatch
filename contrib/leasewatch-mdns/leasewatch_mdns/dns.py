@@ -3,7 +3,9 @@ caches.
 
 parse_response() reads the header (RFC 1035), skips the questions and walks the answer, authority and additional
 records, at most MAX_RECORDS of them. Names may be compressed; a pointer must point before the start of the name
-being read and before every earlier pointer target of that name, so a loop or a forward pointer is refused. The
+being read and before every earlier pointer target of that name, so a loop or a forward pointer is refused. More
+than MAX_QUESTIONS questions, more than MAX_HOPS pointers in one name or more than MAX_EXPANSION bytes of names in
+one packet make it malformed, so a hostile packet costs little to read. The
 class field's top bit (the mDNS cache-flush bit, RFC 6762) is masked; records of a class other than IN are skipped.
 
 A records give a host and its IPv4 address. DNS-SD records (RFC 6763) give the label: an SRV record ties a service
@@ -11,7 +13,9 @@ instance to its target host, the instance's TXT record gives the text ("fn=", el
 "ty=", else "product=" without its parentheses). An instance with no SRV record whose first label equals (ignoring
 case) the first label of an A record's host is tied to that host (Apple's "_device-info._tcp" TXT comes without
 SRV: "Alex-iPad._device-info._tcp.local" belongs to "Alex-iPad.local"); the SRV record wins when there is one. One
-triple per A record (host, address); an instance whose target host has no A record in the packet gives nothing. A query (QR bit clear) gives nothing and is not an error. A record
+triple per A record (host, address); an instance whose target host has no A record in the packet gives nothing. A
+query (QR bit clear), or a packet with an OPCODE or RCODE other than 0 (RFC 6762 18.3, 18.11), gives nothing and is
+not an error. A record
 with TTL 0 (a goodbye) is returned like any other. A packet that stops parsing part way sets `malformed` and keeps
 the triples of the records read before. It never raises.
 """
@@ -25,6 +29,9 @@ MAX_RECORDS = 64  # answer + authority + additional records read at most; the re
 MAX_NAME = 255  # bytes of a name on the wire, uncompressed (RFC 1035 2.3.4)
 MAX_LABELS = 128
 MAX_LABEL_TEXT = 64  # characters of a label kept
+MAX_QUESTIONS = 32  # a response with more questions is malformed (an mDNS response normally has none)
+MAX_HOPS = 16  # compression pointers followed per name
+MAX_EXPANSION = 16384  # bytes of names read per packet, pointers followed; a packet that needs more is malformed
 
 TYPE_A, TYPE_PTR, TYPE_TXT, TYPE_SRV = 1, 12, 16, 33
 CLASS_IN = 1
@@ -42,11 +49,14 @@ class _Bad(Exception):
     """The packet does not parse from here on."""
 
 
-def _name(data: bytes, off: int) -> tuple[list[bytes], int]:
-    """The labels of the name at `off` and the offset just after it (after its first pointer, if any)."""
+def _name(data: bytes, off: int, budget: list[int]) -> tuple[list[bytes], int]:
+    """The labels of the name at `off` and the offset just after it (after its first pointer, if any).
+
+    budget[0] is the packet's bytes of name expansion left; each label and each pointer followed uses it up."""
     labels: list[bytes] = []
     size = 1  # the root label's length byte
     end = -1
+    hops = 0
     limit = off  # a pointer must point before this: the name's start, then the previous pointer target
     while True:
         if off >= len(data):
@@ -56,7 +66,9 @@ def _name(data: bytes, off: int) -> tuple[list[bytes], int]:
             if off + 1 >= len(data):
                 raise _Bad
             target = (n & 0x3F) << 8 | data[off + 1]
-            if target >= limit:
+            hops += 1
+            budget[0] -= 2
+            if target >= limit or hops > MAX_HOPS or budget[0] < 0:
                 raise _Bad
             if end < 0:
                 end = off + 2
@@ -70,7 +82,8 @@ def _name(data: bytes, off: int) -> tuple[list[bytes], int]:
             raise _Bad
         labels.append(data[off + 1:off + 1 + n])
         size += n + 1
-        if size > MAX_NAME or len(labels) > MAX_LABELS:
+        budget[0] -= n + 1
+        if size > MAX_NAME or len(labels) > MAX_LABELS or budget[0] < 0:
             raise _Bad
         off += 1 + n
 
@@ -131,21 +144,25 @@ def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str, st
         out.malformed = True
         return a_records, srv, txt, firsts
     _id, flags, qd, an, ns, ar = struct.unpack_from("!6H", data)
-    if not flags & 0x8000:
+    if not flags & 0x8000 or flags & 0x7800 or flags & 0x000F:  # a query, an OPCODE other than 0, an RCODE other than 0
+        return a_records, srv, txt, firsts
+    if qd > MAX_QUESTIONS:
+        out.malformed = True
         return a_records, srv, txt, firsts
     total = an + ns + ar
     if total > MAX_RECORDS:
         out.truncated = True
         total = MAX_RECORDS
+    budget = [MAX_EXPANSION]
     try:
         off = HEADER
         for _ in range(qd):
-            _labels, off = _name(data, off)
+            _labels, off = _name(data, off, budget)
             off += 4  # type, class
             if off > len(data):
                 raise _Bad
         for _ in range(total):
-            owner, off = _name(data, off)
+            owner, off = _name(data, off, budget)
             if off + 10 > len(data):
                 raise _Bad
             rtype, rclass, _ttl, rdlen = struct.unpack_from("!HHIH", data, off)
@@ -161,13 +178,13 @@ def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str, st
                 ip = ".".join(str(b) for b in data[start:off])
                 a_records.append((_key(owner), _first(owner), _clean(_text(owner[0])), ip))
             elif rtype == TYPE_PTR:
-                _target, end = _name(data, start)  # read for its bounds: the instance is known by its SRV/TXT
+                _target, end = _name(data, start, budget)  # read for its bounds: the instance is known by its SRV/TXT
                 if end > off:
                     raise _Bad
             elif rtype == TYPE_SRV:
                 if rdlen < 7:
                     raise _Bad
-                target, end = _name(data, start + 6)
+                target, end = _name(data, start + 6, budget)
                 if end > off:
                     raise _Bad
                 srv.setdefault(_key(owner), _key(target))

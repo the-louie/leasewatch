@@ -1,6 +1,6 @@
 # contrib: connectors outside the core
 
-`contrib/` holds connectors that are not built into leasewatch. Each one reads a source the core does not ship
+`contrib/` holds connectors that are not built into leasewatch. Each one reads or listens to a source the core does not ship
 (for example a dnsmasq leases file or a RouterOS REST API) and speaks the same connector contract as the built-in
 connectors in `leasewatch/connectors/` (connector API version 1).
 
@@ -8,6 +8,12 @@ How to write, package, install and test a connector: [docs/connectors.md](../doc
 
 The leasewatch image does not contain `contrib/`, and nothing under `leasewatch/` imports from it. A test
 (`tests/test_contrib_layout.py`) checks this.
+
+## Packages
+
+- [leasewatch-dnsmasq](leasewatch-dnsmasq/README.md): reads a dnsmasq leases file.
+- [leasewatch-mikrotik](leasewatch-mikrotik/README.md): reads a MikroTik router through the RouterOS REST API.
+- [leasewatch-mdns](leasewatch-mdns/README.md): listen-only names from mDNS; needs host networking and leasewatch 1.5.
 
 ## Layout
 
