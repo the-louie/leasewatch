@@ -29,7 +29,8 @@ from .connectors import build_opener, make_redactor, parse_bool
 log = logging.getLogger("leasewatch.notify")
 # hostnames come from DHCP clients: a CR/LF (or other control char) in the subject would inject mail headers
 # (and the Unicode line breaks U+0085, U+2028 and U+2029, which EmailMessage refuses in a header as it does CR/LF)
-_CTRL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+# line breaks and control characters that would forge a header or a line in a mail or webhook; replaced by a space
+_LINE_UNSAFE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 MAX_RESPONSE = 64 * 1024  # bytes of a webhook answer read (and discarded)
 DISCORD_MAX = 2000  # characters of a Discord message
 # bytes of an ntfy message: ntfy's default message-size-limit; one that reaches it is refused or turns into an attachment
@@ -82,7 +83,7 @@ def _device_line(d: dict) -> str:
     tags = ", ".join(filter(None, [d["vlan"], d["lease_type"]]))
     line = f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or '(no hostname)':28}  {d['vendor'] or '?'}" + (f"  [{tags}]" if tags else "")
     # a CR/LF in a DHCP hostname would forge whole lines of the body (e.g. a fake review link)
-    return _CTRL.sub(" ", line)
+    return _LINE_UNSAFE.sub(" ", line)
 
 
 def build_message(cfg: Config, devices: list[dict]) -> Message:
@@ -91,7 +92,7 @@ def build_message(cfg: Config, devices: list[dict]) -> Message:
     base = cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
     # the MAC is stored normalised (hex pairs and colons): it needs no quoting
     links = [f"{base}/?device={d['mac']}" for d in devices] if base else []
-    blocks = [_device_line(d) + (f"\n    {_CTRL.sub(' ', links[i])}" if links else "") for i, d in enumerate(devices)]
+    blocks = [_device_line(d) + (f"\n    {_LINE_UNSAFE.sub(' ', links[i])}" if links else "") for i, d in enumerate(devices)]
     lines += blocks
     url = f"{base}/?filter=unacked" if base else ""
     if url:
@@ -101,7 +102,7 @@ def build_message(cfg: Config, devices: list[dict]) -> Message:
     where = ", ".join(filter(None, [first["ip"], first["vlan"]]))
     # no IP and no network: no "()" either
     subject = (f"New device: {who}" + (f" ({where})" if where else "")) if n == 1 else f"{n} new devices on the network"
-    return Message(_CTRL.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
+    return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
 
 
 def _send(cfg: Config, subject: str, text: str) -> None:

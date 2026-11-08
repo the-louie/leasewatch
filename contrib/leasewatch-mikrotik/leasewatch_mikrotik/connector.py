@@ -39,7 +39,7 @@ PATH_PROBE = "/rest/system/resource?.proplist=version"
 
 # ARP states in which RouterOS sets `complete` (MikroTik ARP docs); used only when `complete` itself is absent
 COMPLETE_STATES = frozenset({"reachable", "stale", "delay", "probe", "permanent"})
-# as db.py's _CTRL, plus tab and newline: also the Unicode line/paragraph separators and the bidi and zero-width
+# as db.py's CONTROL_CHARS, plus tab and newline: also the Unicode line/paragraph separators and the bidi and zero-width
 # controls, which split or reorder a line in a viewer as a newline would
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]+")
 

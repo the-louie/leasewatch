@@ -48,7 +48,7 @@ import re
 from dataclasses import dataclass, field, replace
 
 from ..config import Config
-from ..db import _CTRL
+from ..db import CONTROL_CHARS
 from ..fw1 import Sighting as Fw1Sighting
 from ..fw1 import norm_mac
 from . import Attachment, Batch, Sighting, parse_bool
@@ -381,7 +381,7 @@ _BOOL_FIELDS = {Sighting: ("presence",), Attachment: ("uplink", "present")}
 _OPT_INT_FIELDS = {Sighting: (), Attachment: ("vlan", "signal")}
 # names the controller shows as given: an SSID may begin or end with a space, and two such SSIDs are different networks
 _UNSTRIPPED = ("ssid", "ap", "alias")
-# every line break (CR, VT, FF, NEL, LS, PS too, not only LF) separates words: _CTRL would delete it and glue them
+# every line break (CR, VT, FF, NEL, LS, PS too, not only LF) separates words: CONTROL_CHARS would delete it and glue them
 _SPACES = dict.fromkeys(map(ord, "\n\t\r\x0b\x0c\x85\u2028\u2029"), " ")
 _INT64 = 2 ** 63  # SQLite INTEGER is signed 64-bit; a larger int raises OverflowError at the write and fails the poll
 
@@ -407,7 +407,7 @@ def _str(v: object, strip: bool) -> str:
     and newline become spaces, as db.py does for a name, so a hostname cannot reverse or split the "old -> new" text
     of an event."""
     s = ("" if v is None else str(v)).encode("utf-8", "replace").decode("utf-8")
-    s = _CTRL.sub("", s.replace("\r\n", "\n").translate(_SPACES))  # _CTRL keeps tab/newline (for notes)
+    s = CONTROL_CHARS.sub("", s.replace("\r\n", "\n").translate(_SPACES))  # CONTROL_CHARS keeps tab/newline (for notes)
     return s.strip() if strip else s
 
 

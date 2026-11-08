@@ -99,9 +99,9 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts)",  # the events filter by kind, and the per-poll 'restored' lookup
 )
 
-# strip NUL/C0/C1 control, invisible and bidi-override characters from user text (keeps tab/newline for notes).
+# what is stripped from stored text: control, zero-width and bidi characters; tab and newline stay (notes are multi-line).
 # U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
 
 
 class AlreadyADevice(Exception):
@@ -475,9 +475,9 @@ class Database:
             if not acked or not cur["acked"]:  # a re-ack keeps the time of the first ack
                 sets.append("acked_at=?"); params.append(now if acked else None)
         if name is not None:
-            sets.append("name=?"); params.append(_CTRL.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
+            sets.append("name=?"); params.append(CONTROL_CHARS.sub("", name).replace("\n", " ").replace("\t", " ").strip()[:80].strip())  # strip first too: leading blanks must not use up the limit
         if note is not None:
-            sets.append("note=?"); params.append(_CTRL.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
+            sets.append("note=?"); params.append(CONTROL_CHARS.sub("", note).strip()[:1000].rstrip())  # the cut can end on a blank
         # archive: the device leaves the list and the mail queue; the same state again changes nothing
         arch_change = archived is not None and (cur["archived_ts"] is not None) != archived
         if arch_change:
