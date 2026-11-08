@@ -36,6 +36,7 @@ MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then
 SKIPPED = "previous collection has not completed; skipped"
 SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_down event (6 min at default polls)
 ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sends
+WATCH_KINDS = ("offline", "online", "ip", "vlan", "port", "wifi")  # MAIL_ON_WATCH sends these of watched devices
 ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
 ALERT_MARK = "notify.alert_event_id"  # meta: id of the newest event already sent as an alert
 ALERT_SUBJECTS = {"source_down": "{name} is down", "source_up": "{name} is back"}  # one event: by its kind
@@ -708,16 +709,20 @@ class Collector:
         except sqlite3.Error as e:  # mailed again at the next poll (at-least-once)
             log.warning("mail sent but the queue was not cleared (%d device(s) will be mailed again): %s", len(macs), e)
 
-    def _alert(self, kinds: tuple[str, ...] = ALERT_KINDS) -> None:
-        """Send the events of `kinds` written since the mark (meta notify.alert_event_id) as one message, at most
-        ALERT_BATCH per poll, oldest first; on delivery the mark moves to the newest one sent. Only with a channel
-        and MAIL_ON_SOURCE=1. No mark yet (first start with alerts on): the mark is set to the newest event and nothing
-        is sent, so old events are not sent at an upgrade. While alerts are off the mark is removed (once per process),
-        so turning them on later does not send the events of the time they were off.
+    def _alert(self) -> None:
+        """Send the alert events written since the mark (meta notify.alert_event_id) as one message, at most
+        ALERT_BATCH per poll, oldest first; on delivery the mark moves to the newest one sent. Alert events: the
+        ALERT_KINDS with MAIL_ON_SOURCE=1, and the WATCH_KINDS of devices with watch=1 with MAIL_ON_WATCH=1 (one mark
+        for both). Only with a channel. No mark yet (first start with alerts on): the mark is set to the newest event
+        and nothing is sent, so old events are not sent at an upgrade. While both are off the mark is removed (once
+        per process), so turning them on later does not send the events of the time they were off.
         At-least-once: when no channel delivered (or the mark cannot be written) the same events go at the next poll.
+        Ack or archive of a device does not drop its alerts: they are events, not the mail queue.
         Never raises: a failure here does not stop the poll."""
+        source, watch = self.cfg.mail_on_source, self.cfg.mail_on_watch
+        what = "alert" if source and watch else "source alert" if source else "watch alert"
         try:
-            if not (self.cfg.mail_enabled and self.cfg.mail_on_source):
+            if not (self.cfg.mail_enabled and (source or watch)):
                 if not self._alert_mark_cleared:
                     self.db.q("DELETE FROM meta WHERE key=?", (ALERT_MARK,))
                     self._alert_mark_cleared = True
@@ -729,46 +734,85 @@ class Collector:
                     top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
                     self.db.set_meta(ALERT_MARK, str(top), c)
                 return
-            marks = ",".join("?" * len(kinds))
-            rows = self.db.q(f"SELECT id, ts, kind, detail FROM events WHERE id > ? AND kind IN ({marks}) "
-                             f"ORDER BY id LIMIT ?", (int(mark), *kinds, ALERT_BATCH))
+            where, args = [], []
+            if source:
+                where.append(f"kind IN ({','.join('?' * len(ALERT_KINDS))})")
+                args += ALERT_KINDS
+            if watch:  # source events have mac '', which no device row has
+                where.append(f"(kind IN ({','.join('?' * len(WATCH_KINDS))}) "
+                             "AND mac IN (SELECT mac FROM devices WHERE watch=1))")
+                args += WATCH_KINDS
+            rows = self.db.q(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND ({' OR '.join(where)}) "
+                             f"ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH))
             if not rows:
                 return
-            msg = notify.build_alert(self.cfg, self._alert_subject(rows), [
-                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(r['ts']))} {r['kind']}: {r['detail']}"
-                for r in rows], rows[-1]["kind"])
+            names = self._alert_names(rows)
+            src = [r for r in rows if r["kind"] in ALERT_KINDS]
+            msg = notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
+                                     src[-1]["kind"] if src else "watch")
         except Exception as e:  # sqlite3.Error or a bug: the mark stays, tried again at the next poll
-            log.warning("source alert skipped: %s", db_error_text(e) if isinstance(e, sqlite3.Error) else type(e).__name__)
+            log.warning("%s skipped: %s", what, db_error_text(e) if isinstance(e, sqlite3.Error) else type(e).__name__)
             return
         try:
-            notify.send(self.cfg, msg, self._mail_backoff, "source alert")
+            notify.send(self.cfg, msg, self._mail_backoff, what)
         except notify.NotifyDeferred:  # no channel was called: the mark stays
-            log.debug("source alert deferred (%d event(s)): every channel is in backoff", len(rows))
+            log.debug("%s deferred (%d event(s)): every channel is in backoff", what, len(rows))
             self._write_notify_state()
             return
         except Exception as e:  # NotifyError texts name the channel and a code only; another exception by its type
-            log.log(logging.DEBUG if self._alert_failing else logging.WARNING, "source alert failed (%d event(s)): %s",
-                    len(rows), e if isinstance(e, notify.NotifyError) else type(e).__name__)
+            log.log(logging.DEBUG if self._alert_failing else logging.WARNING, "%s failed (%d event(s)): %s",
+                    what, len(rows), e if isinstance(e, notify.NotifyError) else type(e).__name__)
             self._alert_failing = True
             self._write_notify_state()
             return
         if self._alert_failing:
-            log.info("source alerts deliver again")
+            log.info("%ss deliver again", what)
             self._alert_failing = False
         self._write_notify_state()
         try:
             with self.db.tx() as c:
                 self.db.set_meta(ALERT_MARK, str(rows[-1]["id"]), c)
         except sqlite3.Error as e:  # sent again at the next poll (at-least-once)
-            log.warning("source alert sent but not recorded (%d event(s) will be sent again): %s", len(rows),
+            log.warning("%s sent but not recorded (%d event(s) will be sent again): %s", what, len(rows),
                         db_error_text(e))
 
+    def _alert_names(self, rows: list) -> dict[str, str]:
+        """mac -> the device's display name (name, else hostname, else the MAC) for the device events in rows."""
+        macs = sorted({r["mac"] for r in rows if r["mac"]})
+        names = {m: m for m in macs}
+        if macs:
+            for d in self.db.q(f"SELECT mac, name, hostname FROM devices WHERE mac IN ({','.join('?' * len(macs))})",
+                               tuple(macs)):
+                names[d["mac"]] = d["name"] or d["hostname"] or d["mac"]
+        return names
+
+    def _alert_lines(self, rows: list, names: dict[str, str]) -> list[str]:
+        """`<time> <kind>: <detail>` per source event; `<time> <name> <kind>[: <detail>]` per device event, followed
+        by its page link (as in the new-device mail) when PUBLIC_URL is set. The time is in the container's TZ."""
+        base = self.cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
+        lines = []
+        for r in rows:
+            at = time.strftime('%Y-%m-%d %H:%M', time.localtime(r["ts"]))
+            if not r["mac"]:
+                lines.append(f"{at} {r['kind']}: {r['detail']}")
+                continue
+            lines.append(f"{at} {names[r['mac']]} {r['kind']}" + (f": {r['detail']}" if r["detail"] else ""))
+            if base:
+                lines.append(f"    {base}/?device={r['mac']}")
+        return lines
+
     @staticmethod
-    def _alert_subject(rows: list) -> str:
-        """One event: by its kind and instance ("fw1 is down"); several: their count."""
+    def _alert_subject(rows: list, names: dict[str, str]) -> str:
+        """One event: by its kind and instance ("fw1 is down") or device ("printer: offline"); several: their count,
+        named by what they are (source events, changes on watched devices, or alerts when both)."""
         if len(rows) > 1:
-            return f"{len(rows)} source events"
+            devices = sum(1 for r in rows if r["mac"])
+            what = ("source events" if not devices else "changes on watched devices" if devices == len(rows)
+                    else "alerts")
+            return f"{len(rows)} {what}"
         r = rows[0]
+        if r["mac"]:
+            return f"{names[r['mac']]}: {r['kind']}"
         name = r["detail"].split(":", 1)[0]  # source_down/source_up details start with "<instance>: "
         return ALERT_SUBJECTS.get(r["kind"], "{name}: " + r["kind"]).format(name=name)
 

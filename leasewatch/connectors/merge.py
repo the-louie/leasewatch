@@ -519,6 +519,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
+    res.events += _watch_events(rows, before, res, state, now)
     res.events += _auto_archive(rows, cfg, state, now)
     _assemble(res, rows, before, merged, state, changes)
     return res
@@ -665,6 +666,29 @@ def _back_event(cur: dict, m: Merged, now: int, prev_ok: bool) -> tuple[str, str
         days = (now - cur["last_online"]) // 86400
         return ("back", f"back after {days} day{'' if days == 1 else 's'}")
     return None
+
+
+def _watch_events(rows: dict[str, dict], before: dict[str, dict], res: MergeResult, state: MergeState,
+                  now: int) -> list[tuple[str, str, str]]:
+    """`offline` / `online` for each watched row (watch=1) whose online flag changed this poll; other rows get none.
+    offline: after the grace (in _update_row for a device still listed, or by the grace rule in merge), so the grace
+    is the debounce. online: back on the wire, unless this poll writes its `back` event (a day away or the archive)."""
+    # prev_ok: after a failed poll every device looks "away" for the outage (and _fail turned online off silently),
+    # so neither direction is evidence of a change
+    if not state.prev_ok:
+        return []
+    back = {mac for mac, kind, _ in res.events if kind == "back"}
+    events = []
+    for mac, row in rows.items():
+        was = before.get(mac)
+        if not row.get("watch") or was is None or bool(was["online"]) == bool(row["online"]):
+            continue
+        if not row["online"]:
+            ago = max(0, now - (row["last_online"] or now)) // 60
+            events.append((mac, "offline", f"last seen {ago} min ago"))
+        elif mac not in back:
+            events.append((mac, "online", ""))
+    return events
 
 
 def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state: MergeState, now: int,

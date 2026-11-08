@@ -294,6 +294,9 @@ class Config:
     # MAIL_ON_SOURCE: the source_down/source_up events also go to the channels (1/0; empty = the default, off).
     # The text as given; the flag is the mail_on_source property
     mail_on_source_raw: str = field(default_factory=lambda: _env("MAIL_ON_SOURCE", "0") or "0")
+    # MAIL_ON_WATCH: what happens to a watched device (devices.watch=1) also goes to the channels (1/0; empty = the
+    # default, off). The text as given; the flag is the mail_on_watch property
+    mail_on_watch_raw: str = field(default_factory=lambda: _env("MAIL_ON_WATCH", "0") or "0")
     # connector instances from LW_CONNECTORS (the only way to configure a source)
     connector_specs: list = field(default_factory=list, init=False)
     connector_problems: list = field(default_factory=list, init=False, repr=False)
@@ -361,6 +364,11 @@ class Config:
     def mail_on_source(self) -> bool:
         """MAIL_ON_SOURCE is on: a source_down/source_up event is sent through the channels."""
         return parse_bool(self.mail_on_source_raw) is True
+
+    @property
+    def mail_on_watch(self) -> bool:
+        """MAIL_ON_WATCH is on: an offline/online/ip/vlan/port/wifi event of a watched device is sent through the channels."""
+        return parse_bool(self.mail_on_watch_raw) is True
 
     @property
     def mail_enabled(self) -> bool:
@@ -452,6 +460,8 @@ class Config:
             problems.append("READ_ONLY must be 1 or 0")
         if parse_bool(self.mail_on_source_raw) is None:
             problems.append("MAIL_ON_SOURCE must be 1 or 0")
+        if parse_bool(self.mail_on_watch_raw) is None:
+            problems.append("MAIL_ON_WATCH must be 1 or 0")
         nets, bad = parse_networks(self.write_allow)
         problems += [f"WRITE_ALLOW: not an address or network: {b}" for b in bad]
         # web.Server listens on IPv4 only, so an IPv6 entry could never match

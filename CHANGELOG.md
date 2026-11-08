@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- **Watch alerts:** `MAIL_ON_WATCH=1` (default `0`) sends the `offline`, `online`, `ip`, `vlan`, `port` and `wifi` events of watched devices through the channels, one digest per poll (webhook `event` `watch`), each line with a link to the device's page. New `offline` (after the grace) and `online` (back within a day) events, for watched devices only and never in the poll after a failed one.
 - **Watch:** a per-device `watch` flag. The device page has a Watch / Unwatch button next to Archive (saved at once; hidden for a client that may not write), a watched device has a `watch` badge in the list, `POST /api/devices/<mac>` takes `"watch": bool` (the bulk route refuses it), the device JSON carries `watch` (0 or 1), the CSV has a last column `watch`, and a change writes a `watched` or `unwatched` event with who did it.
 - `renamed` and `note` events: a changed name (`old -> new`, 40 characters each) or note (the lengths only, never the text) is written to the event log, with who did it. The same value again writes nothing.
 - `PRUNE_PRIVATE_DAYS` (0 or 2-3650, default 0 = use `PRUNE_DAYS`): rotating phone addresses (private MACs) that never merged, with no name, note, ack, split origin or merged address, are archived after that many days offline (never longer than `PRUNE_DAYS`); it works with `PRUNE_DAYS` off. The `archived` event reads `auto (private): not online for N days`.
