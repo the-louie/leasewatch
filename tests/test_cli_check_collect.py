@@ -289,7 +289,7 @@ class TestCollect(CliBase):
         self.assertEqual(rep["sightings"], [{
             "mac": "02:00:00:00:00:2a", "source": "dhcp1", "kind": "dhcp", "presence": False,
             "observed_at": 1762400000, "ip": "10.0.0.20", "hostname": "printer", "vendor": "", "network": "",
-            "iface": "", "lease_type": "dynamic", "client_id": "", "label": ""}])
+            "iface": "", "lease_type": "dynamic", "client_id": "", "label": "", "ip6": ""}])
         self.assertEqual(registry()["fakecli"].CLOSED, ["dhcp1"])
 
     def test_json_check_failure(self):

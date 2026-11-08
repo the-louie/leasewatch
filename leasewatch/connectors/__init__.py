@@ -8,7 +8,7 @@ the database or to the device it reads from.
 What the host does with a Batch (merge.normalise_batch): it sets every record's `source` to the instance name (a
 connector may leave it ""), normalises `mac` with norm_mac() and drops records that fail it (logged once per
 instance, counted in stats["dropped"]), and it empties an `ip` that is not a dotted IPv4 address (one DEBUG line, not
-counted as dropped). Errors: only a ConnectorError's text is shown in the UI and status; any
+counted as dropped) and normalises `ip6`. Errors: only a ConnectorError's text is shown in the UI and status; any
 other exception from check()/collect() is shown as its type name only (and logged with a traceback).
 """
 from __future__ import annotations
@@ -75,14 +75,18 @@ class Sighting:
 
     mac: as the source gives it; the host normalises it to "aa:bb:cc:dd:ee:ff" and drops the record if it is not a
     MAC. source: the connector instance name, filled in by the host (the connector may leave it ""). kind: what the
-    evidence is, "dhcp" | "arp" | "client" | "scan" (ranking in merge.py). presence: True only if the source saw the
+    evidence is, "dhcp" | "arp" | "client" | "scan" | "ndp" | "dhcp6" (ranking in merge.py). "ndp" is an IPv6 neighbour entry,
+    "dhcp6" a DHCPv6 lease; both enrich a device that other kinds created, never create one, and rank after every
+    other kind. presence: True only if the source saw the
     device on the wire now (an ARP entry, ISC's "online" lease status, an active controller client); a lease or
     reservation alone is False. Only presence=True makes a device online and moves last_online, for every kind.
     observed_at: epoch seconds when the connector collected it; informational in API 1 (reserved as a tie-break
     for C6). network: human interface name (LAN, IOT), the "vlan" column today. iface: source-specific interface
     id (opt3). lease_type: "static" | "dynamic" | "", only kind "dhcp" sets it. client_id: DHCP client-id / DUID
     when known (the host stores it in its normal form, see merge.norm_client_id). label: a human label from the
-    source, e.g. a DHCP reservation description; a display name after the hostname, never an identity or merge key."""
+    source, e.g. a DHCP reservation description; a display name after the hostname, never an identity or merge key.
+    ip6: the device's IPv6 address as the source gives it; the host normalises it to the compressed form, drops a
+    "%scope", and empties a link-local address or anything that is not IPv6."""
     mac: str
     source: str
     kind: str
@@ -96,6 +100,7 @@ class Sighting:
     lease_type: str = ""
     client_id: str = ""
     label: str = ""
+    ip6: str = ""
 
 
 @dataclass(frozen=True)

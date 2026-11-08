@@ -82,10 +82,11 @@ One device as one source saw it (an IP, a hostname, a network).
 |---|---|---|
 | `mac` | `str` | As the source gives it. The host normalises it to `aa:bb:cc:dd:ee:ff` and drops the record if it is not a MAC. |
 | `source` | `str` | Leave it `""`. The host sets it to the instance name. |
-| `kind` | `str` | What the evidence is: `"dhcp"`, `"arp"`, `"client"` or `"scan"`. See the ranking below. |
+| `kind` | `str` | What the evidence is: `"dhcp"`, `"arp"`, `"client"`, `"scan"`, `"ndp"` or `"dhcp6"`. `"ndp"` is an IPv6 neighbour entry and `"dhcp6"` a DHCPv6 lease; both enrich a device that other kinds created, never create one, and rank after every other kind. See the ranking below. |
 | `presence` | `bool` | `True` only if the source saw the device on the wire **now** (an ARP entry, a lease the DHCP server marks online, an active controller client). A lease or a reservation alone is `False`. |
 | `observed_at` | `int` | Epoch seconds when you collected it (use `ctx.now()`). Informational in API 1; the merge does not rank by it. |
 | `ip` | `str` | IPv4 address, or `""`. IPv4 only; anything else (IPv6, junk, a leading zero as in `010.0.0.1`) is treated as empty. |
+| `ip6` | `str` | optional (default `""`); the device's IPv6 address as the source gives it. The host normalises it to the compressed lower-case form, drops a `%scope`, and empties a link-local address, an IPv4 or IPv4-mapped value, and anything that does not parse. |
 | `hostname` | `str` | Or `""`. |
 | `vendor` | `str` | Or `""`. |
 | `network` | `str` | Human interface name (`LAN`, `IOT`); shown as the device's network (the `vlan` column). |
@@ -144,8 +145,9 @@ Before anything reads it, the host runs `merge.normalise_batch(name, batch)`. It
   characters are removed, tab and line breaks become spaces, and the text is stripped (except `ssid`, `ap`,
   `alias`); `kind` is lower-cased; flags given as text are read with the setting words (`"false"` is `False`);
   `observed_at` becomes an int or 0; `vlan`/`signal` an int in 64-bit range or `None`;
-- empties `ip` unless it is a dotted IPv4 address (IPv6, a leading zero as in `010.0.0.1` and junk become `""`). It
-  logs one DEBUG line and does not count the record as dropped.
+- empties `ip` unless it is a dotted IPv4 address (IPv6, a leading zero as in `010.0.0.1` and junk become `""`), and
+  `ip6` unless it is an IPv6 address other than link-local (a `%scope` is dropped, the compressed form is stored;
+  link-local, IPv4, IPv4-mapped and junk become `""`). It logs one DEBUG line and does not count the record as dropped.
 
 Return correct types anyway: the contract tests check them.
 
@@ -156,7 +158,7 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
 - **Only sightings create devices.** An attachment for a MAC that no sighting has ever listed does nothing.
 - **Online.** A device is online when any sighting has `presence=True` this poll, of any kind. Only that moves
   `last_online`. After it is no longer seen, it stays online for `ONLINE_GRACE_MINUTES`.
-- **Ranking by `kind`.** A kind not in a list ranks after all listed ones (the contract tests allow only the four).
+- **Ranking by `kind`.** A kind not in a list ranks after all listed ones (the contract tests allow only the six).
 
   | Field | Order |
   |---|---|
@@ -405,7 +407,8 @@ services:
   Added so far inside API 1: 1.3 added `Sighting.label` (optional, default `""`). A connector that sets it needs a 1.3
   host: on a 1.2 host the `Sighting(...)` call fails with an unexpected keyword. Guard it with `"label" in
   Sighting.__dataclass_fields__` or require host 1.3 in your package metadata. 1.4 added the stat
-  `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs).
+  `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs). 1.5 adds the kinds `ndp` and `dhcp6`
+  and the Sighting field `ip6`; a connector written for 1.4 is unaffected and needs no change.
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional

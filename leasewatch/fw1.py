@@ -53,6 +53,7 @@ class Sighting:
     online: bool
     client_id: str = ""  # as the server sends it (ISC: already hex); connectors.merge.norm_client_id normalises it
     label: str = ""  # a Kea reservation's description (an operator-written name), at most LABEL_MAX characters
+    ip6: str = ""  # the device's IPv6 address when the source gives one; the host normalises it
 
 
 LABEL_MAX = 128  # a description is free text; a longer one would only crowd the display name

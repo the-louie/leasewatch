@@ -54,7 +54,7 @@ TYPE_RE = re.compile(r"\A[a-z0-9_]+\Z")
 # a setting key becomes the <KEY> of LW_CONNECTOR__<NAME>__<KEY>, so it must be a non-empty shell-exportable word
 KEY_RE = TYPE_RE
 SETTING_KINDS = frozenset({"str", "int"})  # setting_problems() range-checks only "int"; a typo would skip it silently
-SIGHTING_KINDS = frozenset({"dhcp", "arp", "client", "scan"})
+SIGHTING_KINDS = frozenset({"dhcp", "arp", "client", "scan", "ndp", "dhcp6"})
 LINKS = frozenset({"wired", "wifi"})
 
 

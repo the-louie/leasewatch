@@ -376,7 +376,7 @@ def norm_client_id(v: object) -> str:
     return t if len(t) >= 4 else ""
 
 
-_STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind", "label"),
+_STR_FIELDS = {Sighting: ("ip", "hostname", "vendor", "network", "iface", "lease_type", "client_id", "kind", "label", "ip6"),
                Attachment: ("link", "device", "port", "via", "ssid", "ap", "radio", "alias")}
 _BOOL_FIELDS = {Sighting: ("presence",), Attachment: ("uplink", "present")}
 _OPT_INT_FIELDS = {Sighting: (), Attachment: ("vlan", "signal")}
@@ -421,6 +421,16 @@ def _ipv4(s: str) -> str:
         return ""
 
 
+def _ipv6(s: str) -> str:
+    """The compressed lower-case form of an IPv6 address (a trailing %scope dropped), or "" for link-local, an IPv4 or
+    IPv4-mapped value, and anything that does not parse."""
+    try:
+        a = ipaddress.IPv6Address(s.split("%", 1)[0]) if s else None
+    except ValueError:
+        return ""
+    return "" if a is None or a.is_link_local or a.ipv4_mapped else str(a)
+
+
 def _flag(v: object) -> bool:
     """A flag from a bool or a number, or from text by the words config.py accepts ("false", "0", "no" are False;
     bool("false") would be True); text that is none of them is False, as it asserts nothing. Bytes are read as text:
@@ -439,6 +449,7 @@ def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachm
     ch.update({f: _str(getattr(r, f), f not in _UNSTRIPPED) for f in _STR_FIELDS[t]})
     if t is Sighting:
         ch["ip"] = _ipv4(ch["ip"])
+        ch["ip6"] = _ipv6(ch["ip6"])
     if t is Sighting:  # the merge compares kinds exactly: "DHCP" would silently lose its lease
         ch["kind"] = ch["kind"].lower()
         ch["client_id"] = norm_client_id(ch["client_id"])
@@ -459,10 +470,10 @@ def normalise_batch(name: str, b: Batch) -> Batch:
     client_id in its normal form (norm_client_id); ip "" unless a dotted IPv4 (rewritten by str(IPv4Address));
     flags -> bool, text by the config words; observed_at -> int or 0; vlan/signal -> int in int64 range or None).
     Returns a new Batch; the given one is left as it is. Applying it twice drops nothing more."""
-    dropped = bad_ip = 0
+    dropped = bad_ip = bad_ip6 = 0
 
     def fix(records: object, kind: type) -> list:
-        nonlocal dropped, bad_ip
+        nonlocal dropped, bad_ip, bad_ip6
         try:  # a list subclass may raise in __iter__
             items = list(records) if isinstance(records, (list, tuple)) else None
         except Exception:
@@ -478,6 +489,8 @@ def normalise_batch(name: str, b: Batch) -> Batch:
                     c = _coerce(r, mac, name)
                     if kind is Sighting and c.ip == "" and _str(r.ip, True):
                         bad_ip += 1
+                    if kind is Sighting and c.ip6 == "" and _str(r.ip6, True):
+                        bad_ip6 += 1
                     out.append(c)
                     continue
             except Exception:  # any: a MAC or field whose conversion raises is as malformed as a bad MAC
@@ -499,6 +512,8 @@ def normalise_batch(name: str, b: Batch) -> Batch:
                     name, dropped)
     if bad_ip:
         log.debug("connector %s: %d sightings with an ip that is not IPv4, ip emptied", name, bad_ip)
+    if bad_ip6:
+        log.debug("connector %s: %d sightings with an ip6 that is link-local or not IPv6, ip6 emptied", name, bad_ip6)
     return Batch(sightings=sightings, attachments=attachments,
                  stats={**stats, "dropped": before + dropped})
 
