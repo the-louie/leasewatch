@@ -9,6 +9,7 @@ The lock holds wheels only: `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64` f
 ## Refresh
 
 - Base image: Dependabot opens a pull request with the new digest. To check by hand: `docker buildx imagetools inspect python:3.12-alpine`.
+- GitHub Actions: the actions in `.github/workflows/ci.yml` are pinned by commit SHA with a version comment (`# vX.Y.Z`), and Dependabot bumps both in one pull request.
 - Packages: for each package and version that `requirements.txt` resolves to (the newest that satisfies the ranges), download the wheels of both platforms and hash them:
 
 ```sh
