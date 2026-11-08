@@ -101,7 +101,10 @@ class UnifiConnector(SettingsMixin):
     def collect(self) -> Batch:
         try:
             wifi = self.client.clients()
-            return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
+            stats = {"clients": len(wifi)}
+            if self.settings["auth"] == "apikey":
+                stats["ssid_unavailable"] = 1  # the Integration API lists no SSID, signal or radio
+            return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats=stats)
         except ConnectorError:
             raise
         except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host

@@ -134,7 +134,8 @@ class Batch:
     "leases", "arp", "reservations" (sighting producers), "macs" (switch), "clients" (controller); the host adds
     "dropped" (malformed records dropped: an invalid MAC or the wrong type); "labels_unavailable" (> 0 when the labels
     the producer normally attaches could not be read this poll: the host keeps the stored label of every device
-    instead of clearing it). Values are ints, except these documented string keys: "strategy"
+    instead of clearing it); "ssid_unavailable" (> 0 when the controller cannot report SSIDs, signal or radio: the host
+    clears the stored values instead of keeping them). Values are ints, except these documented string keys: "strategy"
     (switch: the FDB strategy that produced the rows; the host copies it to meta conn.<name>.strategy)."""
     sightings: list[Sighting] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)

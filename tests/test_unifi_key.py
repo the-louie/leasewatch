@@ -316,7 +316,7 @@ class KeyConnector(KeyBase):
         self.assertEqual(c.validate(), [])
         c.check()
         b = c.collect()
-        self.assertEqual(b.stats, {"clients": 4})
+        self.assertEqual(b.stats, {"clients": 4, "ssid_unavailable": 1})
         got = {a.mac: a for a in b.attachments}
         self.assertEqual(set(got), WANT)
         self.assertEqual(got["02:00:00:00:00:21"].link, "wifi")

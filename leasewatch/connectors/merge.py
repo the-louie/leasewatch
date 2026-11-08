@@ -840,7 +840,9 @@ def _apply_attachments(rows: dict[str, dict], merged: dict[str, Merged], batches
         if sw and on_wire and not on_wifi and not blind and not held and sw.port:
             _place_on_port(mac, cur, sw, state.controllers, res, upd)
         if on_wifi:
-            _place_on_wifi(mac, cur, w, mac in new, res, upd)
+            # the instance that listed it cannot report SSIDs (stats ssid_unavailable): a stored SSID is stale, not kept
+            no_ssid = type(v := (ok[w.source].stats if w.source in ok else {}).get("ssid_unavailable")) is int and v > 0
+            _place_on_wifi(mac, cur, w, mac in new, res, upd, no_ssid)
         elif w is not None:  # the controller says wired now: drop the old Wi-Fi details
             _place_off_wifi(mac, cur, w, held, res, upd)
         # on the wire this poll, not just in grace: a phone walking out drops off ARP and the controller together, and
@@ -907,8 +909,10 @@ def _place_on_port(mac: str, cur: dict, sw: Attachment, controllers: frozenset[s
     upd["loc_source"] = sw.source
 
 
-def _place_on_wifi(mac: str, cur: dict, w: Attachment, is_new: bool, res: MergeResult, upd: dict) -> None:
-    """A controller's Wi-Fi listing into upd and res.wifi, with a `wifi` event for an SSID change or a join."""
+def _place_on_wifi(mac: str, cur: dict, w: Attachment, is_new: bool, res: MergeResult, upd: dict,
+                   no_ssid: bool = False) -> None:
+    """A controller's Wi-Fi listing into upd and res.wifi, with a `wifi` event for an SSID change or a join.
+    no_ssid: the controller reports no SSID, signal or radio at all: the stored ones are cleared, with one event."""
     # this poll's listing is the evidence of presence: only here, never from the stored SSID
     if w.ssid:
         res.wifi.append((mac, w.ssid, w.ap))
@@ -923,6 +927,14 @@ def _place_on_wifi(mac: str, cur: dict, w: Attachment, is_new: bool, res: MergeR
         elif not is_new and cur["link"] == "wired" and not cur["sw_via"]:
             res.events.append((mac, "wifi", f"- -> {w.ssid}"))
     # an empty SSID (a client listed without its essid) says nothing: the stored one stays, so the next change is logged
+    if no_ssid and not w.ssid:
+        if cur["wifi_ssid"]:
+            res.events.append((mac, "wifi", "SSID unknown (controller reports none)"))
+        upd.update(wifi_ssid="", wifi_ap=w.ap, wifi_signal=None, wifi_radio="", wifi_alias=w.alias, link="wifi",
+                   loc_source=w.source)
+        if cur["sw_port"] and "sw_port" not in upd:
+            upd.update(sw_port="", sw_via="")
+        return
     upd.update(wifi_ssid=w.ssid or cur["wifi_ssid"], wifi_ap=w.ap, wifi_signal=w.signal, wifi_radio=w.radio, wifi_alias=w.alias, link="wifi",
                loc_source=w.source)
     if cur["sw_port"] and "sw_port" not in upd:  # on Wi-Fi now: the switch port it had on a cable is stale

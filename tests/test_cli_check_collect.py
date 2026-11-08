@@ -408,7 +408,7 @@ class TestUnifiApiKey(CliBase):
         self.assertEqual(rc, 0, out + err)
         self.assertNotIn(self.key(), out + err)
         rep = json.loads(out)
-        self.assertEqual((rep["ok"], rep["stats"]), (True, {"clients": 4, "dropped": 0}))  # the host adds "dropped"
+        self.assertEqual((rep["ok"], rep["stats"]), (True, {"clients": 4, "ssid_unavailable": 1, "dropped": 0}))  # the host adds "dropped"; key mode reports no SSIDs
         self.assertEqual(len(rep["attachments"]), 4)
         for a in rep["attachments"]:
             self.assertEqual((a["ssid"], a["signal"], a["present"]), ("", None, True))
