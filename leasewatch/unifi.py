@@ -106,6 +106,36 @@ def parse_clients(sta: list[dict], devices: list[dict]) -> dict[str, WifiInfo]:
     return out
 
 
+def parse_integration_clients(clients: list, devices: list) -> dict[str, WifiInfo]:
+    """Pure function over the Integration API client and device lists. A row that is not a dict, is not a WIRED or
+    WIRELESS client, has a non-string name or has no usable MAC is dropped; it never raises. The API has no SSID, signal,
+    radio or channel, so those stay empty. A wired client has no AP (as in parse_clients). A name equal to the client's
+    own MAC is the controller's fallback, not an alias. A later row with the same MAC replaces an earlier one."""
+    dev_names: dict[str, str] = {}
+    for d in devices or []:
+        if isinstance(d, dict) and isinstance(d.get("id"), str) and d["id"]:
+            name = d.get("name")
+            dev_names[d["id"]] = name if isinstance(name, str) else ""
+    out: dict[str, WifiInfo] = {}
+    for c in clients or []:
+        if not isinstance(c, dict) or c.get("type") not in ("WIRED", "WIRELESS"):
+            continue
+        raw, name = c.get("macAddress"), c.get("name")
+        if not isinstance(raw, str) or not isinstance(name, str):  # name is a required field: a malformed one is a bad row
+            continue
+        mac = norm_mac(raw)
+        if not mac:
+            continue
+        wired = c["type"] == "WIRED"
+        up = c.get("uplinkDeviceId")
+        name = name.strip()
+        out[mac] = WifiInfo(
+            ap="" if wired or not isinstance(up, str) else dev_names.get(up, ""),
+            wired=wired, alias="" if not name or norm_mac(name) == mac else name,
+        )
+    return out
+
+
 class UnifiClient:
     """One controller session, kept across clients() calls. State (all guarded by _lock, since an abandoned poll
     thread may still run while check() or close() uses the same client):
