@@ -35,6 +35,10 @@ MAIL_BATCH = 50  # new devices per mail; the rest wait for the next poll
 MAX_BACKOFF = 600  # check() retries back off from POLL_SECONDS up to this, then collect() is tried every poll
 SKIPPED = "previous collection has not completed; skipped"
 SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_down event (6 min at default polls)
+ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sends
+ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
+ALERT_MARK = "notify.alert_event_id"  # meta: id of the newest event already sent as an alert
+ALERT_SUBJECTS = {"source_down": "{name} is down", "source_up": "{name} is back"}  # one event: by its kind
 
 
 def outage_text(seconds: int) -> str:
@@ -155,6 +159,8 @@ class Collector:
         self._poll_fails = 0  # failed polls in the current spell
         self._mail_backoff = notify.Backoff(cfg.poll_seconds)  # per channel wait after a failed send (this process only)
         self._mail_failing = False  # the queue could not be cleared since the last send that worked: warned once
+        self._alert_failing = False  # alerts could not be sent since the last send that worked: warned once
+        self._alert_mark_cleared = False  # alerts off: the mark was removed once in this process
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
@@ -505,6 +511,7 @@ class Collector:
             c.execute("UPDATE devices SET online=0 WHERE online=1 AND COALESCE(last_online,0)<?", (now - self.cfg.online_grace_minutes * 60,))
             self._write_source_events(c)
         self._source_events_written()
+        self._alert()  # an all-sources-down poll is where a source_down event is written
         return {"ok": False, "error": msg}
 
     def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int,
@@ -701,6 +708,70 @@ class Collector:
         except sqlite3.Error as e:  # mailed again at the next poll (at-least-once)
             log.warning("mail sent but the queue was not cleared (%d device(s) will be mailed again): %s", len(macs), e)
 
+    def _alert(self, kinds: tuple[str, ...] = ALERT_KINDS) -> None:
+        """Send the events of `kinds` written since the mark (meta notify.alert_event_id) as one message, at most
+        ALERT_BATCH per poll, oldest first; on delivery the mark moves to the newest one sent. Only with a channel
+        and MAIL_ON_SOURCE=1. No mark yet (first start with alerts on): the mark is set to the newest event and nothing
+        is sent, so old events are not sent at an upgrade. While alerts are off the mark is removed (once per process),
+        so turning them on later does not send the events of the time they were off.
+        At-least-once: when no channel delivered (or the mark cannot be written) the same events go at the next poll.
+        Never raises: a failure here does not stop the poll."""
+        try:
+            if not (self.cfg.mail_enabled and self.cfg.mail_on_source):
+                if not self._alert_mark_cleared:
+                    self.db.q("DELETE FROM meta WHERE key=?", (ALERT_MARK,))
+                    self._alert_mark_cleared = True
+                return
+            self._alert_mark_cleared = False
+            mark = self.db.get_meta(ALERT_MARK, "")
+            if not (mark.isascii() and mark.isdigit()):
+                with self.db.tx() as c:
+                    top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                    self.db.set_meta(ALERT_MARK, str(top), c)
+                return
+            marks = ",".join("?" * len(kinds))
+            rows = self.db.q(f"SELECT id, ts, kind, detail FROM events WHERE id > ? AND kind IN ({marks}) "
+                             f"ORDER BY id LIMIT ?", (int(mark), *kinds, ALERT_BATCH))
+            if not rows:
+                return
+            msg = notify.build_alert(self.cfg, self._alert_subject(rows), [
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(r['ts']))} {r['kind']}: {r['detail']}"
+                for r in rows], rows[-1]["kind"])
+        except Exception as e:  # sqlite3.Error or a bug: the mark stays, tried again at the next poll
+            log.warning("source alert skipped: %s", db_error_text(e) if isinstance(e, sqlite3.Error) else type(e).__name__)
+            return
+        try:
+            notify.send(self.cfg, msg, self._mail_backoff, "source alert")
+        except notify.NotifyDeferred:  # no channel was called: the mark stays
+            log.debug("source alert deferred (%d event(s)): every channel is in backoff", len(rows))
+            self._write_notify_state()
+            return
+        except Exception as e:  # NotifyError texts name the channel and a code only; another exception by its type
+            log.log(logging.DEBUG if self._alert_failing else logging.WARNING, "source alert failed (%d event(s)): %s",
+                    len(rows), e if isinstance(e, notify.NotifyError) else type(e).__name__)
+            self._alert_failing = True
+            self._write_notify_state()
+            return
+        if self._alert_failing:
+            log.info("source alerts deliver again")
+            self._alert_failing = False
+        self._write_notify_state()
+        try:
+            with self.db.tx() as c:
+                self.db.set_meta(ALERT_MARK, str(rows[-1]["id"]), c)
+        except sqlite3.Error as e:  # sent again at the next poll (at-least-once)
+            log.warning("source alert sent but not recorded (%d event(s) will be sent again): %s", len(rows),
+                        db_error_text(e))
+
+    @staticmethod
+    def _alert_subject(rows: list) -> str:
+        """One event: by its kind and instance ("fw1 is down"); several: their count."""
+        if len(rows) > 1:
+            return f"{len(rows)} source events"
+        r = rows[0]
+        name = r["detail"].split(":", 1)[0]  # source_down/source_up details start with "<instance>: "
+        return ALERT_SUBJECTS.get(r["kind"], "{name}: " + r["kind"]).format(name=name)
+
     def _write_notify_state(self) -> None:
         """notify.<channel>.ok (1/0) in the meta table, written only when it changed."""
         for name, ok in self._mail_backoff.states().items():
@@ -826,6 +897,7 @@ class Collector:
         with self.db.tx() as c:
             res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
         self._source_events_written()
+        self._alert()
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
             self._runs[n].answered = True

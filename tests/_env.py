@@ -24,6 +24,7 @@ CONFIG_VARS = (
     "SITE_NAME", "LOG_LEVEL", "LOG_FORMAT", "LW_CONNECTORS", "LW_CONNECTORS_DIR", "AUTH_USER", "AUTH_PASSWORD_HASH", "BACKUP_KEEP",
     "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_VERIFY_TLS",
     "WIFI_PRESENCE_DAYS", "EVENT_DAYS", "PURGE_DAYS", "HISTORY_PER_DEVICE", "WEBHOOK_URL", "WEBHOOK_SECRET", "WEBHOOK_FORMAT", "READ_ONLY", "WRITE_ALLOW",
+    "MAIL_ON_SOURCE",
 )
 # the removed 1.0 source variables: a shell that still exports one would make every Config() refuse to start
 REMOVED = tuple(k for names, *_ in REMOVED_VARS for k in names)
