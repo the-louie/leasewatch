@@ -16,6 +16,13 @@ def norm(ip6, kind="ndp"):
 
 
 class Ip6Field(unittest.TestCase):
+    def test_v6_kinds_never_assert_presence(self):
+        # a third-party connector's ndp/dhcp6 sighting with presence=True is read as False by the host; dhcp keeps it
+        for kind, want in (("ndp", False), ("dhcp6", False), ("dhcp", True)):
+            s = Sighting(mac=A, source="", kind=kind, presence=True, observed_at=1_700_000_000, ip6="2001:db8::1")
+            out = normalise_batch("lan", Batch(sightings=[s], attachments=[])).sightings
+            self.assertEqual(out[0].presence, want, kind)
+
     def test_normalised(self):
         for given, want in (("2001:DB8::0001", "2001:db8::1"), ("2001:db8:0:0:0:0:0:1", "2001:db8::1"),
                             ("fd00::1", "fd00::1"), ("  2001:db8::5%igb0 ", "2001:db8::5"), ("", "")):

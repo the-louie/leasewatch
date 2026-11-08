@@ -498,6 +498,8 @@ def _coerce(r: Sighting | Attachment, mac: str, name: str) -> Sighting | Attachm
         ch["kind"] = ch["kind"].lower()
         ch["client_id"] = norm_client_id(ch["client_id"])
     ch.update({f: _flag(getattr(r, f)) for f in _BOOL_FIELDS[t]})
+    if t is Sighting and ch["kind"] in V6_KINDS:  # a neighbour entry or a v6 lease never says the device is here now
+        ch["presence"] = False
     ch.update({f: _int(getattr(r, f)) for f in _OPT_INT_FIELDS[t]})
     return r if all(getattr(r, f) == v and type(getattr(r, f)) is type(v) for f, v in ch.items()) else replace(r, **ch)
 
