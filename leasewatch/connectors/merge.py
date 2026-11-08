@@ -230,12 +230,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
                   "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
-                  "client_id", "archived_ts", "label", "watch_online")
+                  "client_id", "archived_ts", "label", "watch_online", "ip6")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
                 "wifi_alias": "", "link": "", "loc_source": "", "client_id": "",
-                "archived_ts": None, "label": "", "watch_online": None}
+                "archived_ts": None, "label": "", "watch_online": None, "ip6": ""}
 
 
 @dataclass

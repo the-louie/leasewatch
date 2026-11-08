@@ -86,6 +86,8 @@ MIGRATIONS = [
     ("devices", "watch_online", "INTEGER"),
     # the operator's tags: normalize_tags output, a comma list ('' = none)
     ("devices", "tags", "TEXT NOT NULL DEFAULT ''"),
+    # the device's preferred IPv6 address (compressed form; '' = none seen): enrichment from ndp/dhcp6 sightings
+    ("devices", "ip6", "TEXT NOT NULL DEFAULT ''"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
