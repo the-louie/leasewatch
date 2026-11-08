@@ -16,11 +16,11 @@ from typing import Callable, Iterable, Iterator
 from urllib.request import pathname2url
 
 from .config import Config
-from .db import Database
+from .db import Database, normalize_tags
 from .fw1 import MAC_RE, norm_mac
 from .maintenance import _fail, _say
 
-FIELDS = ("name", "note", "acked", "archived", "watch")
+FIELDS = ("name", "note", "acked", "archived", "watch", "tags")
 MAX_BYTES = 1024 * 1024  # the export of a large home network is well below this
 MAX_ROWS = 20_000
 MAX_LISTED = 10  # unknown MACs, and apart from them duplicates and skipped lines, printed after the summary
@@ -105,7 +105,7 @@ def _header(line: str) -> tuple[str, list[str]]:
 def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
     """Read the device CSV (bytes as UTF-8 with or without BOM, or str). ValueError: too large, not UTF-8, no mac
     column, too many rows or an unknown field. A row with a bad MAC or a bad 0/1 value is skipped and listed;
-    columns other than mac and the chosen fields are ignored. An empty acked or watch cell leaves the field as it is."""
+    columns other than mac and the chosen fields are ignored. An empty acked, watch or tags cell leaves the field as it is."""
     want = _check_fields(fields)
     if len(data) > MAX_BYTES:
         raise ValueError("file larger than 1 MiB")
@@ -159,6 +159,9 @@ def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
                     continue
                 if f in ("name", "note"):
                     row[f] = uncell(v)
+                elif f == "tags":
+                    if v.strip():  # an empty cell is not given
+                        row[f] = normalize_tags(uncell(v))
                 elif f == "archived":
                     row[f] = bool(v.strip())
                 elif v.strip():
@@ -180,7 +183,7 @@ def _usage(text: str) -> int:
 
 def import_csv_cmd(argv: list[str], out: Callable[[str], None]) -> int:
     ap = argparse.ArgumentParser(prog="python -m leasewatch import-csv",
-                                 description="Restore name, note, acked, archived and watch from the device CSV export "
+                                 description="Restore name, note, acked, archived, watch and tags from the device CSV export "
                                              "(also after a spreadsheet saved it with ';'). Unknown MACs are listed, "
                                              "never added.")
     ap.add_argument("file", metavar="FILE", help="the CSV file (UTF-8)")
@@ -189,7 +192,7 @@ def import_csv_cmd(argv: list[str], out: Callable[[str], None]) -> int:
                     help=f"comma-separated fields to import (default {','.join(FIELDS)})")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--fill-empty", action="store_true",
-                      help="only fill an empty name or note and only set acked, archived or watch (default)")
+                      help="only fill an empty name, note or tags and only set acked, archived or watch (default)")
     mode.add_argument("--overwrite", action="store_true", help="apply every imported value as it is in the file")
     args = ap.parse_args(argv)
     try:

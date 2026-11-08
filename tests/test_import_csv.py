@@ -137,6 +137,46 @@ class ImportCsvTests(unittest.TestCase):
         # a second run finds everything in place
         self.assertEqual(self.run_cmd(path)[1], ["import-csv: 4 rows, 0 updated, 4 unchanged"])
 
+    def tags(self) -> list:
+        return self.sql("SELECT mac, tags FROM devices ORDER BY mac")
+
+    def test_tags_round_trip(self):
+        self.make_db()
+        self.sql("UPDATE devices SET tags='iot,owner:alex' WHERE mac=?", (A,))
+        path = self.write(self.export())
+        self.sql(WIPE + ", tags=''")
+        rc, lines, err = self.run_cmd(path)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(lines, ["import-csv: 4 rows, 4 updated, 0 unchanged"])
+        self.assertEqual(self.tags(), [(A, "iot,owner:alex"), (B, ""), (C, ""), (D, "")])
+        self.assertEqual(self.sql("SELECT count(*) FROM events WHERE kind='tags'"), [(1,)])
+
+    def test_tags_normalised_and_invalid_row_skipped(self):
+        self.make_db()
+        path = self.write(f"mac,tags\r\n{A},\"IoT, Living Room\"\r\n{B},bad tag!\r\n{C},\r\n")
+        rc, lines, err = self.run_cmd(path)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(self.tags(), [(A, "iot,living-room"), (B, ""), (C, ""), (D, "")])
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("1 updated", lines[0])
+        self.assertIn("1 skipped", lines[0])
+        self.assertRegex(lines[1], r"skipped line 3: tag bad-tag! contains a character that is not allowed")
+
+    def test_tags_fill_empty_overwrite_fields_and_dry_run(self):
+        self.make_db()
+        self.sql("UPDATE devices SET tags='iot' WHERE mac=?", (A,))
+        path = self.write(f"mac,name,tags\r\n{A},x,guest\r\n{B},y,guest\r\n")
+        rc, dry, _ = self.run_cmd(path, "--dry-run")
+        self.assertEqual(self.tags(), [(A, "iot"), (B, ""), (C, ""), (D, "")])
+        rc, real, _ = self.run_cmd(path)
+        self.assertEqual(dry[0].replace(" (dry run)", ""), real[0])
+        self.assertEqual(self.tags(), [(A, "iot"), (B, "guest"), (C, ""), (D, "")])
+        rc, _, _ = self.run_cmd(path, "--overwrite")
+        self.assertEqual(self.tags(), [(A, "guest"), (B, "guest"), (C, ""), (D, "")])
+        self.sql("UPDATE devices SET tags='' WHERE mac=?", (A,))
+        self.assertEqual(self.run_cmd(path, "--fields", "name")[0], 0)
+        self.assertEqual(self.tags()[0], (A, ""))
+
     def test_swedish_excel_file(self):
         # "CSV UTF-8" from Excel with a ';' list separator: ';', CRLF, the BOM dropped by a later editor
         self.make_db()
