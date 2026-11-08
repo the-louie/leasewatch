@@ -10,11 +10,13 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - `import-csv` reads and restores tags, and its default `--fields` list grew to `name,note,acked,archived,watch,tags`.
 - IPv6, opt-in: `LW_CONNECTOR__<NAME>__IPV6=1` on an `opnsense` instance (default `0`: nothing new is called). It also reads the NDP table (`/api/diagnostics/interface/get_ndp`, privilege *Diagnostics: NDP Table*, read-only) and the IPv6 leases: under `DHCP_BACKEND=dnsmasq` those already in the lease list, under `kea` the DHCPv6 leases (`/api/kea/leases6/search`, privilege *Services: DHCP: Kea(v6)*, which also allows configuration writes). A key without a privilege logs one WARNING per spell, sets `ndp_unavailable` / `kea6_unavailable` in the instance's stats and the poll continues with IPv4. A device gets one `ip6`: global before unique-local, a DHCPv6 address before a neighbour-only one, the stable EUI-64 address before a temporary one, sticky while listed; link-local is never stored. It shows under the IPv4 in the page (tooltip, copy on click, drawer row, search), as the last CSV column `ip6` and as `ip6` in the JSON. IPv6 never makes a device online and never creates one, and an IPv6 change writes no history row and no event.
 - For connector authors: `Sighting.ip6` and the kinds `ndp` and `dhcp6` (additive, API 1; the host normalises `ip6`).
+- Swedish: the page is shown in Swedish when the browser's language is Swedish, or with `?lang=sv`, or with `UI_LANG=sv`; `UI_LANG=en` pins English (default `auto`). Event details, mails, CSV headers and the API stay English.
 
 ### Changed
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
 - A sighting's `ip` that is not a dotted IPv4 address is emptied by the host, and the merge reads an empty `ip` as unknown, so a device keeps its last IPv4 address; only a device none of whose sightings has an IPv4 address ends up with no IP.
 - CI: actions pinned by commit SHA, checkouts without a persisted token, read-only workflow permissions.
+- Chip tooltips say "1 device" instead of "1 devices"; the status line says "4 NDP entries" and "NDP table unavailable" instead of "4 ndp" and "ndp unavailable".
 
 ### Fixed
 - The gzip HEAD test freezes the clock, so it no longer fails now and then.
