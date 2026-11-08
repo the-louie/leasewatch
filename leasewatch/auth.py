@@ -1,4 +1,4 @@
-"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH): the PBKDF2 hash format and the per-request check."""
+"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH, and a read-only AUTH_RO_USER): the PBKDF2 hash format and the per-request check."""
 from __future__ import annotations
 
 import base64
@@ -85,18 +85,22 @@ def parse_basic(header: str | None) -> tuple[str, str] | None:
 
 
 class Verifier:
-    """Checks the Authorization header of a request against AUTH_USER and the parsed AUTH_PASSWORD_HASH."""
+    """Checks the Authorization header of a request against AUTH_USER and the parsed AUTH_PASSWORD_HASH, and the
+    optional read-only pair AUTH_RO_USER and AUTH_RO_PASSWORD_HASH. Both pairs share one CPU cap and one cache."""
 
-    def __init__(self, user: str, parsed_hash: tuple[int, bytes, bytes]) -> None:
-        self._user = user.encode("utf-8")
-        self._iterations, self._salt, self._dk = parsed_hash
+    def __init__(self, user: str, parsed_hash: tuple[int, bytes, bytes],
+                 ro: tuple[str, tuple[int, bytes, bytes]] | None = None) -> None:
+        # (user, iterations, salt, derived key, role); the read-write pair first
+        self._entries = [(user.encode("utf-8"), *parsed_hash, "rw")]
+        if ro is not None:
+            self._entries.append((ro[0].encode("utf-8"), *ro[1], "ro"))
         # CPU cap: a password-guessing burst must not pin every core with PBKDF2
         self._sem = threading.BoundedSemaphore(2)
         # success cache, state of this verifier (one per server): HMAC of the header under a key of this process ->
-        # monotonic expiry. Keyed by an HMAC so the memory never holds the header itself. No invalidation needed:
+        # (monotonic expiry, role). The key is the whole header, so the two logins never share an entry. Keyed by an HMAC so the memory never holds the header itself. No invalidation needed:
         # a new password means a new env var and a restart
         self._cache_key = secrets.token_bytes(32)
-        self._cache: OrderedDict[bytes, float] = OrderedDict()
+        self._cache: OrderedDict[bytes, tuple[float, str]] = OrderedDict()
         self._lock = threading.Lock()
         # failed attempts since the last log line (at most one line per FAIL_LOG_EVERY)
         self._fails = 0
@@ -104,39 +108,45 @@ class Verifier:
         self._fail_logged = float("-inf")
         self._fail_timer: threading.Timer | None = None
 
-    def check(self, header: str | None, client: str = "") -> bool:
-        """True when the header carries the right user and password. Raises Busy when no PBKDF2 slot frees up."""
+    def check(self, header: str | None, client: str = "") -> str | None:
+        """The role of the login in the header ("rw" or "ro"), else None. Raises Busy when no PBKDF2 slot frees up."""
         creds = parse_basic(header)
         if creds is None:
             if header:
                 self._failed(client)
-            return False
+            return None
         # parse_basic accepted it, so the header is ASCII (it refuses any other)
         key = hmac.new(self._cache_key, header.encode("ascii"), hashlib.sha256).digest()
         now = time.monotonic()
         with self._lock:
-            expiry = self._cache.get(key)
-            if expiry is not None and expiry > now:
-                return True
+            hit = self._cache.get(key)
+            if hit is not None and hit[0] > now:
+                return hit[1]
         user, password = creds
-        user_ok = hmac.compare_digest(user.encode("utf-8"), self._user)
-        # computed even when the user is wrong: the answer time says nothing about the user name
+        name = user.encode("utf-8")
+        # every name is compared (no early exit); an unknown name is checked against the first pair, so the answer
+        # time says nothing about which names exist (the hashes of hash-password share one iteration count)
+        entry, user_ok = self._entries[0], False
+        for e in self._entries:
+            if hmac.compare_digest(name, e[0]) and not user_ok:
+                entry, user_ok = e, True
+        _, iterations, salt, want, role = entry
         if not self._sem.acquire(timeout=BUSY_TIMEOUT):
             raise Busy
         try:
-            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), self._salt, self._iterations)
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
         finally:
             self._sem.release()
-        ok = user_ok & hmac.compare_digest(dk, self._dk)
+        ok = user_ok & hmac.compare_digest(dk, want)
         if not ok:
             self._failed(client)
-            return False
+            return None
         with self._lock:
             self._cache.pop(key, None)
-            self._cache[key] = time.monotonic() + CACHE_TTL
+            self._cache[key] = (time.monotonic() + CACHE_TTL, role)
             while len(self._cache) > CACHE_MAX:
                 self._cache.popitem(last=False)
-        return True
+        return role
 
     def _failed(self, client: str) -> None:
         # no lockout (anyone could lock the owner out); the address only, never the user name or password

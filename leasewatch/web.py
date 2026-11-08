@@ -251,6 +251,7 @@ class Handler(BaseHTTPRequestHandler):
     db: Database
     app_version: str
     verifier: auth.Verifier | None = None  # None when auth is off
+    role: str = "rw"  # per request, set by _auth_ok(): "ro" for the AUTH_RO_USER login
     started: float = 0.0  # process start, for the collector check before the first poll attempt
     boot: str = ""  # per make_handler(): the version counter starts again at 0 after a restart, an old ETag must not match
     write_refusals: _WriteRefusals  # per make_handler(): one log throttle per server
@@ -314,11 +315,19 @@ class Handler(BaseHTTPRequestHandler):
             log.debug("%s write refused: READ_ONLY", addr)
             self._error(403, "read-only")
             return False
+        if self.role == "ro":  # the AUTH_RO_USER login: the same answer as READ_ONLY
+            log.debug("%s write refused: read-only login", addr)
+            self._error(403, "read-only")
+            return False
         if self.cfg.write_allowed(addr):
             return True
         self.write_refusals.refused(addr)
         self._error(403, "writes are not allowed from this address")  # the address stays out of the body
         return False
+
+    def _can_write(self) -> bool:
+        """meta.can_write for this request: the login's role and the client address."""
+        return self.role != "ro" and self.cfg.write_allowed(self.client_address[0])
 
     def _method_not_allowed(self) -> None:
         self._send(405, b'{"error": "method not allowed"}', _JSON, _ALLOW)
@@ -363,11 +372,14 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _auth_ok(self) -> bool:
-        """True when auth is off or the request carries the right credentials; else the 401 (or 503) is sent."""
+        """True when auth is off or the request carries the right credentials (self.role is then the login's role);
+        else the 401 (or 503) is sent."""
         if self.verifier is None:
             return True
         try:
-            if self.verifier.check(self.headers.get("Authorization"), self.client_address[0]):
+            role = self.verifier.check(self.headers.get("Authorization"), self.client_address[0])
+            if role:
+                self.role = role
                 return True
         except auth.Busy:
             self._send(503, b'{"error": "busy"}', _JSON, {"Retry-After": "5"})
@@ -441,9 +453,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, _JSON, {"Vary": "Accept-Encoding", **extra, **tag})
 
     def _etag(self, version: int, meta: dict, query: str = "0") -> str:
-        # the write bit: meta.can_write differs per client, so two clients must not share a tag (and a 304); the
+        # the write bit: meta.can_write differs per client and login, so two clients must not share a tag (and a 304); the
         # stale and collector bits: the page shows a banner for each, so a flip must not be answered with a 304
-        w = int(self.cfg.write_allowed(self.client_address[0]))
+        w = int(self._can_write())
         return f'W/"{self.boot}.{version}.{w}{int(meta["stale"])}{int(meta["collector_stale"])}.{query}"'
 
     def _matches(self, etag: str) -> bool:
@@ -639,8 +651,9 @@ class Handler(BaseHTTPRequestHandler):
             "stale": abs(now - last) > cfg.poll_seconds * 3 if last else True,
             # one entry per configured instance, in LW_CONNECTORS order; name stays the instance id
             "connectors": [self._connector_meta(m, s) for s in cfg.instances],
-            # read_only: for every client; can_write: for this one (the page leaves out its edit controls when false)
-            "read_only": cfg.read_only_on, "can_write": cfg.write_allowed(self.client_address[0]),
+            # read_only: for every client; can_write: for this client and login (the page leaves out its edit controls
+            # when false)
+            "read_only": cfg.read_only_on, "can_write": self._can_write(),
         }
 
     def _connector_meta(self, m: dict, s: InstanceSpec) -> dict:
@@ -786,7 +799,13 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
         parsed = auth.parse_hash(cfg.auth_password_hash)
         if parsed is None:  # validate() reports it; a server started without validate() must not run open
             raise ValueError("AUTH_PASSWORD_HASH is not a valid hash")
-        verifier = auth.Verifier(cfg.auth_user, parsed)
+        ro = None
+        if cfg.auth_ro_enabled:
+            parsed_ro = auth.parse_hash(cfg.auth_ro_password_hash)
+            if parsed_ro is None:
+                raise ValueError("AUTH_RO_PASSWORD_HASH is not a valid hash")
+            ro = (cfg.auth_ro_user, parsed_ro)
+        verifier = auth.Verifier(cfg.auth_user, parsed, ro)
     # a subclass per call: two servers in one process (the tests) do not share settings
     return type("Handler", (Handler,), {"cfg": cfg, "db": db, "app_version": version, "verifier": verifier, "started": time.time(),
                                         "boot": secrets.token_hex(4), "write_refusals": _WriteRefusals()})

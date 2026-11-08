@@ -273,6 +273,9 @@ class Config:
     # optional basic auth for every path; on only when both are set (python -m leasewatch hash-password)
     auth_user: str = field(default_factory=lambda: _env("AUTH_USER"))
     auth_password_hash: str = field(default_factory=lambda: _env("AUTH_PASSWORD_HASH"), repr=False)
+    # optional second login that can read but not change anything; needs AUTH_USER/AUTH_PASSWORD_HASH
+    auth_ro_user: str = field(default_factory=lambda: _env("AUTH_RO_USER"))
+    auth_ro_password_hash: str = field(default_factory=lambda: _env("AUTH_RO_PASSWORD_HASH"), repr=False)
     # no changes through the API (every POST refused); an empty value means the default (off)
     read_only: str = field(default_factory=lambda: _env("READ_ONLY", "0") or "0")
     # addresses and networks (comma list) that may change data; empty = everyone. An empty list is the default, so
@@ -347,6 +350,10 @@ class Config:
     @property
     def auth_enabled(self) -> bool:
         return bool(self.auth_user and self.auth_password_hash)
+
+    @property
+    def auth_ro_enabled(self) -> bool:
+        return self.auth_enabled and bool(self.auth_ro_user and self.auth_ro_password_hash)
 
     @property
     def mail_channels(self) -> list[str]:
@@ -553,6 +560,16 @@ class Config:
             problems.append("AUTH_USER must not contain ':' or control characters")  # Basic splits on the first ':'
         if self.auth_password_hash and parse_hash(self.auth_password_hash) is None:
             problems.append("AUTH_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")
+        if bool(self.auth_ro_user) != bool(self.auth_ro_password_hash):
+            problems.append("AUTH_RO_USER and AUTH_RO_PASSWORD_HASH must be set together")
+        if (self.auth_ro_user or self.auth_ro_password_hash) and not self.auth_enabled:
+            problems.append("AUTH_RO_USER needs AUTH_USER")
+        if self.auth_ro_user and self.auth_ro_user == self.auth_user:
+            problems.append("AUTH_RO_USER must differ from AUTH_USER")
+        if ":" in self.auth_ro_user or any(unicodedata.category(c) in ("Cc", "Cs") for c in self.auth_ro_user):
+            problems.append("AUTH_RO_USER must not contain ':' or control characters")
+        if self.auth_ro_password_hash and parse_hash(self.auth_ro_password_hash) is None:
+            problems.append("AUTH_RO_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")
         problems += self._notify_problems()
         problems += self.connector_problems
         for spec in self.connector_specs:
