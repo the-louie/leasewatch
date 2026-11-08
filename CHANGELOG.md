@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.4.0 (2026-11-08)
 
 ### Added
 - UniFi: `AUTH=apikey` with `API_KEY` (Integration API on UniFi OS consoles, Network 9.3+): a revocable key instead of a login. No SSID, signal, radio or channel in that mode (the host clears them); built from the public spec, untested on hardware.
