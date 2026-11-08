@@ -157,6 +157,14 @@ class SettingsTest(Base):
                 self.assertEqual(len(problems), 1, problems)
                 self.assertIn("interface", problems[0])
 
+    def test_one_problem_each(self) -> None:
+        for key, value in (("max_age_days", "0"), ("max_age_days", "91"), ("max_entries", "10"),
+                           ("interface", "not an iface!")):
+            with self.subTest(key=key, value=value):
+                problems = self.conn(**{key: value}).validate()
+                self.assertEqual(len(problems), 1, problems)
+        self.assertEqual(self.conn(interface="eth0", max_age_days="30", max_entries="1024").validate(), [])
+
     def test_validate_does_no_lookup(self) -> None:
         def no(*a: object) -> None:
             raise AssertionError("lookup in validate()")
@@ -212,6 +220,43 @@ class LifecycleTest(Base):
         self.assertIsNone(c._thread)
         c.close()
 
+    def test_close_while_blocked_in_recvfrom(self) -> None:
+        # a real socket's close() does not wake a recvfrom() blocked in another thread; the receive timeout does
+        entered = threading.Event()
+
+        class BlockingSocket(FakeSocket):
+            def recvfrom(self, bufsize: int) -> tuple[bytes, tuple[str, int]]:
+                entered.set()
+                return super().recvfrom(bufsize)
+
+            def close(self) -> None:
+                self.closed = True
+
+        sockets: list[FakeSocket] = []
+
+        def factory() -> FakeSocket:
+            sockets.append(BlockingSocket() if not sockets else FakeSocket())
+            return sockets[-1]
+
+        c = MdnsConnector("mdns1", {}, self.ctx(), socket_factory=factory)
+        self.addCleanup(c.close)
+        c.check()
+        thread = c._thread
+        self.assertTrue(entered.wait(2))
+        t0 = time.monotonic()
+        c.close()
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertTrue(sockets[0].closed)
+        self.assertFalse(thread.is_alive())
+        c.close()  # a second close() is a no-op
+        self.assertEqual(len(sockets), 1)
+        c.check()  # a fresh listener on a fresh socket
+        self.assertEqual(len(sockets), 2)
+        self.assertIsNot(c._thread, thread)
+        self.assertTrue(c._thread.is_alive())
+        for s in sockets:
+            self.assertEqual(s.sent, [])
+
     def test_close_without_start(self) -> None:
         self.conn().close()
 
@@ -263,6 +308,19 @@ class PacketPathTest(Base):
             self.assertTrue(wait_until(lambda: MAC_B in c._cache))
         self.assertTrue(c._thread.is_alive())
         self.assertEqual(c.collect().stats["errors"], 1)
+
+    def test_receive_oserror_counted_and_thread_continues(self) -> None:
+        c = self.conn()
+        with mock.patch.object(mc, "RECV_TIMEOUT", 0.01), \
+                mock.patch.object(dns, "parse_response", return_value=packet(("tv", IP_B, ""))):
+            c.check()
+            s = self.factory.sockets[0]
+            s.fail_next(OSError(errno.ENETDOWN, os.strerror(errno.ENETDOWN)))
+            s.deliver()
+            self.assertTrue(wait_until(lambda: MAC_B in c._cache))
+        self.assertTrue(c._thread.is_alive())
+        stats = c.collect().stats
+        self.assertEqual((stats["errors"], stats["packets"], stats["names"]), (1, 1, 1))
 
     def test_malformed_warns_once_per_source_per_hour(self) -> None:
         c = self.conn()

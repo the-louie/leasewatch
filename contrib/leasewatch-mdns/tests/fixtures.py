@@ -51,6 +51,13 @@ APPLE = packet(
                 rr("Alex-iPad._device-info._tcp.local", TXT, txt("model=iPad13,1", "osxvers=21"))],
 )
 
+# the same device as Apple sends it most often: the device-info TXT with no SRV record, tied to the host by the
+# instance's first label
+APPLE_NO_SRV = packet(
+    answers=[rr("Alex-iPad.local", A, a("10.0.0.21"))],
+    additional=[rr("Alex-iPad._device-info._tcp.local", TXT, txt("model=iPad13,1", "osxvers=21"))],
+)
+
 
 def _printer() -> bytes:
     instance = "Brother HL-L2350DW._ipp._tcp.local"
@@ -97,5 +104,5 @@ TWO_IPS = packet([rr("nas.local", A, a("10.0.0.70")), rr("nas.local", A, a("10.0
 # 100 A records: the parser reads 64
 TOO_MANY = packet([rr(f"host-{i}.local", A, a(f"10.0.1.{i}")) for i in range(100)])
 
-ALL = {"APPLE": APPLE, "PRINTER": PRINTER, "CHROMECAST": CHROMECAST, "GOODBYE": GOODBYE, "QUERY": QUERY,
+ALL = {"APPLE": APPLE, "APPLE_NO_SRV": APPLE_NO_SRV, "PRINTER": PRINTER, "CHROMECAST": CHROMECAST, "GOODBYE": GOODBYE, "QUERY": QUERY,
        "TRUNCATED": TRUNCATED, "POINTER_LOOP": POINTER_LOOP, "TWO_IPS": TWO_IPS, "TOO_MANY": TOO_MANY}

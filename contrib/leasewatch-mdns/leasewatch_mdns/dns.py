@@ -8,8 +8,10 @@ class field's top bit (the mDNS cache-flush bit, RFC 6762) is masked; records of
 
 A records give a host and its IPv4 address. DNS-SD records (RFC 6763) give the label: an SRV record ties a service
 instance to its target host, the instance's TXT record gives the text ("fn=", else "md=", else "model=", else
-"ty=", else "product=" without its parentheses). One triple per A record (host, address); an instance whose target
-host has no A record in the packet gives nothing. A query (QR bit clear) gives nothing and is not an error. A record
+"ty=", else "product=" without its parentheses). An instance with no SRV record whose first label equals (ignoring
+case) the first label of an A record's host is tied to that host (Apple's "_device-info._tcp" TXT comes without
+SRV: "Alex-iPad._device-info._tcp.local" belongs to "Alex-iPad.local"); the SRV record wins when there is one. One
+triple per A record (host, address); an instance whose target host has no A record in the packet gives nothing. A query (QR bit clear) gives nothing and is not an error. A record
 with TTL 0 (a goodbye) is returned like any other. A packet that stops parsing part way sets `malformed` and keeps
 the triples of the records read before. It never raises.
 """
@@ -111,20 +113,26 @@ def _label(key: str, value: str) -> str:
     return _clean(value)
 
 
-def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str]], dict[str, str],
-                                                       dict[str, dict[str, str]]]:
-    """Walk the records into (A records as (host key, hostname, ip), SRV instance -> host, TXT instance -> entries).
+def _first(labels: list[bytes]) -> str:
+    return _text(labels[0]).lower()
+
+
+def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str, str]], dict[str, str],
+                                                       dict[str, dict[str, str]], dict[str, str]]:
+    """Walk the records into (A records as (host key, host first label, hostname, ip), SRV instance -> host,
+    TXT instance -> entries, TXT instance -> its first label).
 
     A parse error sets out.malformed and returns what was read before it."""
-    a_records: list[tuple[str, str, str]] = []
+    a_records: list[tuple[str, str, str, str]] = []
     srv: dict[str, str] = {}
     txt: dict[str, dict[str, str]] = {}
+    firsts: dict[str, str] = {}  # only for an owner that looks like an instance: <name>.<_service>...
     if len(data) < HEADER:
         out.malformed = True
-        return a_records, srv, txt
+        return a_records, srv, txt, firsts
     _id, flags, qd, an, ns, ar = struct.unpack_from("!6H", data)
     if not flags & 0x8000:
-        return a_records, srv, txt
+        return a_records, srv, txt, firsts
     total = an + ns + ar
     if total > MAX_RECORDS:
         out.truncated = True
@@ -151,7 +159,7 @@ def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str]], 
                 if rdlen != 4 or not owner:
                     raise _Bad
                 ip = ".".join(str(b) for b in data[start:off])
-                a_records.append((_key(owner), _clean(_text(owner[0])), ip))
+                a_records.append((_key(owner), _first(owner), _clean(_text(owner[0])), ip))
             elif rtype == TYPE_PTR:
                 _target, end = _name(data, start)  # read for its bounds: the instance is known by its SRV/TXT
                 if end > off:
@@ -165,25 +173,34 @@ def _parse(data: bytes, out: ParsedPacket) -> tuple[list[tuple[str, str, str]], 
                 srv.setdefault(_key(owner), _key(target))
             elif rtype == TYPE_TXT:
                 txt.setdefault(_key(owner), _txt(data, start, off))
+                if len(owner) >= 3 and owner[1].startswith(b"_"):
+                    firsts.setdefault(_key(owner), _first(owner))
     except _Bad:
         out.malformed = True
-    return a_records, srv, txt
+    return a_records, srv, txt, firsts
 
 
 def parse_response(data: bytes) -> ParsedPacket:
     """The names in one mDNS packet. Never raises: anything unexpected is a malformed packet without names."""
     out = ParsedPacket()
     try:
-        a_records, srv, txt = _parse(data, out)
+        a_records, srv, txt, firsts = _parse(data, out)
+        links = dict(srv)  # instance -> host key; the SRV record first, then the first-label rule
+        by_first: dict[str, str] = {}
+        for host, first, _hostname, _ip in a_records:
+            by_first.setdefault(first, host)
+        for instance, first in firsts.items():
+            if instance not in links and first in by_first:
+                links[instance] = by_first[first]
         labels: dict[str, str] = {}
         for key in _LABEL_KEYS:  # the best key of any instance on the host wins
-            for instance, host in srv.items():
+            for instance, host in links.items():
                 if host not in labels:
                     label = _label(key, txt.get(instance, {}).get(key, ""))
                     if label:
                         labels[host] = label
         seen: set[tuple[str, str]] = set()
-        for host, hostname, ip in a_records:
+        for host, _first_label, hostname, ip in a_records:
             if not hostname or (host, ip) in seen:
                 continue
             seen.add((host, ip))

@@ -27,6 +27,9 @@ class FixtureTest(unittest.TestCase):
     def test_apple(self) -> None:
         self.assertEqual(self.parse(fx.APPLE), [("Alex-iPad", "10.0.0.21", "iPad13,1")])
 
+    def test_apple_without_srv(self) -> None:
+        self.assertEqual(self.parse(fx.APPLE_NO_SRV), [("Alex-iPad", "10.0.0.21", "iPad13,1")])
+
     def test_printer(self) -> None:
         self.assertEqual(self.parse(fx.PRINTER), [("BRW020000000030", "10.0.0.30", "Brother HL-L2350DW series")])
 
@@ -100,6 +103,42 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(label("model", "=v", "rp=ipp"), "")
 
 
+class FirstLabelLinkTest(unittest.TestCase):
+    """An instance without SRV is tied to the A record's host by its first label."""
+
+    def names(self, *records: bytes) -> list[tuple[str, str, str]]:
+        p = dns.parse_response(fx.packet(list(records)))
+        self.assertFalse(p.malformed)
+        return p.names
+
+    def test_case_insensitive(self) -> None:
+        self.assertEqual(self.names(rr_a("ALEX-IPAD.local", "10.0.0.21"),
+                                    fx.rr("alex-ipad._device-info._tcp.local", fx.TXT, fx.txt("model=iPad13,1"))),
+                         [("ALEX-IPAD", "10.0.0.21", "iPad13,1")])
+
+    def test_srv_wins(self) -> None:
+        instance = "Alex-iPad._device-info._tcp.local"
+        self.assertEqual(self.names(rr_a("Alex-iPad.local", "10.0.0.21"), rr_a("tablet-2.local", "10.0.0.22"),
+                                    fx.rr(instance, fx.SRV, fx.srv("tablet-2.local", 0)),
+                                    fx.rr(instance, fx.TXT, fx.txt("model=iPad13,1"))),
+                         [("Alex-iPad", "10.0.0.21", ""), ("tablet-2", "10.0.0.22", "iPad13,1")])
+
+    def test_other_first_label_not_linked(self) -> None:
+        self.assertEqual(self.names(rr_a("Alex-iPad.local", "10.0.0.21"),
+                                    fx.rr("Sam-iPad._device-info._tcp.local", fx.TXT, fx.txt("model=iPad13,1"))),
+                         [("Alex-iPad", "10.0.0.21", "")])
+
+    def test_host_txt_is_not_an_instance(self) -> None:
+        # a TXT record on the host name itself is no DNS-SD instance and gives no label
+        self.assertEqual(self.names(rr_a("Alex-iPad.local", "10.0.0.21"),
+                                    fx.rr("Alex-iPad.local", fx.TXT, fx.txt("model=iPad13,1"))),
+                         [("Alex-iPad", "10.0.0.21", "")])
+
+
+def rr_a(owner: str, ip: str) -> bytes:
+    return fx.rr(owner, fx.A, fx.a(ip))
+
+
 class FuzzTest(unittest.TestCase):
     def check(self, data: bytes) -> None:
         try:
@@ -139,6 +178,122 @@ class ConnectorEndToEndTest(unittest.TestCase):
                                                     label="Brother HL-L2350DW series")])
         self.assertEqual(batch.stats["malformed"], 0)
         self.assertEqual(factory.sockets[0].sent, [])
+
+
+MAC_PRINTER, MAC_IPAD = "02:00:00:00:00:30", "02:00:00:00:00:21"
+
+
+class ListenerPathTest(unittest.TestCase):
+    """The fixture packets through the fake socket and the listener thread, as the network would hand them over."""
+
+    def setUp(self) -> None:
+        self.ips = {"10.0.0.30": MAC_PRINTER, "10.0.0.21": MAC_IPAD}
+        self.factory = FakeSocketFactory()
+        ctx = HostContext(now=lambda: NOW, device_ips=lambda: dict(self.ips))
+        self.c = MdnsConnector("mdns1", {}, ctx, socket_factory=self.factory)
+        self.addCleanup(self.c.close)
+        self.handled = 0
+        handle = self.c._handle
+
+        def counting_handle(data: bytes, addr: object) -> None:  # the listener calls it; counts finished packets
+            try:
+                handle(data, addr)
+            finally:
+                self.handled += 1
+        self.c._handle = counting_handle
+
+    def tearDown(self) -> None:
+        for s in self.factory.sockets:
+            self.assertEqual(s.sent, [], "the connector transmitted on its socket")
+
+    def feed(self, *packets: tuple[bytes, str]) -> None:
+        """Start the listener, deliver the packets and wait until it has handled every one."""
+        self.c.check()
+        sock = self.factory.sockets[-1]
+        target = self.handled + len(packets)
+        for data, src in packets:
+            sock.deliver(data, src=src)
+        self.assertTrue(wait_until(lambda: self.handled == target))
+        self.assertTrue(self.c._thread.is_alive())
+
+    def test_printer_and_ipad(self) -> None:
+        self.feed((fx.PRINTER, "10.0.0.30"), (fx.APPLE_NO_SRV, "10.0.0.21"))
+        batch = self.c.collect()
+        self.assertEqual(sorted(batch.sightings, key=lambda s: s.mac), [
+            Sighting(mac=MAC_IPAD, source="mdns1", kind="scan", presence=False, observed_at=NOW,
+                     hostname="Alex-iPad", label="iPad13,1"),
+            Sighting(mac=MAC_PRINTER, source="mdns1", kind="scan", presence=False, observed_at=NOW,
+                     hostname="BRW020000000030", label="Brother HL-L2350DW series")])
+        self.assertEqual(batch.stats, {"names": 2, "packets": 2, "malformed": 0, "unmapped": 0, "dropped_rate": 0,
+                                       "errors": 0})
+
+    def test_unmapped_address(self) -> None:
+        self.feed((fx.GOODBYE, "10.0.0.50"))  # 10.0.0.50 is not in device_ips
+        batch = self.c.collect()
+        self.assertEqual(batch.sightings, [])
+        self.assertEqual((batch.stats["unmapped"], batch.stats["malformed"]), (1, 0))
+
+    def test_query_is_not_malformed(self) -> None:
+        self.feed((fx.QUERY, "10.0.0.50"))
+        batch = self.c.collect()
+        self.assertEqual(batch.sightings, [])
+        self.assertEqual({k: batch.stats[k] for k in ("packets", "malformed", "unmapped", "errors")},
+                         {"packets": 1, "malformed": 0, "unmapped": 0, "errors": 0})
+
+    def test_malformed_packets_warn_once_per_source_per_hour(self) -> None:
+        clock = [1000.0]
+        self.c._clock = lambda: clock[0]
+        with self.assertLogs("leasewatch.contrib.mdns", "WARNING") as logs:
+            self.feed((fx.TRUNCATED, "10.0.0.50"), (fx.POINTER_LOOP, "10.0.0.50"), (fx.POINTER_LOOP, "10.0.0.51"))
+            clock[0] += 3599
+            self.feed((fx.TRUNCATED, "10.0.0.50"))
+            clock[0] += 1
+            self.feed((fx.POINTER_LOOP, "10.0.0.50"))
+        self.assertEqual([r.getMessage().split(" from ")[1].split()[0] for r in logs.records],
+                         ["10.0.0.50", "10.0.0.51", "10.0.0.50"])
+        self.feed((fx.PRINTER, "10.0.0.30"))  # the thread lives on and still hears names
+        batch = self.c.collect()
+        self.assertEqual((batch.stats["malformed"], batch.stats["errors"]), (5, 0))
+        self.assertEqual([s.mac for s in batch.sightings], [MAC_PRINTER])
+
+    def test_rate_cap_keeps_the_first_200(self) -> None:
+        self.ips = {f"10.0.{i // 256}.{i % 256}": f"02:00:00:00:{i // 256:02x}:{i % 256:02x}" for i in range(250)}
+        self.c._clock = lambda: 7000.5  # all 250 within one second
+        self.feed(*((fx.packet([rr_a(f"host-{i}.local", f"10.0.{i // 256}.{i % 256}")]), "10.0.0.1")
+                    for i in range(250)))
+        batch = self.c.collect()
+        self.assertGreaterEqual(batch.stats["dropped_rate"], 50)
+        self.assertEqual(batch.stats["packets"], 250)
+        self.assertEqual(sorted(s.hostname for s in batch.sightings), sorted(f"host-{i}" for i in range(200)))
+
+
+class ConnectorFuzzTest(unittest.TestCase):
+    def test_handle_random_bytes(self) -> None:
+        factory = FakeSocketFactory()
+        ctx = HostContext(now=lambda: NOW, device_ips=lambda: {"10.0.0.30": MAC_PRINTER, "10.0.0.21": MAC_IPAD})
+        c = MdnsConnector("mdns1", {}, ctx, socket_factory=factory)
+        self.addCleanup(c.close)
+        c.check()
+        rnd = random.Random(1035)
+        sources = list(fx.ALL.values())
+        with self.assertLogs("leasewatch.contrib.mdns", "WARNING"):  # the malformed ones; keeps the output quiet
+            self._fuzz(c, rnd, sources)
+        self.assertEqual(c.collect().stats["packets"], 100)
+        self.assertEqual(factory.sockets[0].sent, [])
+
+    def _fuzz(self, c: MdnsConnector, rnd: random.Random, sources: list[bytes]) -> None:
+        for i in range(100):
+            if i % 2:
+                data = rnd.randbytes(rnd.randint(0, 600))
+            else:
+                buf = bytearray(rnd.choice(sources))
+                for _ in range(rnd.randint(1, 8)):
+                    buf[rnd.randrange(len(buf))] = rnd.randrange(256)
+                data = bytes(buf)
+            try:
+                c._handle(data, ("10.0.0.99", 5353))
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"raised {e!r} on {data.hex()}")
 
 
 if __name__ == "__main__":
