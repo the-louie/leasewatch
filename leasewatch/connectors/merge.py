@@ -16,9 +16,15 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
                                                         behaviour). Only with neither ARP nor a lease with an IP: a
                                                         sighting with an IP first, then the (empty-IP) lease, then
                                                         client, scan, any other kind (presence first within a kind)
-    hostname              dhcp, client, arp, scan       the lease's hostname first, then the first non-empty value
-    vendor                dhcp, arp, client, scan       the first non-empty value
+    hostname              dhcp, client, arp, scan,      the lease's hostname first, then the first non-empty value
+                          dhcp6
+    vendor                dhcp, arp, client, scan, ndp  the first non-empty value
     lease_type            dhcp                          the chosen lease only
+    ip6                   any kind                      GUA, ULA, other; one a dhcp6 sighting carries; the MAC's EUI-64
+                                                        address; the lowest value. Sticky: the stored one stays while
+                                                        listed in the best class or while none is listed
+
+ndp and dhcp6 sightings only enrich: a MAC listed by them alone gets no row, and they never assert presence.
 
 "First" is by the sort keys (empty IP last, then empty network last, network, IP, static before dynamic, hostname,
 vendor, interface), so the result never depends on the order the sources return rows in.
@@ -56,9 +62,15 @@ from . import Attachment, Batch, Sighting, parse_bool
 
 log = logging.getLogger("leasewatch.merge")
 
+# ndp and dhcp6 are not in FALLBACK_KINDS: unlisted, so they rank after every listed kind for ip/network/iface
 FALLBACK_KINDS = ("client", "scan")              # ip/network/iface when there is neither a dhcp nor an arp sighting
-NAME_KINDS = ("dhcp", "client", "arp", "scan")    # hostname fallback
-VENDOR_KINDS = ("dhcp", "arp", "client", "scan")  # vendor (rule 4)
+NAME_KINDS = ("dhcp", "client", "arp", "scan", "dhcp6")    # hostname fallback
+VENDOR_KINDS = ("dhcp", "arp", "client", "scan", "ndp")    # vendor (rule 4)
+# IPv6-only kinds: they enrich a known device (ip6, a last-resort name or vendor) but never create a row or assert
+# presence, and do not place the device (network/iface)
+V6_KINDS = frozenset({"ndp", "dhcp6"})
+_GUA = ipaddress.ip_network("2000::/3")  # by prefix: is_global is False for the documentation range 2001:db8::/32
+_ULA = ipaddress.ip_network("fc00::/7")
 LINKS = ("wired", "wifi")
 # module globals, written by the merge: each warning below is logged once per process, not at every poll
 _mac_warned: set[str] = set()                # instance names that sent a malformed record (invalid MAC, wrong type)
@@ -252,6 +264,8 @@ class Merged:
     client_id: str = ""  # from the chosen lease only
     lease_hostname: str = ""  # the chosen lease's own hostname (option 12), not a fallback from another kind
     label: str = ""  # see merge_sightings
+    ip6: str = ""  # the best IPv6 candidate this poll (_ip6_key)
+    ip6s: tuple[str, ...] = ()  # the candidates in ip6's class (prefix, DHCPv6), best first: a stored one kept if listed
 
 
 @dataclass(frozen=True)
@@ -309,7 +323,33 @@ def to_fw1(s: Sighting) -> Fw1Sighting:
     """The connector record back in the shape merge_sightings sorts on (kind -> source, presence -> online)."""
     return Fw1Sighting(mac=s.mac, ip=s.ip, hostname=s.hostname, vendor=s.vendor, vlan=s.network, iface=s.iface,
                        source=s.kind, lease_type=s.lease_type, online=s.presence, client_id=s.client_id,
-                       label=s.label)
+                       label=s.label, ip6=s.ip6)
+
+
+def _ip6_key(mac: str, addr: str, dhcp6: bool) -> tuple[int, int, int, int]:
+    """The rank of an IPv6 candidate (lower wins): GUA, ULA, other; one a DHCPv6 lease carries; the EUI-64 address of
+    the MAC (stable) before others (temporary); the lowest numeric value."""
+    a = ipaddress.IPv6Address(addr)
+    cls = 0 if a in _GUA else 1 if a in _ULA else 2
+    b = bytes.fromhex(mac.replace(":", "")) if len(mac) == 17 else b""
+    eui = len(b) == 6 and a.packed[8:] == bytes((b[0] ^ 0x02, b[1], b[2], 0xff, 0xfe, b[3], b[4], b[5]))
+    return cls, 0 if dhcp6 else 1, 0 if eui else 1, int(a)
+
+
+def _pick_ip6(mac: str, ss: list[Fw1Sighting]) -> tuple[str, ...]:
+    """The IPv6 candidates of one MAC in the best class ((prefix, DHCPv6) equal to the best), best first."""
+    found: dict[str, bool] = {}  # address -> carried by a dhcp6 sighting
+    for s in ss:
+        if s.ip6:
+            try:
+                ipaddress.IPv6Address(s.ip6)
+            except ValueError:
+                continue
+            found[s.ip6] = found.get(s.ip6, False) or s.source == "dhcp6"
+    keys = sorted((_ip6_key(mac, a, d), a) for a, d in found.items())
+    if not keys:
+        return ()
+    return tuple(a for k, a in keys if k[:2] == keys[0][0][:2])
 
 
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
@@ -343,6 +383,10 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
             s.ip == "", s.source != "dhcp", _rank(FALLBACK_KINDS, s.source), s.source, not s.online) + pick(s))
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
                    sources={s.source for s in ss}, online=any(s.online for s in ss))
+        if m.sources <= V6_KINDS:  # an NDP/DHCPv6 listing alone does not say where the device is
+            m.vlan = m.iface = ""
+        m.ip6s = _pick_ip6(mac, ss)
+        m.ip6 = m.ip6s[0] if m.ip6s else ""
         if lease:
             m.hostname, m.lease_type, m.client_id = lease.hostname, lease.lease_type, lease.client_id
             m.lease_hostname = lease.hostname
@@ -537,6 +581,8 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     held = _held_back(raw, keys, prev, state, hold, now)
     ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
     merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
+    # enrichment only: a MAC listed by NDP/DHCPv6 alone gets no row of its own (not new, not present)
+    merged = {mac: m for mac, m in merged.items() if mac in prev or not m.sources <= V6_KINDS}
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
     res = MergeResult(aliases=new_aliases + folds, folds=folds,
@@ -645,7 +691,7 @@ def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, 
             rows[mac] = {**ROW_DEFAULTS, "mac": mac, "first_seen": now, "baseline": int(state.first_run), "last_seen": now,
                          "last_online": now if m.online else None, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor,
                          "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online),
-                         "client_id": m.client_id, "label": m.label}
+                         "client_id": m.client_id, "label": m.label, "ip6": m.ip6}
             res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type}))
             if not state.first_run:
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
@@ -765,7 +811,10 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
         changed = 1
     # not on the wire right now: stays online until the grace period after its last sighting has passed
     online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= now - grace_s)
-    cur.update(last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
+    # sticky, no event or history: the stored address stays while still listed in the best class (a temporary
+    # address rotating beside it changes nothing) or while nothing is listed (NDP aged it out)
+    ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
+    cur.update(ip6=ip6, last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
                iface=iface, lease_type=lease_type, sources=sources, online=int(online),
                client_id=m.client_id or cur["client_id"],
