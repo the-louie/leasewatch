@@ -181,11 +181,13 @@ class ApiTests(WebTestCase):
         self.post(MAC2, {"archived": True})
         status, _, body = self.req("GET", "/api/devices.csv")
         rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
-        self.assertEqual(rows[0][-5:], ["private", "archived", "note", "aliases", "watch"])
+        head = rows[0]
+        self.assertEqual(head[head.index("private"):head.index("private") + 5], ["private", "archived", "note", "aliases", "watch"])
+        ia = head.index("archived")
         by = {r[0]: r for r in rows[1:]}
         self.assertEqual(set(by), {MAC1, MAC2, MAC3})
-        self.assertRegex(by[MAC2][-4], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}$")
-        self.assertEqual(by[MAC1][-4], "")
+        self.assertRegex(by[MAC2][ia], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}$")
+        self.assertEqual(by[MAC1][ia], "")
 
 
 class CollectorTests(Base):

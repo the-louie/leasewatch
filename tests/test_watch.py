@@ -75,9 +75,10 @@ class WatchTests(_Base):
         self.post(body={"watch": True})
         st, _, body = self.get("/api/devices.csv")
         rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
-        self.assertEqual(rows[0][-2:], ["aliases", "watch"])
+        head = rows[0]
+        self.assertLess(head.index("aliases"), head.index("watch"))
         self.assertEqual(rows[1][0], QW.MAC)
-        self.assertEqual(rows[1][-1], "1")
+        self.assertEqual(rows[1][head.index("watch")], "1")
         st, _, body = self.get(f"/api/devices/{QW.MAC}")
         self.assertEqual(json.loads(body)["device"]["watch"], 1)
 

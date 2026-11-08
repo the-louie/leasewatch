@@ -121,7 +121,7 @@ def _extract(src: str, name: str) -> str:
 
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
-        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "formEdited", "copyable",
+        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
         "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow"]
 
 # a stub DOM: enough of Element for renderTable, renderStatus and the drawer. Elements are made on first lookup.
@@ -650,7 +650,8 @@ out.asked = asked.length; out.open = state.open;
         src = _read("leasewatch", "static", "app.js")
         self.assertIn("formEdited(state.open)", _extract(src, "discardOk"))
         self.assertIn("formEdited(mac)", _extract(src, "refreshDrawer"))
-        self.assertEqual(src.count(".value !== "), 2)  # Name and Note compared once, in formEdited
+        self.assertEqual(src.count("v[k] !== ref[k]"), 1)  # every form field compared once, in formEdited
+        self.assertIn("v[k] !== ref[k]", _extract(src, "formEdited"))
 
     # opening another device from a drawer control keeps the control outside the drawer to return to
     def test_switch_from_drawer_control_keeps_return_target(self) -> None:

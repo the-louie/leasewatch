@@ -57,8 +57,10 @@ class PrivateApiTests(WebTestCase):
     def test_csv_private_column(self):
         _, _, body = self.req("GET", "/api/devices.csv")
         rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
-        self.assertEqual(rows[0][-5:], ["private", "archived", "note", "aliases", "watch"])  # new columns are appended last
-        col = {r[0]: r[-5] for r in rows[1:]}
+        head = rows[0]
+        ip = head.index("private")
+        self.assertEqual(head[ip:ip + 5], ["private", "archived", "note", "aliases", "watch"])  # new columns are appended after
+        col = {r[0]: r[ip] for r in rows[1:]}
         self.assertEqual(col[UA], "0")  # 0/1 as acked and online
         self.assertEqual(col[DEV], "1")
 

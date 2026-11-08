@@ -503,13 +503,24 @@
   function discardOk() {
     return !formEdited(state.open) || confirm("Discard unsaved changes?");
   }
+  // the drawer's text fields, by the key the API takes: a new field is added here and in the form markup only
+  const FORM_FIELDS = { name: "#fName", note: "#fNote" };
+  // the values now typed in the drawer form: {name, note}
+  function formValues() {
+    return Object.fromEntries(Object.entries(FORM_FIELDS).map(([k, sel]) => [k, $(sel).value]));
+  }
+  // a form reference from values (keys that are missing, as in a partial save, keep those of base)
+  function applyForm(values, base) {
+    return Object.fromEntries(Object.keys(FORM_FIELDS).map(k => [k, values[k] ?? base[k]]));
+  }
   // the drawer form of mac differs from its reference: the values a running save of this form posts, else what the
   // form was rendered with or last saved (a close during the save asks only about text typed after Save)
   function formEdited(mac) {
     const f = $("#fName", $("#dBody"));
     if (!f || state.form?.mac !== mac) return false;
     const ref = state.saving?.form === f ? state.saving : state.form;
-    return f.value !== ref.name || $("#fNote", $("#dBody")).value !== ref.note;
+    const v = formValues();
+    return Object.keys(FORM_FIELDS).some(k => v[k] !== ref[k]);
   }
   async function openDrawer(mac) {
     if (state.open && state.open !== mac && !discardOk()) return;
@@ -653,7 +664,7 @@
       <ul class="tl">${r.events.map(e => `<li><span class="t">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span> <span class="muted">${esc(String(e.detail || "").replace(" -> ", " → "))}</span></li>`).join("") || '<li class="none">No events</li>'}</ul>`;
     paintVc(b);
     drawerActions(d);
-    state.form = { mac, name: $("#fName").value, note: $("#fNote").value };
+    state.form = { mac, ...formValues() };
     if (focus) $("#fName").focus();
     else if (fid && document.getElementById(fid)) { const el = document.getElementById(fid); el.focus({ preventScroll: true }); /* the reader may have scrolled the body */ if (caret) el.setSelectionRange(...caret); }
   }
@@ -670,8 +681,8 @@
     save.className = main ? "btn" : "btn primary"; ack.className = main ? "btn primary" : "btn";
     // a baseline device is called known already ("present at the start"): its ack only records that it was checked
     ack.textContent = d.acked ? "Mark unknown" : d.baseline ? "Save & mark checked" : "Save & mark known";
-    save.onclick = () => setFields(d.mac, { name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
-    ack.onclick = () => setFields(d.mac, { acked: !d.acked, name: $("#fName").value, note: $("#fNote").value }, $("#fName"));
+    save.onclick = () => setFields(d.mac, formValues(), $("#fName"));
+    ack.onclick = () => setFields(d.mac, { acked: !d.acked, ...formValues() }, $("#fName"));
     // posts only the archive state: typed Name/Note stay an unsaved edit (the drawer stays open on the device). No form:
     // nothing typed was saved, so no "saved" flash; the load() after the POST refreshes the drawer
     const arch = $("#fArch"), archived = d.archived_ts != null;
@@ -703,7 +714,7 @@
   // form: the drawer's Name input the save was started from (none for a table-row ack)
   async function setFields(mac, fields, form) {
     // module state: while the POST runs, what it posts is the reference of the form it was typed in (see formEdited)
-    const saving = form && form === $("#fName") && state.form?.mac === mac ? { form, name: fields.name ?? state.form.name, note: fields.note ?? state.form.note } : null;
+    const saving = form && form === $("#fName") && state.form?.mac === mac ? { form, ...applyForm(fields, state.form) } : null;
     if (saving) state.saving = saving;
     try {
       try { await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }); }
@@ -714,7 +725,7 @@
       if (g) { g.ctl.abort(); state.drawerGet = null; }
       // what was saved is the new reference of the form it was typed in (text typed while the save ran stays an edit in
       // progress); not of a form rebuilt meanwhile by a close and reopen, which shows what its GET returned
-      if (form && form === $("#fName") && state.form?.mac === mac) state.form = { mac, name: fields.name ?? state.form.name, note: fields.note ?? state.form.note };
+      if (form && form === $("#fName") && state.form?.mac === mac) state.form = { mac, ...applyForm(fields, state.form) };
       await load();
       if (state.open === mac && (form || g?.focus)) { await refreshDrawer(mac, true); if (!form) return; const s = $("#fSaved"); if (s) { s.textContent = "saved"; setTimeout(() => { if (s.isConnected) s.textContent = ""; }, 1500); } }
     } catch (e) { showBanner(`Save failed: ${e.message}`); }

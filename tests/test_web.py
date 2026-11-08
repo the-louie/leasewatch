@@ -331,7 +331,7 @@ class ApiReadTests(WebTestCase):
         self.assertEqual(len(rows), 4)
         r2 = next(r for r in rows if r[0] == MAC2)
         self.assertEqual(r2[2], 'TV, "vardagsrum"')
-        self.assertEqual(r2[-3], "line1\nline2")  # note, then aliases and watch
+        self.assertEqual(r2[rows[0].index("note")], "line1\nline2")
 
     def test_healthz_ok_after_fresh_successful_poll(self):
         data, _ = self.get_json("/healthz", expect=200)
