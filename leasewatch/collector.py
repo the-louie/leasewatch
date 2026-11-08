@@ -588,13 +588,13 @@ class Collector:
 
     def _purge(self, c: sqlite3.Connection, ref: int) -> tuple[int, int]:
         """Delete every device archived longer than PURGE_DAYS by the prune clock that is offline, that no source
-        has listed for that long, has no name and no note and is not marked known or watched, with all its rows. Other devices'
+        has listed for that long, has no name, note or tags and is not marked known or watched, with all its rows. Other devices'
         events that name it in detail stay. Returns (devices, rows), rows counting every deleted row."""
         cutoff = ref - self.cfg.purge_days * 86400
         # last_seen: a static reservation is listed every poll while offline; purged, it would come back as new
         macs = [r[0] for r in c.execute(
             "SELECT mac FROM devices WHERE archived_ts IS NOT NULL AND archived_ts<? AND online=0 "
-            "AND last_seen<? AND name='' AND note='' AND acked=0 AND watch=0", (cutoff, cutoff)).fetchall()]
+            "AND last_seen<? AND name='' AND note='' AND tags='' AND acked=0 AND watch=0", (cutoff, cutoff)).fetchall()]
         rows = 0
         for i in range(0, len(macs), self._PURGE_CHUNK):
             chunk = macs[i:i + self._PURGE_CHUNK]

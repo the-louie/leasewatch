@@ -19,13 +19,14 @@ import time
 from collections.abc import Callable
 from email.errors import FirstHeaderLineIsContinuationDefect, MissingHeaderBodySeparatorDefect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec, instances_context, make_host_mask, type_report
 from .connectors.merge import is_private_mac
-from .db import CONTROL_CHARS, AlreadyADevice, Database, UnknownDevices
+from .db import CONTROL_CHARS, AlreadyADevice, Database, UnknownDevices, normalize_tags
 from .fw1 import MAC_RE
 
 log = logging.getLogger("leasewatch.web")
@@ -61,8 +62,18 @@ _ETAG_ITEM = re.compile(r'\*|(?:W/)?"[^"]*"')
 _DEVICE_PATH = re.compile(r"^/api/devices/([0-9a-f:]{17})$")
 _CSV_HEADER = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
                "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",
-               "archived", "note", "aliases", "watch"]
+               "archived", "note", "aliases", "watch", "tags"]
 _WIFI_CSV_HEADER = ["mac", "name", "vendor", "last_ip", "private", "archived", "first_seen", "last_seen", "hours_seen", "polls_seen", "last_ap"]
+
+
+class UserFields(NamedTuple):
+    """The user fields of a device POST; None = the key was absent (or null) and is not touched. tags is normalised."""
+    acked: bool | None
+    name: str | None
+    note: str | None
+    archived: bool | None
+    watch: bool | None
+    tags: str | None
 
 
 def _dev(d: dict) -> dict:
@@ -152,7 +163,7 @@ def _csv_row(d: dict) -> list:
             ts(d["first_seen"]), ts(d["last_online"]), ts(d["last_seen"]), d["acked"], cell(int(is_private_mac(d["mac"]))),
             ts(d["archived_ts"]), cell(d["note"]),
             cell(" ".join(d["aliases"])),  # a space, as Excel with a ; separator splits on ;
-            d["watch"]]  # new columns go last, so no earlier column moves
+            d["watch"], cell(d["tags"])]  # new columns go last, so no earlier column moves
 
 
 class _DeadlineRaw(io.RawIOBase):
@@ -688,11 +699,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "split" in body:
             return self._api_device_split(mac, body, p)
-        fields = self._user_fields(body)
-        if fields is None:
+        f = self._user_fields(body)
+        if f is None:
             return
         try:
-            d = self.db.update_user_fields(mac, *fields, actor=self._actor())
+            d = self.db.update_user_fields(mac, f.acked, f.name, f.note, f.archived, f.watch, actor=self._actor(), tags=f.tags)
         except Exception:
             log.exception("POST %s failed", p)
             return self._error(500, "internal error")
@@ -732,12 +743,12 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):  # fullmatch: "$" alone lets a trailing "\n" in
                 return self._json({"error": "bad mac", "index": i}, 400)  # the value is not echoed back
         # exactly one of the two fields: a name or note for many devices at once is never meant
-        if "name" in body or "note" in body or "watch" in body or ("acked" in body) == ("archived" in body):
+        if any(k in body for k in ("name", "note", "watch", "tags")) or ("acked" in body) == ("archived" in body):
             return self._error(400, "bulk takes acked or archived")
-        fields = self._user_fields(body)  # the same type checks and texts as the single POST
-        if fields is None:
+        f = self._user_fields(body)  # the same type checks and texts as the single POST
+        if f is None:
             return
-        acked, _name, _note, archived, _watch = fields
+        acked, archived = f.acked, f.archived
         if acked is None and archived is None:  # {"acked": null}
             return self._error(400, "bulk takes acked or archived")
         try:
@@ -780,13 +791,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return body
 
-    def _user_fields(self, body: dict) -> tuple | None:
-        """(acked, name, note, archived, watch) from the body, or None after the 400 for a wrong type."""
+    def _user_fields(self, body: dict) -> UserFields | None:
+        """The UserFields of the body, or None after the 400 for a wrong type or a tags text normalize_tags refuses."""
         acked = body.get("acked")
         name = body.get("name")
         note = body.get("note")
         archived = body.get("archived")
         watch = body.get("watch")
+        tags = body.get("tags")
         if acked is not None and not isinstance(acked, bool):
             return self._error(400, "acked must be boolean")
         if name is not None and not isinstance(name, str):
@@ -797,14 +809,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "archived must be boolean")
         if watch is not None and not isinstance(watch, bool):
             return self._error(400, "watch must be boolean")
-        for field, s in (("name", name), ("note", note)):
+        if tags is not None and not isinstance(tags, str):
+            return self._error(400, "tags must be a string")
+        for field, s in (("name", name), ("note", note), ("tags", tags)):
             try:
                 if s is not None:
                     s.encode("utf-8")
             except UnicodeEncodeError:  # lone surrogate ("\ud800") from JSON escapes: SQLite and the response encoder would fail on it
                 # the JSON itself is valid, so "bad json" would point the user at the wrong cause
                 return self._error(400, f"{field} must be valid Unicode text")
-        return acked, name, note, archived, watch
+        if tags is not None:
+            try:
+                tags = normalize_tags(tags)
+            except ValueError as e:
+                return self._error(400, str(e))
+        return UserFields(acked, name, note, archived, watch, tags)
 
 
 def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPRequestHandler]:

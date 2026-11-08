@@ -83,6 +83,8 @@ MIGRATIONS = [
     ("devices", "watch", "INTEGER NOT NULL DEFAULT 0"),
     # the online state the last offline/online event of a watched device reported (NULL = none yet, or not watched)
     ("devices", "watch_online", "INTEGER"),
+    # the operator's tags: normalize_tags output, a comma list ('' = none)
+    ("devices", "tags", "TEXT NOT NULL DEFAULT ''"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
@@ -107,6 +109,31 @@ INDEXES = (
 # what is stripped from stored text: control, zero-width and bidi characters; tab and newline stay (notes are multi-line).
 # U+200C/U+200D (ZWNJ/ZWJ) stay: emoji sequences and several scripts need them.
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
+
+TAGS_MAX = 8
+TAG_LEN_MAX = 24
+# one tag after lower-casing: letters (any script), digits, _ : . -; the first character a letter or digit
+_TAG_RE = re.compile(r"[^\W_][\w:.-]*")
+
+
+def normalize_tags(text: str) -> str:
+    """The stored form of a tags text: split on commas, each tag stripped and lower-cased with inner blanks as '-',
+    empty tags dropped, duplicates dropped (the first stays), joined with ','. Control characters are removed first.
+    Raises ValueError for a tag with a character outside _TAG_RE, a tag longer than TAG_LEN_MAX or more than
+    TAGS_MAX tags."""
+    out: list[str] = []
+    for part in CONTROL_CHARS.sub("", text).split(","):
+        tag = re.sub(r"\s+", "-", part.strip().lower())
+        if not tag or tag in out:
+            continue
+        if len(tag) > TAG_LEN_MAX:
+            raise ValueError(f"tag {tag} is longer than {TAG_LEN_MAX} characters")
+        if not _TAG_RE.fullmatch(tag):
+            raise ValueError(f"tag {tag} contains a character that is not allowed")
+        out.append(tag)
+    if len(out) > TAGS_MAX:
+        raise ValueError(f"at most {TAGS_MAX} tags")
+    return ",".join(out)
 
 
 class AlreadyADevice(Exception):
@@ -420,12 +447,13 @@ class Database:
         return [dict(r) for r in self.q(sql, (*params, limit))]
 
     def update_user_fields(self, mac: str, acked: bool | None, name: str | None, note: str | None,
-                           archived: bool | None = None, watch: bool | None = None, *, actor: str = "") -> dict | None:
+                           archived: bool | None = None, watch: bool | None = None, *, actor: str = "",
+                           tags: str | None = None) -> dict | None:
         with self.tx() as c:
             key = self._resolve(c, mac)
             if not key:
                 return None
-            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor, watch)[0]
+            return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor, watch, tags=tags)[0]
 
     def split_alias(self, device_mac: str, alias: str, actor: str = "") -> tuple[dict, dict] | None:
         """Turn the alias MAC of a device back into a device of its own: (the device, the new row), or None when
@@ -483,13 +511,13 @@ class Database:
             return changed, unchanged
 
     def import_user_fields(self, rows, *, overwrite: bool = False, actor: str = "") -> ImportResult:
-        """Set name, note, acked, archived and watch from rows (dicts with a normalised `mac` and any of those keys;
+        """Set name, note, tags, acked, archived and watch from rows (dicts with a normalised `mac` and any of those keys;
         an absent key is not touched) in one transaction. An alias MAC counts as its device. A MAC that is no device
         is listed and writes nothing; no devices row is ever inserted. Rows that resolve to one device merge field by
         field: a later row's value wins, but an empty one (an absent key, an empty name or note, archived False, which
         is what an empty archived cell reads as) never replaces an earlier row's value; the device key is listed once
-        in `duplicates` and its row count is in `duplicate_rows`. Without overwrite a value only fills a gap: name and
-        note when the stored text is empty, and acked, archived and watch only when True (never clears, restores or
+        in `duplicates` and its row count is in `duplicate_rows`. Without overwrite a value only fills a gap: name,
+        note and tags when the stored text is empty, and acked, archived and watch only when True (never clears, restores or
         unwatches). With overwrite every present key is applied as given. The shared cleaning, the unchanged-value
         rule and the events (named by actor) are those of _apply_user_fields."""
         res = ImportResult()
@@ -513,20 +541,22 @@ class Database:
             res.duplicate_rows = {k: count[k] for k in res.duplicates}
             now = int(time.time())  # one time for the whole import
             for key, row in merged.items():
-                cur = c.execute("SELECT name, note FROM devices WHERE mac=?", (key,)).fetchone()
-                name, note = row.get("name"), row.get("note")
+                cur = c.execute("SELECT name, note, tags FROM devices WHERE mac=?", (key,)).fetchone()
+                name, note, tags = row.get("name"), row.get("note"), row.get("tags")
                 acked, archived, watch = row.get("acked"), row.get("archived"), row.get("watch")
                 if not overwrite:
                     if name is not None and (cur["name"] or ""):
                         name = None
                     if note is not None and (cur["note"] or ""):
                         note = None
+                    if tags is not None and (cur["tags"] or ""):
+                        tags = None
                     acked = True if acked else None
                     archived = True if archived else None
                     watch = True if watch else None
                 # every change writes an event, so the events added by this call tell changed from unchanged
                 mark = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-                self._apply_user_fields(c, key, now, acked, name, note, archived, actor, watch)
+                self._apply_user_fields(c, key, now, acked, name, note, archived, actor, watch, tags=tags)
                 n = c.execute("SELECT COUNT(*) FROM events WHERE id>?", (mark,)).fetchone()[0]
                 res.events += n
                 if n:
@@ -546,10 +576,12 @@ class Database:
     @staticmethod
     def _apply_user_fields(c: sqlite3.Connection, mac: str, now: int, acked: bool | None, name: str | None,
                            note: str | None, archived: bool | None, actor: str = "",
-                           watch: bool | None = None) -> tuple[dict, bool]:
+                           watch: bool | None = None, *, tags: str | None = None) -> tuple[dict, bool]:
         """Write the user fields of the existing device mac inside the caller's transaction: (the row, whether an
         acked/unacked or archived/restored event was written). Every event names the actor (who made the change);
-        a rename or note change writes its own event, a note event holds the lengths and never the text."""
+        a rename, note or tags change writes its own event, a note event holds the lengths and never the text.
+        tags is normalised with normalize_tags (its ValueError is raised before anything is written)."""
+        new_tags = normalize_tags(tags) if tags is not None else None
         cur = c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()
         sets, params = [], []
         if acked is not None:
@@ -573,6 +605,10 @@ class Database:
         watch_change = watch is not None and bool(cur["watch"]) != watch
         if watch_change:
             sets.append("watch=?"); params.append(1 if watch else 0)
+        old_tags = cur["tags"] or ""
+        tags_change = new_tags is not None and new_tags != old_tags
+        if tags_change:
+            sets.append("tags=?"); params.append(new_tags)
         if sets:
             params.append(mac)
             c.execute(f"UPDATE devices SET {', '.join(sets)} WHERE mac=?", tuple(params))
@@ -592,6 +628,9 @@ class Database:
             if new_note is not None and new_note != old_note:
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
                           (now, mac, "note", f"{len(old_note)} -> {len(new_note)} chars{by}"))
+            if tags_change:
+                c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
+                          (now, mac, "tags", f"{old_tags[:80] or '(none)'} -> {new_tags[:80] or '(none)'}{by}"))
         return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()), ack_change or arch_change
 
     def stats(self, new_days: int) -> dict:
