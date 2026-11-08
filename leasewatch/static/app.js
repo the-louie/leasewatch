@@ -430,8 +430,9 @@
   }
   // ---------- events list: filters, paging ----------
   const EV_PAGE = 60;
-  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged", "split"]], ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
-    ["Review", ["acked", "unacked"]], ["Sources", ["source_down", "source_up"]]];
+  const EV_KINDS = [["Devices", ["new", "back", "archived", "restored", "merged", "split"]], ["Presence", ["offline", "online"]],
+    ["Changes", ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
+    ["Review", ["acked", "unacked", "renamed", "note", "watched", "unwatched"]], ["Sources", ["source_down", "source_up"]]];
   // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
   const isDay = v => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -494,7 +495,7 @@
     } catch (err) { showBanner(`Cannot load more events: ${err.message}`); }
     finally { btn.disabled = false; }
   }
-  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up" }[k] || k);
+  const kindText = k => ({ new: "new device", ip: "new IP", hostname: "hostname", vlan: "moved network", lease_type: "lease type", back: "back online", acked: "marked known", unacked: "marked unknown", archived: "archived", restored: "restored to list", merged: "merged address", split: "split address", port: "moved port", wifi: "moved Wi-Fi", source_down: "source down", source_up: "source up", renamed: "renamed", note: "note changed", watched: "watched", unwatched: "unwatched", offline: "offline", online: "online" }[k] || k);
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
@@ -678,7 +679,7 @@
     arch.onclick = () => setFields(d.mac, { archived: !archived });
     // like Archive: posts only the watch state, at once
     const watch = $("#fWatch");
-    if (watch) { watch.textContent = d.watch ? "Unwatch" : "Watch"; watch.onclick = () => setFields(d.mac, { watch: !d.watch }); }
+    watch.textContent = d.watch ? "Unwatch" : "Watch"; watch.onclick = () => setFields(d.mac, { watch: !d.watch });
   }
 
   // the device a split row came from, by its name when the list has it

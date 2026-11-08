@@ -387,10 +387,11 @@ class BrowserPrivateTest(_BrowserCase):
         # the tablet is online on "Home" and was seen before on a hostile SSID; the older row's first sighting is the day counting began
         now = int(time.time())
         db.q("UPDATE devices SET online=1, wifi_ssid='Home' WHERE mac=?", (cls.DEV,))
+        db.q("INSERT INTO events (mac, kind, detail, ts) VALUES (?, 'offline', 'no sighting for 10 minutes', ?)", (cls.DEV, int(time.time())))
         for ssid, first, last, secs, polls, ap in (("Home", now - 7200, now, 5400, 45, "ap-<b>1"), ("Guest <i>x</i>", now - 86400, now - 80000, 600, 5, "ap-2")):
             db.q("INSERT INTO wifi_presence(mac, ssid, first_seen, last_seen, seconds_seen, polls_seen, last_ap) VALUES(?,?,?,?,?,?,?)",
                  (cls.DEV, ssid, first, last, secs, polls, ap))
-        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "wifihistory", "archive", "vlancolor", "split"))  # archive and split change server state: last
+        cls.run_scenarios(base, ("private", "copy", "aliassearch", "deeplink", "deeplinkretry", "wifihistory", "archive", "vlancolor", "presencekinds", "split"))  # archive and split change server state: last
 
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
@@ -462,6 +463,9 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual(seen, "just now")
         self.assertFalse(d["plain"]["table"])
         self.assertNotIn("Merged addresses", d["plain"]["heading"])
+
+    def test_offline_event_in_the_drawer_history(self) -> None:
+        self.assertEqual(self.result("presencekinds"), {"cls": "k offline", "text": "offline"})
 
     def test_split_off_a_merged_address(self) -> None:
         d = self.result("split")
@@ -1007,8 +1011,8 @@ class BrowserEventsViewTest(_BrowserCase):
         d = self.result("eventsview")
         values = [o["value"] for o in d["kind_options"]]
         self.assertEqual(values[0], "")
-        self.assertEqual(len(values), 17)  # "All" and the 16 kinds the server writes
-        for k in ("source_down", "source_up", "lease_type", "merged", "split"):
+        self.assertEqual(len(values), 23)  # "All" and the 22 kinds the server writes
+        for k in ("source_down", "source_up", "lease_type", "merged", "split", "offline", "online", "renamed", "note", "watched", "unwatched"):
             self.assertIn(k, values)
         self.assertIn({"value": "source_down", "text": "source down"}, d["kind_options"])
         self.assertIn({"value": "split", "text": "split address"}, d["kind_options"])

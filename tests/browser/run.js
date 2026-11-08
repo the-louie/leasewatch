@@ -338,6 +338,15 @@ const scenarios = {
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
     return { rows, narrow, drawer, plain, merged_event };
   },
+  // an offline event in the drawer history carries its kind as a class
+  async presencekinds(page, base) {
+    const DEV = '02:00:00:00:10:01';
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(row(DEV));
+    await page.click(`${row(DEV)} .c-dev`); await waitOpen(page, DEV);
+    await page.waitForSelector('#dBody ul.tl .k.offline');
+    return page.$eval('#dBody ul.tl .k.offline', k => ({ cls: k.className, text: k.textContent }));
+  },
   // the drawer's Wi-Fi history: rows from the detail route, "now" on the current SSID, "since" near the start of counting
   async wifihistory(page, base) {
     const DEV = '02:00:00:00:10:01', UA = '00:00:5e:00:53:01';

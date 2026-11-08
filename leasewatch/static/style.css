@@ -175,6 +175,7 @@ main.has-selbar { padding-bottom: 96px; }
 .event-list .k { font-weight: 600; }
 .k.new { color: var(--new); } .k.ip, .k.hostname, .k.vlan, .k.lease_type, .k.port, .k.wifi { color: var(--accent); } .k.back { color: var(--ok); } .k.acked { color: var(--ok); } .k.unacked { color: var(--warn); }
 .k.watched { color: var(--warn); } .k.unwatched { color: var(--muted); }
+.k.renamed, .k.note { color: var(--accent); } .k.offline { color: var(--danger); } .k.online { color: var(--ok); }
 .k.archived { color: var(--muted); } .k.restored { color: var(--ok); } .k.merged, .k.split { color: var(--accent); }
 .k.source_down { color: var(--danger); } .k.source_up { color: var(--ok); } .event-list .src { font-weight: 600; }
 .who { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; color: inherit; font-weight: 600; }

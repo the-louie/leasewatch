@@ -158,16 +158,16 @@ const tpl = { content: { cloneNode: () => ({ firstElementChild: new El("TR") }) 
 const body = new El(); body.parent = null;
 // the drawer body: pick the controls out of the HTML the code writes, as a browser would build them
 body.onHtml = h => {
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fSaved"]) delete byId[id];
+  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) delete byId[id];
   const kv = /<dl class="kv">([\s\S]*?)<\/dl>/.exec(h);
   body.kv = new El("DL"); body.kv.parent = body; body.kv._html = kv ? kv[1] : "";
   const name = /id="fName"[^>]*value="([^"]*)"/.exec(h);
   if (name) { byId.fName = new El("INPUT"); byId.fName.value = name[1]; }
   const note = /<textarea id="fNote"[^>]*>([^<]*)<\/textarea>/.exec(h);
   if (note) { byId.fNote = new El("TEXTAREA"); byId.fNote.value = note[1]; }
-  for (const id of ["fSave", "fAck", "fArch"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
+  for (const id of ["fSave", "fAck", "fArch", "fWatch"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
   if (/id="fSaved"/.test(h)) byId.fSaved = new El("SPAN");
-  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fSaved"]) if (byId[id]) byId[id].parent = body;
+  for (const id of ["fName", "fNote", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) if (byId[id]) byId[id].parent = body;
 };
 const els = { "#rows": rows, "#rowTpl": tpl, "#dBody": body };
 const $ = (s, el) => {
@@ -198,6 +198,16 @@ class AppJsTests(unittest.TestCase):
         src = _read("leasewatch", "static", "app.js")
         for n in BASE + ["renderStatus", "renderTable", "refreshDrawer", "setFields", "seenHtml", "syncUrl", "filtered"]:
             self.assertTrue(_extract(src, n).rstrip().endswith((";", "}")), n)
+
+    # every kind the events filter offers has a label (no raw kind name falls through) and a colour
+    def test_kind_text_knows_every_filter_kind(self) -> None:
+        out = _run(["EV_KINDS"], "//--\nout.kinds = EV_KINDS.flatMap(g => g[1]);")
+        self.assertEqual(len(out["kinds"]), 22)
+        css, src = _read("leasewatch", "static", "style.css"), _extract(_read("leasewatch", "static", "app.js"), "kindText")
+        for k in out["kinds"]:
+            with self.subTest(kind=k):
+                self.assertRegex(src, rf"\b{k}: \"")  # a label entry, not the fallback to the raw kind
+                self.assertRegex(css, rf"\.k\.{k}\b")
 
     # an SSID-less Wi-Fi row that a switch has since placed on a port is wired, as before;
     # a live SSID-less client (no stored port) still shows as Wi-Fi
