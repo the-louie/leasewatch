@@ -506,7 +506,9 @@ class Collector:
         return {"ok": False, "error": msg}
 
     def _write(self, c: sqlite3.Connection, prev: dict[str, dict], res: MergeResult, now: int,
-               ref: int | None = None) -> None:
+               ref: int | None = None, purge: bool = False) -> int:
+        """Write the merge result in the caller's transaction; returns the number of devices PURGE_DAYS deleted
+        (only when purge is set: never at the first poll or while the baseline waits)."""
         # a stand-in result without folds (some callers build only the fields they need) folds nothing
         folds = getattr(res, "folds", ())
         for cand, dev, _, _ in folds:
@@ -564,6 +566,26 @@ class Collector:
         c.execute("DELETE FROM events WHERE ts<?", (ref - self.cfg.event_days * 86400,))
         # 0 = off: nothing is written above, and what is stored is deleted
         c.execute("DELETE FROM wifi_presence WHERE last_seen<?", (ref - days * 86400,) if days > 0 else (2**62,))
+        # after the row writes: a device back from the archive this poll has archived_ts cleared and is not selected
+        return self._purge(c, ref) if purge and self.cfg.purge_days > 0 else 0
+
+    # sqlite's default variable limit is 999 (older builds) or 32766; 500 per statement is safe everywhere
+    _PURGE_CHUNK = 500
+
+    def _purge(self, c: sqlite3.Connection, ref: int) -> int:
+        """Delete every device archived longer than PURGE_DAYS by the prune clock that is offline, has no name and
+        no note and is not marked known, with all its rows. Other devices' events that name it in detail stay."""
+        macs = [r[0] for r in c.execute(
+            "SELECT mac FROM devices WHERE archived_ts IS NOT NULL AND archived_ts<? AND online=0 "
+            "AND name='' AND note='' AND acked=0", (ref - self.cfg.purge_days * 86400,)).fetchall()]
+        for i in range(0, len(macs), self._PURGE_CHUNK):
+            chunk = macs[i:i + self._PURGE_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for table in ("history", "events", "seen", "wifi_presence"):
+                c.execute(f"DELETE FROM {table} WHERE mac IN ({marks})", chunk)
+            c.execute(f"DELETE FROM aliases WHERE device IN ({marks})", chunk)
+            c.execute(f"DELETE FROM devices WHERE mac IN ({marks})", chunk)
+        return len(macs)
 
     @staticmethod
     def _fold(c: sqlite3.Connection, cand: str, dev: str) -> None:
@@ -753,10 +775,10 @@ class Collector:
                 "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
         state.prune_now = self._prune_reference(c, now)
         res = merge_batches(prev, batches, self.cfg, now, state)
-        self._write(c, prev, res, now, state.prune_now)
+        purged = self._write(c, prev, res, now, state.prune_now, purge=not first_run)
         self._write_poll_meta(c, t0, now, raw_stats, first_run, waiting, status)
         self._write_source_events(c)
-        return res
+        return res, purged
 
     def _write_poll_meta(self, c: sqlite3.Connection, t0: float, now: int, raw_stats: dict[str, int], first_run: bool,
                          waiting: list[str], status: dict[str, str]) -> None:
@@ -796,7 +818,7 @@ class Collector:
         batches = {n: got[n] for n in self._runs if n in got}
         state = self._merge_state(first_run, prev_ok, producers, waiting)
         with self.db.tx() as c:
-            res = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
+            res, purged = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
         self._source_events_written()
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
@@ -804,6 +826,10 @@ class Collector:
         self._notify()
         st = res.stats
         log.info("poll ok: %d devices, %d new, %d changed, %d ms", st["devices"], st["new"], st["changed"], int((time.time() - t0) * 1000))
+        if purged > 0:
+            log.info("purged %d archived devices (PURGE_DAYS=%d)", purged, self.cfg.purge_days)
+            if purged > 1000:
+                log.info('run "python -m leasewatch vacuum" to give the space back to the file system')
         return {"ok": True, "devices": st["devices"], "new": st["new"], "changed": st["changed"], "first_run": first_run}
 
     def loop(self, stop_event: threading.Event) -> None:

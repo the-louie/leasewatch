@@ -249,6 +249,8 @@ class Config:
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))
     # archive devices not online for this many days that have no name and are not marked known; 0 = off
     prune_days: int = field(default_factory=lambda: _env_int("PRUNE_DAYS", 0))
+    # delete devices archived this many days (by the prune clock) that are offline, unnamed, without a note and not known; 0 = off
+    purge_days: int = field(default_factory=lambda: _env_int("PURGE_DAYS", 0))
     # days a Wi-Fi presence row (per device and SSID) is kept after it was last seen; 0 = off (nothing stored, stored rows deleted)
     wifi_presence_days: int = field(default_factory=lambda: _env_int("WIFI_PRESENCE_DAYS", 365))
     # days an event is kept (by the prune clock); history rows kept per device (and shown in the drawer)
@@ -478,6 +480,13 @@ class Config:
             problems.append("PRUNE_DAYS must not be negative")
         if self.prune_days > 3650:
             problems.append("PRUNE_DAYS must be at most 3650")
+        raw_purge = _env("PURGE_DAYS")
+        if raw_purge and not re.fullmatch(r"[+-]?\d+", raw_purge):
+            problems.append("PURGE_DAYS must be a whole number")
+        elif self.purge_days < 0:
+            problems.append("PURGE_DAYS must not be negative")
+        elif self.purge_days > 3650:
+            problems.append("PURGE_DAYS must be at most 3650")
         raw_wifi = _env("WIFI_PRESENCE_DAYS")
         if raw_wifi and not re.fullmatch(r"[+-]?\d+", raw_wifi):
             problems.append("WIFI_PRESENCE_DAYS must be a whole number")
