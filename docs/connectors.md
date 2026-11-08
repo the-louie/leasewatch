@@ -369,7 +369,7 @@ services:
 - **No precedence.** A type name declared twice (two packages, or one package installed both ways) is refused from
   every origin: `type <t> is provided twice: … ; remove one`. A package installed both ways also stops the start:
   its `LW_CONNECTORS_DIR` copy would shadow the installed one. A package that declares a built-in type name is
-  refused and the built-in stays. All names are compared before any plugin code runs.
+  refused and the built-in stays. To ship your own version of a built-in connector, give it another type name (`opnsense2`) and point the instance's `TYPE` at it. All names are compared before any plugin code runs.
 - **All declared types are imported at load**, not only the ones `LW_CONNECTORS` uses.
 - **A broken or incompatible plugin** (an import error, `describe()` fails or names another type, not a connector
   class, another `api_version`) is not registered. It is logged as a WARNING.

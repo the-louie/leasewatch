@@ -5,11 +5,17 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- Tags per device: free tags typed comma-separated in the device page (lower-case, dashes for blanks, letters, digits and `: . -`, 1-24 characters, at most 8, else refused with the reason), `owner:alex` as the way to record an owner, a chip per tag in the toolbar with online/total counts and a `?tag=` filter, tags in the search, a `tags` event with who did it, a `"tags"` key in `POST /api/devices/<mac>` (the bulk route refuses it); a tagged device counts as named and is never merged into, archived by `PRUNE_DAYS`/`PRUNE_PRIVATE_DAYS` or deleted by `PURGE_DAYS`.
+- The device CSV also exports `tags`, `baseline`, `acked_at` and `split_from` (last columns, so no earlier column moves; `import-csv` does not read the last three).
+- `import-csv` reads and restores tags, and its default `--fields` list grew to `name,note,acked,archived,watch,tags`.
 
 ### Changed
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
+- A sighting's `ip` that is not a dotted IPv4 address is stored as empty.
+- CI: actions pinned by commit SHA, checkouts without a persisted token, read-only workflow permissions.
 
 ### Fixed
+- The gzip HEAD test freezes the clock, so it no longer fails now and then.
 
 ## 1.4.0 (2026-11-08)
 
