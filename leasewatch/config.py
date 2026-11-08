@@ -249,6 +249,8 @@ class Config:
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))
     # archive devices not online for this many days that have no name and are not marked known; 0 = off
     prune_days: int = field(default_factory=lambda: _env_int("PRUNE_DAYS", 0))
+    # archive private-MAC devices that never merged (no name, note, ack, split or alias) after this many days offline; 0 = use prune_days
+    prune_private_days: int = field(default_factory=lambda: _env_int("PRUNE_PRIVATE_DAYS", 0))
     # delete devices archived this many days (by the prune clock) that are offline, unnamed, without a note and not known; 0 = off
     purge_days: int = field(default_factory=lambda: _env_int("PURGE_DAYS", 0))
     # days a Wi-Fi presence row (per device and SSID) is kept after it was last seen; 0 = off (nothing stored, stored rows deleted)
@@ -480,6 +482,13 @@ class Config:
             problems.append("PRUNE_DAYS must not be negative")
         if self.prune_days > 3650:
             problems.append("PRUNE_DAYS must be at most 3650")
+        raw_private = _env("PRUNE_PRIVATE_DAYS")
+        if raw_private and not re.fullmatch(r"[+-]?\d+", raw_private):
+            problems.append("PRUNE_PRIVATE_DAYS must be a whole number")
+        elif self.prune_private_days < 0 or self.prune_private_days == 1:
+            problems.append("PRUNE_PRIVATE_DAYS must be at least 2 (0 = use PRUNE_DAYS)")
+        elif self.prune_private_days > 3650:
+            problems.append("PRUNE_PRIVATE_DAYS must be at most 3650")
         raw_purge = _env("PURGE_DAYS")
         if raw_purge and not re.fullmatch(r"[+-]?\d+", raw_purge):
             problems.append("PURGE_DAYS must be a whole number")

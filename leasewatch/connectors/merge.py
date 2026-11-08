@@ -723,16 +723,24 @@ def _auto_archive(rows: dict[str, dict], cfg: Config, state: MergeState, now: in
     events: list[tuple[str, str, str]] = []
     # PRUNE_DAYS: archive what has been offline that long and was never named or marked known; the
     # baseline is not spared. last_online, not last_seen: a static lease is listed for ever. Never on the first run
-    if cfg.prune_days > 0 and not state.first_run:
+    # PRUNE_PRIVATE_DAYS: a shorter threshold for a private MAC that never merged (no name, note, ack, split origin
+    # or alias pointing at it)
+    if (cfg.prune_days > 0 or cfg.prune_private_days > 0) and not state.first_run:
         ref = now if state.prune_now is None else state.prune_now
-        cutoff = ref - cfg.prune_days * 86400
+        targets = set(state.aliases.values())
         for mac, row in rows.items():
+            private = (cfg.prune_private_days > 0 and is_private_mac(mac) and not row["name"] and not row.get("note")
+                       and not row.get("split_from") and mac not in targets)
+            days = cfg.prune_private_days if private else cfg.prune_days
+            if days <= 0:
+                continue
             since = row["last_online"] or row["first_seen"]
             # a restore by hand since it was last online holds until it has been online again
-            if (row["archived_ts"] is None and not row["online"] and since < cutoff and not row["name"]
+            if (row["archived_ts"] is None and not row["online"] and since < ref - days * 86400 and not row["name"]
                     and not row["acked"] and state.restored.get(mac, 0) < since):
                 row["archived_ts"] = now
-                events.append((mac, "archived", f"auto: not online for {(ref - since) // 86400} days"))
+                label = "auto (private)" if private else "auto"
+                events.append((mac, "archived", f"{label}: not online for {(ref - since) // 86400} days"))
     return events
 
 

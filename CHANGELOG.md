@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- `PRUNE_PRIVATE_DAYS` (0 or 2-3650, default 0 = use `PRUNE_DAYS`): rotating phone addresses (private MACs) that never merged, with no name, note, ack, split origin or merged address, are archived after that many days offline; it works with `PRUNE_DAYS` off. The `archived` event reads `auto (private): not online for N days`.
 - `EVENT_DAYS` (1-3650, default 365) and `HISTORY_PER_DEVICE` (10-1000, default 200): how long events are kept, and how many history rows are kept and shown per device. A start warning appears when `EVENT_DAYS` is below `PRUNE_DAYS`: a device restored by hand is protected only while its `restored` event exists.
 - `PURGE_DAYS` (0-3650, default 0 = off): deletes, once per poll, devices archived longer than that by the prune clock that are offline, unnamed, without a note and not marked known, with their history, events, Seen-by rows, Wi-Fi history and merged addresses. A purged MAC seen again is a new device. Never at the first poll or while the baseline waits; `python -m leasewatch vacuum` gives the space back.
 - `LOG_FORMAT=plain|json|auto`: JSON log lines for log drivers; under journald the timestamp is left out (journald adds its own).

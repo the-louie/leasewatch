@@ -770,7 +770,7 @@ class Collector:
         prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
         # read with prev in one transaction, so the alias map and the rows it points to agree
         state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
-        if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS; only read when it runs
+        if self.cfg.prune_days > 0 or self.cfg.prune_private_days > 0:  # a restore by hand holds against pruning; only read when it runs
             state.restored = {r["mac"]: r["ts"] for r in c.execute(
                 "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
         state.prune_now = self._prune_reference(c, now)
