@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 log = logging.getLogger("leasewatch.db")
 
@@ -118,6 +119,17 @@ class UnknownDevices(LookupError):
     def __init__(self, macs: list[str]):
         super().__init__(f"{len(macs)} unknown device(s)")
         self.macs = macs
+
+
+@dataclass
+class ImportResult:
+    """What import_user_fields did: devices changed, devices already holding the values, MACs that are no device,
+    MACs of rows replaced by a later row for the same device, and the events written."""
+    updated: int = 0
+    unchanged: int = 0
+    unknown: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+    events: int = 0
 
 
 class Database:
@@ -459,6 +471,55 @@ class Database:
             for key in keys:
                 (changed if self._apply_user_fields(c, key, now, acked, None, None, archived, actor)[1] else unchanged).append(key)
             return changed, unchanged
+
+    def import_user_fields(self, rows, *, overwrite: bool = False, actor: str = "") -> ImportResult:
+        """Set name, note, acked, archived and watch from rows (dicts with a normalised `mac` and any of those keys;
+        an absent key is not touched) in one transaction. An alias MAC counts as its device. A MAC that is no device
+        is listed and writes nothing; no devices row is ever inserted. When two rows resolve to one device the later
+        row wins whole and both MACs are listed in `duplicates`. Without overwrite a value only fills a gap: name and
+        note when the stored text is empty, and acked, archived and watch only when True (never clears, restores or
+        unwatches). With overwrite every present key is applied as given. The shared cleaning, the unchanged-value
+        rule and the events (named by actor) are those of _apply_user_fields."""
+        res = ImportResult()
+        with self.tx() as c:
+            last: dict[str, dict] = {}
+            first_mac: dict[str, str] = {}
+            for row in rows:
+                mac = row["mac"]
+                key = self._resolve(c, mac)
+                if not key:
+                    if mac not in res.unknown:
+                        res.unknown.append(mac)
+                    continue
+                if key in last:
+                    for m in (first_mac[key], mac):
+                        if m not in res.duplicates:
+                            res.duplicates.append(m)
+                last[key] = row
+                first_mac[key] = mac
+            now = int(time.time())  # one time for the whole import
+            for key, row in last.items():
+                cur = c.execute("SELECT name, note FROM devices WHERE mac=?", (key,)).fetchone()
+                name, note = row.get("name"), row.get("note")
+                acked, archived, watch = row.get("acked"), row.get("archived"), row.get("watch")
+                if not overwrite:
+                    if name is not None and (cur["name"] or ""):
+                        name = None
+                    if note is not None and (cur["note"] or ""):
+                        note = None
+                    acked = True if acked else None
+                    archived = True if archived else None
+                    watch = True if watch else None
+                # every change writes an event, so the events added by this call tell changed from unchanged
+                mark = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                self._apply_user_fields(c, key, now, acked, name, note, archived, actor, watch)
+                n = c.execute("SELECT COUNT(*) FROM events WHERE id>?", (mark,)).fetchone()[0]
+                res.events += n
+                if n:
+                    res.updated += 1
+                else:
+                    res.unchanged += 1
+        return res
 
     def _resolve(self, c: sqlite3.Connection, mac: str) -> str:
         """The device key for mac: itself when it is a device, the owner when it is an alias (an alias MAC copied
