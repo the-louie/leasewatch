@@ -11,6 +11,8 @@ Two complete connectors serve as worked examples:
 - [contrib/leasewatch-dnsmasq](../contrib/leasewatch-dnsmasq/): reads a local file, `dhcp` sightings only.
 - [contrib/leasewatch-mikrotik](../contrib/leasewatch-mikrotik/): talks HTTPS to a device with a password,
   `dhcp` and `arp` sightings, host masking and secret redaction.
+- [contrib/leasewatch-mdns](../contrib/leasewatch-mdns/): listens to multicast on the LAN and attributes names by
+  address; needs host networking.
 
 Contents: [1 What a connector is](#1-what-a-connector-is) ·
 [2 Records](#2-records) · [3 Settings](#3-settings) · [4 Errors and secrets](#4-errors-and-secrets) ·
@@ -378,6 +380,11 @@ services:
 - The files must be readable by the container's user.
 - **Trust.** A connector runs inside leasewatch with its full privileges. It sees the whole environment, including
   the secrets of other instances. Load only code you trust.
+
+**Listening connectors.** A connector that receives multicast or broadcast traffic from the LAN (such as
+`mdns`) hears nothing on the default bridge network of the container. Run the container with `network_mode: host`
+(remove the `ports:` block and set `LISTEN_HOST`) or on a macvlan network on the VLAN to listen on. See
+[contrib/leasewatch-mdns](../contrib/leasewatch-mdns/README.md) for the details.
 
 ## 8. Loading rules
 
