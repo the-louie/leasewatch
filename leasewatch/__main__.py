@@ -13,7 +13,9 @@ and prints the AUTH_PASSWORD_HASH value;
 runs) and rotates DATA_DIR/backups/;
 `python -m leasewatch vacuum` rebuilds the database file (stop the service first);
 `python -m leasewatch reset-baseline [--yes] [--clear-acks] [--include-archived]` marks every listed device as baseline
-in place (no events are written).
+in place (no events are written);
+`python -m leasewatch import-csv FILE [--dry-run] [--fields LIST] [--fill-empty|--overwrite]` restores name, note,
+acked, archived and watch from the device CSV export (unknown MACs are listed, never added).
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ import time
 from datetime import datetime
 from typing import Callable
 
-from . import __version__, maintenance
+from . import __version__, importer, maintenance
 from .collector import Collector, close_connector, error_text, setup_instance
 from .config import ENV_PREFIX, Config, parse_networks, removed_problems
 from .db import Database
@@ -36,7 +38,7 @@ from .web import serve
 
 
 SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect", "hash-password", "backup", "vacuum",
-               "reset-baseline")
+               "reset-baseline", "import-csv")
 NO_PYSNMP = "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"
 
 
@@ -619,7 +621,8 @@ def main(argv: list[str] | None = None) -> int:
                       "collect": collect_cmd, "hash-password": hash_password_cmd,
                       "backup": lambda a: maintenance.backup_cmd(a, _out),
                       "vacuum": lambda a: maintenance.vacuum_cmd(a, _out),
-                      "reset-baseline": lambda a: maintenance.reset_baseline_cmd(a, _out)}[argv[0]](argv[1:])
+                      "reset-baseline": lambda a: maintenance.reset_baseline_cmd(a, _out),
+                      "import-csv": lambda a: importer.import_csv_cmd(a, _out)}[argv[0]](argv[1:])
             except SystemExit as e:  # argparse's --help or usage error: its output is flushed below like any other
                 rc = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
             sys.stdout.flush()  # here, not at exit: a reader that has gone away is caught below
@@ -642,8 +645,8 @@ def main(argv: list[str] | None = None) -> int:
             if sys.stdout is not None:
                 raise
             # started with stdout closed (>&-): nowhere to write the output; a code the command set stays
-            # (backup, vacuum and reset-baseline have done their work by then: their code stays, 0 included)
-            return 1 if not rc and argv[0] not in ("backup", "vacuum", "reset-baseline") else rc
+            # (backup, vacuum, reset-baseline and import-csv have done their work by then: their code stays, 0 included)
+            return 1 if not rc and argv[0] not in ("backup", "vacuum", "reset-baseline", "import-csv") else rc
         except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
             return 130  # 128 + SIGINT, as the shell reports an interrupted command
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
