@@ -11,16 +11,15 @@ import threading
 import time
 import unittest
 
+from _env import FW1_ENV, clean_env, restore
+from _fixtures import FakeClient, S
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.db import Database
+from leasewatch.connectors import InstanceSpec
+from leasewatch.web import MAX_BODY, serve
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import FakeClient, S  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.connectors import InstanceSpec  # noqa: E402
-from leasewatch.web import MAX_BODY, serve  # noqa: E402
 
 MAC1 = "aa:bb:cc:dd:ee:01"  # baseline device (present at first poll)
 MAC2 = "aa:bb:cc:dd:ee:02"  # new device, DHCP, VLAN IOT
@@ -664,7 +663,7 @@ class ConcurrencyTests(WebTestCase):
                     json.loads(body)
                     with lock:
                         results.append(status)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     with lock:
                         errors.append(repr(e))
 
@@ -677,7 +676,7 @@ class ConcurrencyTests(WebTestCase):
                     json.loads(body)
                     with lock:
                         results.append(status)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     with lock:
                         errors.append(repr(e))
 

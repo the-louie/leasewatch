@@ -4,15 +4,13 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_collector import SCHEMA_1_0  # noqa: E402
+from test_collector import SCHEMA_1_0
 
-from leasewatch.db import Database  # noqa: E402
+from leasewatch.db import Database
 
 # the columns db.py added to devices up to v2 (git show 6890972:leasewatch/db.py, MIGRATIONS), copied so the test
 # keeps building a real v2 file when db.py moves on

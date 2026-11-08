@@ -1,8 +1,6 @@
 """Edge cases of the merge: normalise_batch coercion, lease and location fallbacks, attachments."""
-import logging, os, sqlite3, sys, unittest
+import logging, sqlite3, unittest
 from dataclasses import dataclass
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore
 from _fixtures import row
 from leasewatch.config import Config

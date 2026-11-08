@@ -6,15 +6,13 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _netguard  # noqa: E402
-from _netguard import NetworkBlocked, expect_blocked  # noqa: E402
+import _netguard
+from _netguard import NetworkBlocked, expect_blocked
 
 _netguard.install()
 

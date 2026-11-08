@@ -2,17 +2,13 @@
 queue survives a restart, a failed mail keeps it however old it is, acked or archived devices leave
 it, one mail holds at most 50 devices, and a private MAC is never queued. Synthetic data only: hardware MACs are from
 the documentation range 00:00:5e:00:53:xx (RFC 7042). Fake connectors; Mailgun is stubbed."""
-import os
-import sys
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, MAC, Base, arp  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
+from test_instances import FW1, MAC, Base, arp
+from leasewatch import notify
+from leasewatch.collector import Collector
 
 MAIL = {"LW_CONNECTORS": "fw1", **FW1, "MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com",
         "MAIL_TO": "a@example.com"}

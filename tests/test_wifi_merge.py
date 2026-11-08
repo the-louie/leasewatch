@@ -1,7 +1,5 @@
 """The merge returns this poll's Wi-Fi observations: (device key, ssid, ap), one per device, from answered controllers."""
-import os, sys, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import unittest
 from _env import FW1_ENV, clean_env, restore
 from _fixtures import row
 from leasewatch.config import Config

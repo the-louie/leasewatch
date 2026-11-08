@@ -3,15 +3,10 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
-import sys
 import unittest
 from unittest import mock
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
+import test_web_edge_cases as QW
 
 
 class GzipTests(QW.Base):

@@ -1,23 +1,18 @@
 """The DHCP client-id per source (ISC uid, Kea and dnsmasq client_id), its normal form, the merge and the
 devices.client_id column. Synthetic ids only."""
-import os
-import sys
-import tempfile
 import unittest
 from dataclasses import replace
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, MAC, Base  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_merge import NOW, A, S, arp, row  # noqa: E402
-from leasewatch import fw1  # noqa: E402
-from leasewatch.connectors import Batch, Sighting  # noqa: E402
-from leasewatch.connectors.merge import (MergeState, merge, merge_sightings, norm_client_id, normalise_batch,  # noqa: E402
+from test_instances import FW1, MAC, Base
+from _case import EnvTmpCase
+from test_merge import NOW, A, S, arp, row
+from leasewatch import fw1
+from leasewatch.connectors import Batch, Sighting
+from leasewatch.connectors.merge import (MergeState, merge, merge_sightings, norm_client_id, normalise_batch,
                                          to_fw1)
-from leasewatch.connectors.opnsense import to_sighting  # noqa: E402
-from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from leasewatch.connectors.opnsense import to_sighting
+from leasewatch.fw1 import Sighting as Fw1Sighting
+from leasewatch.config import Config
 
 CID = "0102000000000101"  # type 1 + a locally administered MAC
 
@@ -81,15 +76,7 @@ class KeaDnsmasqTests(unittest.TestCase):
         self.assertEqual(to_fw1(s).client_id, "1:2:0:0:0:1:1")
 
 
-class MergeTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self):
-        self.tmp.cleanup()
-        restore(self._env)
-
+class MergeTests(EnvTmpCase):
     def run_merge(self, prev, sightings):
         return merge(prev, {"fw1": Batch(sightings=sightings)}, Config(), NOW, MergeState())
 

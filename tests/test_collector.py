@@ -1,6 +1,5 @@
 import os, sys, tempfile, time, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _case import EnvTmpCase
 from _env import FW1_ENV, clean_env, restore, sources, swap_client
 from _fixtures import FakeClient, S
 from leasewatch.collector import Collector, merge
@@ -14,13 +13,12 @@ def cfg_with(*names):
     return Config()
 
 
-class CollectorTests(unittest.TestCase):
+class CollectorTests(EnvTmpCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
+        super().setUp()
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+    def tearDown(self): self.db._conn.close()
 
     def test_merge_prefers_dhcp_hostname_and_arp_online(self):
         m = merge([S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="phone", online=False), S("aa:bb:cc:dd:ee:01", "10.0.0.5", host="", src="arp")])
@@ -68,13 +66,14 @@ class CollectorTests(unittest.TestCase):
 
 
 
-class CollectorRegressionTests(unittest.TestCase):
+class CollectorRegressionTests(EnvTmpCase):
+    ENV = {**FW1_ENV, "ONLINE_GRACE_MINUTES": "10"}
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name, "ONLINE_GRACE_MINUTES": "10"})
+        super().setUp()
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+    def tearDown(self): self.db._conn.close()
 
     def test_grace_period_keeps_device_online_when_missing_from_one_poll(self):
         c = FakeClient([S("aa:bb:cc:dd:ee:01", "10.0.0.5", src="arp")]); col = Collector(self.cfg, self.db, c); col.run_once()
@@ -105,13 +104,12 @@ class CollectorRegressionTests(unittest.TestCase):
         self.assertEqual(self.db.device("aa:bb:cc:dd:ee:01")["online"], 0)
 
 
-class WiredWifiAndConfigTests(unittest.TestCase):
+class WiredWifiAndConfigTests(EnvTmpCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
+        super().setUp()
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+    def tearDown(self): self.db._conn.close()
 
     def test_wifi_device_seen_wired_later_drops_wifi_details(self):
         from leasewatch.unifi import WifiInfo
@@ -202,13 +200,12 @@ class WiredWifiAndConfigTests(unittest.TestCase):
         self.assertFalse([p for p in Config().validate() if "DHCP_BACKEND" in p])
 
 
-class MergeEventAndMailTests(unittest.TestCase):
+class MergeEventAndMailTests(EnvTmpCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
+        super().setUp()
         self.cfg = Config(); self.db = Database(self.cfg.db_path)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+    def tearDown(self): self.db._conn.close()
 
     def _same_over_permutations(self, rows):
         import itertools
@@ -388,15 +385,14 @@ class DbTextAndTransactionTests(unittest.TestCase):
         self.assertEqual(self.db.device(self.mac)["name"], "")
 
 
-class LeaseTypeModeTests(unittest.TestCase):
+class LeaseTypeModeTests(EnvTmpCase):
     MAC = "02:00:00:00:10:01"
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
+        super().setUp()
         os.environ.pop("LEASE_TYPE_MODE", None)
 
-    def tearDown(self): self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+    def tearDown(self): self.db._conn.close()
 
     def _lease_then_arp_only(self, mode):
         """Poll 1: lease + ARP. Poll 2: ARP only (the lease is gone). Returns the collector for further polls."""

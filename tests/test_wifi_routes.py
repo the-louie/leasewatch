@@ -3,15 +3,11 @@ import csv
 import gzip
 import io
 import json
-import os
-import sys
 import unittest
 from urllib.parse import quote
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
-from leasewatch import auth  # noqa: E402
+import test_web_edge_cases as QW
+from leasewatch import auth
 
 A, B, C, D = "a8:00:00:00:30:01", "a8:00:00:00:30:02", "02:00:00:00:30:03", "a8:00:00:00:30:04"
 

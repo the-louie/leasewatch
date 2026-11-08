@@ -1,6 +1,4 @@
 import json, os, sys, tempfile, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import FW1_ENV, clean_env, restore
 from leasewatch import snmp_profiles
 from leasewatch.config import Config

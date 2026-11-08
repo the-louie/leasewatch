@@ -2,20 +2,15 @@
 the ETag say it may not write, and it shares the Verifier's CPU cap and cache with the main login."""
 import hashlib
 import json
-import os
-import sys
 import unittest
 from unittest import mock
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-sys.path.insert(0, HERE)
-import test_web  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_basic_auth import FAST, GOOD, HASH, HASH_MSG, PASSWORD, USER, basic  # noqa: E402
-from test_web import MAC2, WebTestCase  # noqa: E402
-from leasewatch import auth  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+import test_web
+from _env import FW1_ENV, clean_env, restore
+from test_basic_auth import FAST, GOOD, HASH, HASH_MSG, PASSWORD, USER, basic
+from test_web import MAC2, WebTestCase
+from leasewatch import auth
+from leasewatch.config import Config
 
 RO_USER = "family"
 RO_PASSWORD = "look but do not touch"

@@ -1,18 +1,13 @@
 """devices.label: the migration, the merge write, and the rows the API and the CSV read."""
-import os
 import sqlite3
-import sys
-import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.fw1 import Sighting  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.web import _dev  # noqa: E402
+from _case import EnvTmpCase
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.fw1 import Sighting
+from leasewatch.db import Database
+from leasewatch.web import _dev
 
 MAC = "00:00:5e:00:53:41"
 
@@ -34,12 +29,9 @@ class Client:
         return list(self.data), {"leases": len(self.data), "arp": 0, **self.extra}
 
 
-class LabelStoreTests(unittest.TestCase):
+class LabelStoreTests(EnvTmpCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-        self.addCleanup(restore, self._env)
+        super().setUp()
         self.cfg = Config()
 
     def open_db(self) -> Database:

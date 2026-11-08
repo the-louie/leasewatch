@@ -3,17 +3,13 @@ notification channels as one digest per poll, on the same mark as MAIL_ON_SOURCE
 connector types only."""
 from __future__ import annotations
 
-import os
-import sys
 import unittest
 from dataclasses import replace
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_ops_events import ENV, Clock, down  # noqa: E402
-from test_instances import MAC, Base, Fake, arp  # noqa: E402
-from leasewatch.connectors import Attachment, Batch, Sighting, registry  # noqa: E402
+from test_ops_events import ENV, Clock, down
+from test_instances import MAC, Base, Fake, arp
+from leasewatch.connectors import Attachment, Batch, Sighting, registry
 ON = {**ENV, "WEBHOOK_URL": "https://hook.example.com/t", "MAIL_ON_WATCH": "1", "PUBLIC_URL": "https://lw.example.lan/"}
 MAC2, MAC3, MAC4, MAC5 = (f"02:00:00:00:00:0{i}" for i in range(2, 6))
 GRACE = 10 * 60
@@ -255,7 +251,7 @@ class WatchAlertTests(Base):
         col, db = self.collector(env)
         self.addCleanup(col.close)
         fy = col._connectors["fy"]
-        ok = lambda: Batch(sightings=[Sighting(mac=MAC2, source="", kind="arp", observed_at=0, presence=True,  # noqa: E731
+        ok = lambda: Batch(sightings=[Sighting(mac=MAC2, source="", kind="arp", observed_at=0, presence=True,
                                                ip="10.0.0.6")])
         fy.on_collect = ok
         self.poll(col, 2)

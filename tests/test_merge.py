@@ -1,10 +1,8 @@
 """merge() called directly with Batch objects: (prev rows, batches, state) -> rows, events, history."""
-import itertools, os, sys, tempfile, unittest
+import itertools, os, unittest
 from dataclasses import replace
 from unittest import mock
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore
+from _case import EnvTmpCase
 from _fixtures import row
 from leasewatch.config import Config
 from leasewatch.connectors import Attachment, Batch, HostContext, Sighting
@@ -299,13 +297,7 @@ CASES = [
 ]
 
 
-class MergeTableTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self): self.tmp.cleanup(); restore(self._env)
-
+class MergeTableTests(EnvTmpCase):
     def run_merge(self, prev, batches, cfg=None, **state):
         return merge({r["mac"]: r for r in prev}, batches, cfg or Config(), NOW, MergeState(**state))
 

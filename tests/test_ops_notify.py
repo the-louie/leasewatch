@@ -1,17 +1,13 @@
 """Notification backoff per channel: a failing channel is not called again until its backoff elapsed, the other
 channels still get the batch, the queue follows its own rules, one warning per failed spell. Synthetic data only;
 fake channels and a fake clock (no sleeps)."""
-import os
-import sys
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, Base  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from test_instances import FW1, Base
+from leasewatch import notify
+from leasewatch.config import Config
 
 DEV = {"mac": "02:00:00:00:00:09", "ip": "10.0.0.9", "hostname": "pad", "vendor": "", "vlan": "", "lease_type": ""}
 MAIL = {"LW_CONNECTORS": "fw1", **FW1, "MAILGUN_KEY": "k", "MAILGUN_DOMAIN": "mg.example.com",

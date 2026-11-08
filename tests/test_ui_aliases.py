@@ -2,17 +2,14 @@
 import csv
 import io
 import os
-import sys
 import tempfile
 import unittest
 from dataclasses import replace
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_web import S, WebTestCase  # noqa: E402
+from test_web import S, WebTestCase
 
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.web import _CSV_HEADER  # noqa: E402
+from leasewatch.db import Database
+from leasewatch.web import _CSV_HEADER
 
 DEV = "02:00:00:00:10:01"
 A1, A2 = "06:00:00:00:10:02", "0a:00:00:00:10:03"

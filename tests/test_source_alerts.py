@@ -2,19 +2,15 @@
 from the mark in meta notify.alert_event_id. notify.send is stubbed; fake connector types only."""
 from __future__ import annotations
 
-import os
 import sqlite3
-import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_ops_events import ENV, Clock, down  # noqa: E402
-from test_instances import Base  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.collector import ALERT_BATCH, ALERT_MARK, Collector  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
+from test_ops_events import ENV, Clock, down
+from test_instances import Base
+from leasewatch import notify
+from leasewatch.collector import ALERT_BATCH, ALERT_MARK, Collector
+from leasewatch.connectors import Batch
 
 ON = {**ENV, "WEBHOOK_URL": "https://hook.example.com/t", "MAIL_ON_SOURCE": "1"}
 

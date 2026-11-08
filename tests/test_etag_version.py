@@ -1,16 +1,11 @@
 """The ETag follows writes from this connection (total_changes) and from another one (data_version)."""
 from __future__ import annotations
 
-import os
-import sys
 import time
 import unittest
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+import test_web_edge_cases as QW
+from leasewatch.db import Database
 
 
 class EtagVersionTests(QW.Base):

@@ -7,20 +7,17 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import secrets
-import sys
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch import unifi  # noqa: E402
-from leasewatch.connectors import ConnectorError, HostContext  # noqa: E402
-from leasewatch.connectors.unifi import UnifiConnector, _UnifiCfg  # noqa: E402
-from leasewatch.unifi import UnifiClient  # noqa: E402
+from leasewatch import unifi
+from leasewatch.connectors import ConnectorError, HostContext
+from leasewatch.connectors.unifi import UnifiConnector, _UnifiCfg
+from leasewatch.unifi import UnifiClient
 
 USER, PASSWORD = "ro-viewer", "pw-Sekret-9137"
 OS_STA, OS_DEV = "/proxy/network/api/s/default/stat/sta", "/proxy/network/api/s/default/stat/device"

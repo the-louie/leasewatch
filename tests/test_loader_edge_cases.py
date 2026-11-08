@@ -9,13 +9,12 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV  # noqa: E402
-from test_loader import GROUP, LoaderBase, instance, make_dir_dist, make_ep_dist  # noqa: E402
+from _env import FW1_ENV
+from test_loader import GROUP, LoaderBase, instance, make_dir_dist, make_ep_dist
 
-from leasewatch.connectors.opnsense import OpnsenseConnector  # noqa: E402
+from leasewatch.connectors.opnsense import OpnsenseConnector
 
-from leasewatch.connectors import _reset_registry, broken_types, load_problems, registry  # noqa: E402
+from leasewatch.connectors import _reset_registry, broken_types, load_problems, registry
 
 LOG = "leasewatch.connectors.loader"
 
@@ -155,7 +154,7 @@ class TestUnload(LoaderBase):
             f.write("V = 1\n")
         self.use_dir()
         registry()
-        import lwt_lazy.late  # noqa: F401  (what a plugin's collect() may do)
+        import lwt_lazy.late  # noqa: F401
         _reset_registry()
         self.assertNotIn("lwt_lazy.late", sys.modules)
 

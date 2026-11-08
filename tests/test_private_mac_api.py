@@ -2,14 +2,10 @@
 only: the universally administered MAC is from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
 import csv
 import io
-import os
-import sys
 import unittest
 from dataclasses import replace
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_web import MAC1, S, WebTestCase  # noqa: E402
+from test_web import MAC1, S, WebTestCase
 
 UA = "00:00:5e:00:53:01"     # universally administered (hardware) MAC
 DEV = "02:00:00:00:10:01"    # private, sends a client-id

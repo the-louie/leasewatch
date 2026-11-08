@@ -13,13 +13,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
+from _env import FW1_ENV, clean_env, restore
 
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import (_reset_registry, instances_context, load_problems, registry,  # noqa: E402
+from leasewatch.config import Config
+from leasewatch.connectors import (_reset_registry, instances_context, load_problems, registry,
                                    type_origins)
-from leasewatch.connectors.opnsense import OpnsenseConnector  # noqa: E402
+from leasewatch.connectors.opnsense import OpnsenseConnector
 
 GROUP = "leasewatch.connectors.v1"
 

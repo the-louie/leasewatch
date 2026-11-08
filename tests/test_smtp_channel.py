@@ -6,20 +6,17 @@ import email
 import email.policy
 import os
 import ssl
-import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
-from _smtpfake import FakeSmtp, make_cert, server_tls, silent_listener  # noqa: E402
-from test_instances import FW1, MAC, Base, arp  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.__main__ import startup_line  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from _env import clean_env, restore
+from _smtpfake import FakeSmtp, make_cert, server_tls, silent_listener
+from test_instances import FW1, MAC, Base, arp
+from leasewatch import notify
+from leasewatch.__main__ import startup_line
+from leasewatch.config import Config
 
 DEV = {"mac": "02:00:00:00:00:09", "ip": "10.0.0.9", "hostname": "Alex's iPad ✓", "vendor": "Acme", "vlan": "HomeNet",
        "lease_type": "dynamic"}

@@ -9,8 +9,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from leasewatch.config import REMOVED_VARS  # noqa: E402
-import _netguard  # noqa: E402
+from leasewatch.config import REMOVED_VARS
+import _netguard
 
 # a module run on its own (not through discover) is guarded too; see _netguard.py
 _netguard.install()

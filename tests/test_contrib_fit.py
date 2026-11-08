@@ -10,7 +10,6 @@ import base64
 import http.client
 import json
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -20,16 +19,15 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _contrib import CONTRIB  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
+from _contrib import CONTRIB
+from _env import FW1_ENV, clean_env, restore
 
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import _reset_registry, load_problems, registry, type_origins  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.connectors import _reset_registry, load_problems, registry, type_origins
+from leasewatch.db import Database
+from leasewatch.fw1 import Sighting as Fw1Sighting
+from leasewatch.web import serve
 
 MAC_FW = "02:00:00:00:00:01"      # on the firewall's ARP table and in the leases file
 MAC_LEASE = "02:00:00:00:00:02"   # only in the leases file

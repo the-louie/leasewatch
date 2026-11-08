@@ -1,17 +1,13 @@
 """PURGE_DAYS: validation, the hard delete of long-archived unnamed devices, and its guards."""
 import os
-import sys
-import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import S, FakeClient, row  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+from _case import EnvTmpCase
+from _fixtures import S, FakeClient, row
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.db import Database
 
 DAY = 86400
 T0 = 1_800_000_000
@@ -20,15 +16,10 @@ GONE = "aa:bb:cc:00:00:10"    # archived 200 days ago, unnamed: purged with PURG
 TABLES = ("devices", "history", "events", "seen", "wifi_presence", "aliases")
 
 
-class Base(unittest.TestCase):
+class Base(EnvTmpCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._saved = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
+        super().setUp()
         os.environ.pop("PURGE_DAYS", None)
-
-    def tearDown(self):
-        restore(self._saved)
-        self.tmp.cleanup()
 
     def build(self, **env):
         os.environ.update(env)

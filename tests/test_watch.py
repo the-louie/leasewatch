@@ -6,15 +6,12 @@ import io
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
-from test_ops_write import _Base  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+import test_web_edge_cases as QW
+from test_ops_write import _Base
+from leasewatch.db import Database
 
 
 class MigrationTests(unittest.TestCase):

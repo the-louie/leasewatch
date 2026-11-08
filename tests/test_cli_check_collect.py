@@ -15,11 +15,10 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
+from _env import clean_env, restore
 
-import leasewatch.__main__ as m  # noqa: E402
-from leasewatch.connectors import _reset_registry, registry  # noqa: E402
+import leasewatch.__main__ as m
+from leasewatch.connectors import _reset_registry, registry
 
 GROUP = "leasewatch.connectors.v1"
 SECRET = "pw-Secret-0123456789"

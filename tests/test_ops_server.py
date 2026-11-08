@@ -3,22 +3,17 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 import socket
-import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from leasewatch import auth, web  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+from _env import FW1_ENV, clean_env, restore
+from leasewatch import auth, web
+from leasewatch.config import Config
+from leasewatch.db import Database
 
 ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0"}
 MAC = "aa:bb:cc:dd:ee:01"

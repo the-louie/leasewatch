@@ -4,15 +4,12 @@ Lives in the core suite: contrib code may import only the public connector names
 """
 from __future__ import annotations
 
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _contrib import use_contrib  # noqa: E402
+from _contrib import use_contrib
 
-from leasewatch.connectors import Batch, HostContext  # noqa: E402
-from leasewatch.connectors.merge import normalise_batch  # noqa: E402
+from leasewatch.connectors import Batch, HostContext
+from leasewatch.connectors.merge import normalise_batch
 
 DIST = "leasewatch-mikrotik"
 SERVERS = [{"name": "dhcp-lan", "interface": "bridge-lan"}]

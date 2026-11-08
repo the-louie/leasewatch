@@ -1,8 +1,6 @@
 """The `import-csv` command (leasewatch/importer.py): the device CSV export read back, also as a spreadsheet saves it.
 Synthetic data only: private MACs."""
-import contextlib, csv, hashlib, io, os, sqlite3, sys, tempfile, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contextlib, csv, hashlib, io, os, sqlite3, tempfile, unittest
 from _env import clean_env, restore
 import leasewatch.__main__ as m
 from leasewatch import importer

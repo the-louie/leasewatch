@@ -6,14 +6,11 @@ import sys
 import unittest
 from unittest import mock
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-sys.path.insert(0, HERE)
-import test_web  # noqa: E402
-from test_basic_auth import GOOD, HASH, USER  # noqa: E402
-from test_loader import make_dir_dist  # noqa: E402
-from test_web import WebTestCase  # noqa: E402
-from leasewatch.connectors import _reset_registry, type_report  # noqa: E402
+import test_web
+from test_basic_auth import GOOD, HASH, USER
+from test_loader import make_dir_dist
+from test_web import WebTestCase
+from leasewatch.connectors import _reset_registry, type_report
 
 TYPE_KEYS = {"type", "origin", "dist", "version", "type_version", "instances"}
 

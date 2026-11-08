@@ -7,24 +7,22 @@ import io
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import NOW, S, FakeClient, row  # noqa: E402
-from test_merge_fold import HOST, cand, target  # noqa: E402
-from test_merge_private_mac import NEWP, lease  # noqa: E402
-from test_ops_write import _Base  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import MergeState, merge  # noqa: E402
-from leasewatch.db import Database, normalize_tags  # noqa: E402
+import test_web_edge_cases as QW
+from _case import EnvTmpCase
+from _env import FW1_ENV
+from _fixtures import NOW, S, FakeClient, row
+from test_merge_fold import HOST, cand, target
+from test_merge_private_mac import NEWP, lease
+from test_ops_write import _Base
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.connectors import Batch
+from leasewatch.connectors.merge import MergeState, merge
+from leasewatch.db import Database, normalize_tags
 
 DAY = 86400
 NINE = ",".join(f"t{i}" for i in range(9))
@@ -168,14 +166,8 @@ class ImportTagsTests(unittest.TestCase):
                          "old -> new")
 
 
-class _MergeBase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-        restore(self._env)
+class _MergeBase(EnvTmpCase):
+    pass
 
 
 class ExemptionTests(_MergeBase):
@@ -208,21 +200,20 @@ class ExemptionTests(_MergeBase):
         self.assertEqual(self.prune([self.off(8, self.PRIV, tags="iot")], 7, 0), [])
 
 
-class PurgeTagsTests(unittest.TestCase):
+class PurgeTagsTests(EnvTmpCase):
     T0 = 1_800_000_000
     ANCHOR, GONE, TAGGED = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:10", "aa:bb:cc:00:00:11"
 
+    ENV = {**FW1_ENV, "PURGE_DAYS": "180"}
+
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self._saved = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name, "PURGE_DAYS": "180"})
+        super().setUp()
         self.cfg = Config()
         self.db = Database(self.cfg.db_path)
         self.col = Collector(self.cfg, self.db, FakeClient([S(self.ANCHOR, "10.0.0.2", "anchor")]))
 
     def tearDown(self) -> None:
         self.db._conn.close()
-        restore(self._saved)
-        self.tmp.cleanup()
 
     def poll(self, at: int) -> None:
         with mock.patch("leasewatch.collector.time.time", lambda: at):

@@ -1,17 +1,13 @@
 """The write side of a fold: the private row's history, events, seen and Wi-Fi rows move to the device, its `new`
 event and its device row go, and an alias row takes its place. End to end through Collector.run_once with a fake
 firewall. Synthetic data only."""
-import os
-import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1  # noqa: E402
-import test_merge_private_mac  # noqa: E402
-from test_merge_private_mac import DEV, MAIL, NEWP  # noqa: E402
-from leasewatch.collector import HISTORY_PER_MAC  # noqa: E402
+from test_instances import FW1
+import test_merge_private_mac
+from test_merge_private_mac import DEV, MAIL, NEWP
+from leasewatch.collector import HISTORY_PER_MAC
 
 HOST = "alex-laptop"  # "laptop" alone is a generic name and never merges
 T0 = 1_800_000_000

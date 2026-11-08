@@ -1,6 +1,5 @@
 """The two control-character patterns differ on purpose: stored text keeps tab/newline, mail/webhook text does not."""
-import os, sys, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import unittest
 from leasewatch.connectors.merge import _str
 from leasewatch.db import CONTROL_CHARS
 from leasewatch.notify import _LINE_UNSAFE

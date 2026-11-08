@@ -1,20 +1,16 @@
 """Collector.close(): every connector closed once at shutdown, bounded by the instance TIMEOUT and a total cap."""
 from __future__ import annotations
 
-import os
-import sys
 import threading
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_instances import FW1, Base  # noqa: E402
-from test_basic_auth import FW1_ENV, clean_env, restore  # noqa: E402
-from test_unifi_session import USER, PASSWORD, Controller  # noqa: E402
-from leasewatch import __main__ as cli  # noqa: E402
-from leasewatch import collector as collector_mod  # noqa: E402
+from test_instances import FW1, Base
+from test_basic_auth import FW1_ENV, clean_env, restore
+from test_unifi_session import USER, PASSWORD, Controller
+from leasewatch import __main__ as cli
+from leasewatch import collector as collector_mod
 
 TWO = {"LW_CONNECTORS": "fw1,second", **FW1, "LW_CONNECTOR__SECOND__TYPE": "opnsense",
        "LW_CONNECTOR__SECOND__URL": "https://fw2.example.lan", "LW_CONNECTOR__SECOND__KEY": "k2",

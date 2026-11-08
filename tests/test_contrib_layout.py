@@ -9,9 +9,8 @@ import subprocess
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _contrib import CONTRIB, ROOT, contrib_dists, use_contrib  # noqa: E402
-import _netguard  # noqa: E402
+from _contrib import CONTRIB, ROOT, contrib_dists, use_contrib
+import _netguard
 
 README = os.path.join(CONTRIB, "README.md")
 PUBLIC_MODULE = "leasewatch.connectors"

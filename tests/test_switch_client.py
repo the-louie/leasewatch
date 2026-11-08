@@ -2,10 +2,8 @@
 
 Synthetic data only; the switch is a FakeWalker behind the fake pysnmp module of test_switch_profiles.
 """
-import asyncio, os, sys, unittest
+import asyncio, sys, unittest
 from unittest import mock
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 from test_switch_profiles import CFG, VTP, FakePysnmp, FakeWalker, add_rows
 from leasewatch import snmp_profiles

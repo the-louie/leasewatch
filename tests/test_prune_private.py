@@ -1,31 +1,19 @@
 """PRUNE_PRIVATE_DAYS: a shorter archive threshold for private MACs that never merged. Synthetic data only."""
 import os
-import sys
-import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import NOW, row  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import MergeState, merge  # noqa: E402
+from _case import EnvTmpCase
+from _fixtures import NOW, row
+from leasewatch.config import Config
+from leasewatch.connectors import Batch
+from leasewatch.connectors.merge import MergeState, merge
 
 DAY = 86400
 PRIV = "02:00:00:00:40:01"
 HW = "00:00:5e:00:53:41"
 
 
-class PrunePrivateTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self):
-        self.tmp.cleanup()
-        restore(self._env)
-
+class PrunePrivateTests(EnvTmpCase):
     def run_merge(self, prev, private=0, prune=0, **state):
         os.environ["PRUNE_PRIVATE_DAYS"] = str(private)
         os.environ["PRUNE_DAYS"] = str(prune)

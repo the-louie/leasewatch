@@ -13,16 +13,15 @@ import threading
 import unittest
 from unittest import mock
 
+import test_web
+from _env import FW1_ENV, clean_env, restore
+from test_web import CSP, MAC2, WebTestCase
+from leasewatch import __main__ as cli
+from leasewatch import auth
+from leasewatch.config import Config
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.join(HERE, "..")
-sys.path.insert(0, REPO)
-sys.path.insert(0, HERE)
-import test_web  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_web import CSP, MAC2, WebTestCase  # noqa: E402
-from leasewatch import __main__ as cli  # noqa: E402
-from leasewatch import auth  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
 
 USER = "alex"
 PASSWORD = "correct horse battery"  # a known string the log and the CLI output must never carry
@@ -73,7 +72,7 @@ class HashTests(unittest.TestCase):
 
 class ParseBasicTests(unittest.TestCase):
     def test_cases(self):
-        enc = lambda raw: "Basic " + base64.b64encode(raw).decode()  # noqa: E731
+        enc = lambda raw: "Basic " + base64.b64encode(raw).decode()
         self.assertEqual(auth.parse_basic(GOOD), (USER, PASSWORD))
         self.assertEqual(auth.parse_basic(basic(USER, PASSWORD, "bAsIc")), (USER, PASSWORD))
         self.assertEqual(auth.parse_basic(basic("u", "a:b:c")), ("u", "a:b:c"))  # split on the first colon

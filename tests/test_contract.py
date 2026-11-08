@@ -2,20 +2,17 @@
 connector type, each with a fake client as in test_connectors. Synthetic data only; no network."""
 from __future__ import annotations
 
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch.connectors import Connector, HostContext, make_host_mask, mask_url_host  # noqa: E402
-from leasewatch.connectors.opnsense import OpnsenseConnector  # noqa: E402
-from leasewatch.connectors.snmp_switch import SnmpSwitchConnector  # noqa: E402
-from leasewatch.connectors.testing import ConnectorContractTests  # noqa: E402
-from leasewatch.connectors.unifi import UnifiConnector  # noqa: E402
-from leasewatch.fw1 import Fw1Error  # noqa: E402
-from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
-from leasewatch.switch import build_snapshot  # noqa: E402
-from leasewatch.unifi import parse_clients  # noqa: E402
+from leasewatch.connectors import Connector, HostContext, make_host_mask, mask_url_host
+from leasewatch.connectors.opnsense import OpnsenseConnector
+from leasewatch.connectors.snmp_switch import SnmpSwitchConnector
+from leasewatch.connectors.testing import ConnectorContractTests
+from leasewatch.connectors.unifi import UnifiConnector
+from leasewatch.fw1 import Fw1Error
+from leasewatch.fw1 import Sighting as Fw1Sighting
+from leasewatch.switch import build_snapshot
+from leasewatch.unifi import parse_clients
 
 NOW = 1_800_000_000
 WRONG = "wrong-credential-value"

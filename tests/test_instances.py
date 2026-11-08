@@ -3,7 +3,6 @@ log-on-change, status meta and /api/status. Fake connector types only; nothing h
 import http.client
 import json
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -11,17 +10,15 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore, sources, swap_client  # noqa: E402
-from _fixtures import FakeClient  # noqa: E402
-from leasewatch.collector import MAX_BACKOFF, SKIPPED, Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo,  # noqa: E402
+from _env import clean_env, restore, sources, swap_client
+from _fixtures import FakeClient
+from leasewatch.collector import MAX_BACKOFF, SKIPPED, Collector
+from leasewatch.config import Config
+from leasewatch.connectors import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo,
                                    Setting, SettingsMixin, Sighting, registry)
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
+from leasewatch.db import Database
+from leasewatch.fw1 import Sighting as Fw1Sighting
+from leasewatch.web import serve
 
 MAC = "02:00:00:00:00:01"
 FW1 = {"LW_CONNECTOR__FW1__TYPE": "opnsense", "LW_CONNECTOR__FW1__URL": "https://fw1.example.lan",

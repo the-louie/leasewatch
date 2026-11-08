@@ -16,15 +16,14 @@ import threading
 import time
 import unittest
 
+from _env import FW1_ENV, clean_env, restore
+import test_web as TW
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.db import Database
+from leasewatch import web
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-import test_web as TW  # noqa: E402  (module import: its TestCase classes are not collected twice)
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch import web  # noqa: E402
 
 MAC = "02:00:00:00:00:01"
 ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0", "POLL_SECONDS": "120",

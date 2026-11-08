@@ -4,16 +4,13 @@ Synthetic data only; no network (every socket call in these stubs is stopped by 
 from __future__ import annotations
 
 import json
-import os
 import socket
-import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext,  # noqa: E402
+from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext,
                                    Setting, Sighting, make_host_mask)
-from leasewatch.connectors.testing import ConnectorContractTests  # noqa: E402
+from leasewatch.connectors.testing import ConnectorContractTests
 
 NOW = 1_800_000_000
 
@@ -72,7 +69,7 @@ class NoNetworkTests(unittest.TestCase):
             def validate(self) -> list[str]:
                 try:
                     socket.getaddrinfo("router.example.lan", 443)
-                except Exception:  # noqa: BLE001 - the broad except under test
+                except Exception:
                     return []
                 return []
         self.assertTrue(failed(run(C, self.T)))
@@ -83,7 +80,7 @@ class NoNetworkTests(unittest.TestCase):
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                     try:
                         s.sendto(b"x", ("10.0.0.2", 161))
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         pass
                 return []
         self.assertTrue(failed(run(C, self.T)))
@@ -94,7 +91,7 @@ class NoNetworkTests(unittest.TestCase):
                 def validate(self, fn: str = fn) -> list[str]:
                     try:
                         getattr(socket, fn)("router.example.lan")
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         pass
                     return []
             with self.subTest(fn=fn):
@@ -106,7 +103,7 @@ class NoNetworkTests(unittest.TestCase):
             def validate(self) -> list[str]:
                 try:
                     socket.getnameinfo(("10.0.0.2", 0), 0)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 return []
         self.assertTrue(failed(run(C, self.T)))

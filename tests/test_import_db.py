@@ -3,13 +3,11 @@ restores or unwatches; overwrite applies every present field; one transaction; e
 user-field rules. Synthetic data only: private MACs."""
 import os
 import sqlite3
-import sys
 import tempfile
 import threading
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch.db import Database, ImportResult  # noqa: E402
+from leasewatch.db import Database, ImportResult
 
 A = "02:00:00:00:40:01"
 B = "02:00:00:00:40:02"

@@ -2,22 +2,18 @@
 loop error logging, unknown types, status meta, mail retries, producer stats. Fake connectors only; no network."""
 import ast
 import logging
-import os
 import sqlite3
-import sys
 import threading
 import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, MAC, Base, arp  # noqa: E402
-from leasewatch import collector as collector_mod  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.collector import EVENT_DAYS, HISTORY_PER_MAC, Collector  # noqa: E402
-from leasewatch.connectors import Batch, ConnectorError, Sighting  # noqa: E402
+from test_instances import FW1, MAC, Base, arp
+from leasewatch import collector as collector_mod
+from leasewatch import notify
+from leasewatch.collector import EVENT_DAYS, HISTORY_PER_MAC, Collector
+from leasewatch.connectors import Batch, ConnectorError, Sighting
 
 DAY = 86400
 

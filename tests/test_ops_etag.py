@@ -3,20 +3,15 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 import re
-import sys
 import time
 import unittest
 from unittest import mock
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_web_edge_cases as QW  # noqa: E402
-from leasewatch import web  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.fw1 import Sighting  # noqa: E402
+import test_web_edge_cases as QW
+from leasewatch import web
+from leasewatch.collector import Collector
+from leasewatch.fw1 import Sighting
 
 TAG = re.compile(r'^W/"[0-9a-f]{8}\.\d+\.\d+\.[01][01][01]\.[0-9a-f]{1,8}"$')
 

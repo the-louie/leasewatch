@@ -1,10 +1,7 @@
 """Alias MAC resolution in the web/db layer (synthetic data only)."""
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_web import MAC2, WebTestCase  # noqa: E402
+from test_web import MAC2, WebTestCase
 
 ALIAS = "02:00:00:00:30:99"  # synthetic private MAC merged into MAC2
 

@@ -4,19 +4,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import unittest
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-sys.path.insert(0, HERE)
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
+from _env import FW1_ENV, clean_env, restore
+from leasewatch.config import Config
+from leasewatch.db import Database
+from leasewatch.web import serve
 
 
 def seed(db: Database) -> None:

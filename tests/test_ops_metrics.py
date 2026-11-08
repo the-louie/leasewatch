@@ -3,17 +3,14 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore, sources  # noqa: E402
-from leasewatch import metrics  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+from _env import clean_env, restore, sources
+from leasewatch import metrics
+from leasewatch.config import Config
+from leasewatch.db import Database
 
 SAMPLE = re.compile(r'^([a-z_]+)(\{[^}]*\})? -?[0-9.e+-]+(inf|nan)?$')
 LABEL = re.compile(r'([a-z_]+)="((?:[^"\\]|\\.)*)"')
@@ -106,7 +103,7 @@ class MetricsTests(unittest.TestCase):
                      "conn.switch.ok": "0", "conn.switch.ms": "20", "conn.switch.count": "0"}.items():
             self.db.set_meta(k, v)
         p = self.m()
-        lab = lambda name: {"name": name, "type": {"fw1": "opnsense", "switch": "snmp_switch"}[name]}  # noqa: E731
+        lab = lambda name: {"name": name, "type": {"fw1": "opnsense", "switch": "snmp_switch"}[name]}
         self.assertEqual(p["leasewatch_connector_ok"], [(lab("fw1"), 1), (lab("switch"), 0)])
         self.assertEqual(p["leasewatch_connector_duration_seconds"], [(lab("fw1"), 1.5), (lab("switch"), 0.02)])
         self.assertEqual(p["leasewatch_connector_count"], [(lab("fw1"), 7), (lab("switch"), 0)])

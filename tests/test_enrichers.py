@@ -1,5 +1,4 @@
-import os, sys, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import sys, unittest
 from leasewatch.switch import build_snapshot, short_ifname
 from leasewatch.unifi import parse_clients
 from leasewatch.fw1 import Fw1Client

@@ -7,18 +7,15 @@ import email
 import email.policy
 import json
 import os
-import sys
 import unittest
 import urllib.parse
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
-from _smtpfake import FakeSmtp  # noqa: E402
-from test_webhook_channel import Hook  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from _env import clean_env, restore
+from _smtpfake import FakeSmtp
+from test_webhook_channel import Hook
+from leasewatch import notify
+from leasewatch.config import Config
 
 DEV = {"mac": "02:00:00:00:00:09", "ip": "10.0.0.9", "hostname": "pad", "vendor": "", "vlan": "", "lease_type": ""}
 SUBJECT, TEXT = "fw1 is down", "fw1: connection refused (3 failed polls)"

@@ -1,18 +1,14 @@
 """Collector.loop: clear last_error text for database errors, one traceback per failed spell, a line on recovery."""
 from __future__ import annotations
 
-import os
 import sqlite3
-import sys
 import threading
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_instances import FW1, Base, arp  # noqa: E402
-from leasewatch.db import db_error_text  # noqa: E402
+from test_instances import FW1, Base, arp
+from leasewatch.db import db_error_text
 
 
 def sqlite_error(cls, text: str, code: int, name: str) -> sqlite3.Error:

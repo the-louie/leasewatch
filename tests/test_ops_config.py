@@ -1,6 +1,4 @@
-import os, sys, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import os, unittest
 from _env import FW1_ENV, clean_env, restore
 from leasewatch.__main__ import startup_line
 from leasewatch.config import Config

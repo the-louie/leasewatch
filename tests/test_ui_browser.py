@@ -13,7 +13,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -21,17 +20,16 @@ import unittest
 from unittest import mock
 import urllib.parse
 
+from _env import FW1_ENV, clean_env, restore, sources, swap_client
+from _fixtures import FakeClient
+from leasewatch.collector import Collector
+from leasewatch.config import Config
+from leasewatch.db import Database
+from leasewatch.fw1 import Sighting
+from leasewatch.unifi import WifiInfo
+from leasewatch.web import serve
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-sys.path.insert(0, HERE)
-from _env import FW1_ENV, clean_env, restore, sources, swap_client  # noqa: E402
-from _fixtures import FakeClient  # noqa: E402
-from leasewatch.collector import Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.fw1 import Sighting  # noqa: E402
-from leasewatch.unifi import WifiInfo  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
 
 RUN_JS = os.path.join(HERE, "browser", "run.js")
 TIMEOUT = 60

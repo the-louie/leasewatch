@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 import sqlite3
-import sys
 import threading
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_instances import FW1, Base  # noqa: E402
-from leasewatch.collector import SOURCE_DOWN_POLLS, Collector, outage_text  # noqa: E402
-from leasewatch.connectors import Batch, ConnectorError  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
+from test_instances import FW1, Base
+from leasewatch.collector import SOURCE_DOWN_POLLS, Collector, outage_text
+from leasewatch.connectors import Batch, ConnectorError
+from leasewatch.web import serve
 
 T0 = 1_800_000_000
 ENV = {"LW_CONNECTORS": "fw1,x", **FW1, "LW_CONNECTOR__X__TYPE": "fake"}

@@ -3,14 +3,10 @@ from __future__ import annotations
 
 import csv
 import io
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_web import MAC1, MAC2, MAC3, WebTestCase  # noqa: E402
-from leasewatch.importer import parse_csv  # noqa: E402
+from test_web import MAC1, MAC2, MAC3, WebTestCase
+from leasewatch.importer import parse_csv
 
 BEFORE = ["mac", "ip", "name", "hostname", "vendor", "vlan", "lease_type", "sources", "online", "link", "switch_port", "via",
           "loc_source", "wifi_ssid", "wifi_ap", "wifi_signal", "first_seen", "last_online", "last_listed", "acked", "private",

@@ -1,8 +1,6 @@
-import json, os, socket, sys, threading, unittest
+import json, os, socket, threading, unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 from leasewatch import fw1, notify, unifi
 from leasewatch.config import Config

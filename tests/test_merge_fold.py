@@ -1,19 +1,14 @@
 """The deferred hostname merge ("fold") in the pure merge: an existing private row nobody touched becomes an alias of
 the older device with its DHCP hostname, once that device is off the wire. Synthetic data only: the universally
 administered MAC is from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
-import os
-import sys
-import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_merge import NOW, arp, row  # noqa: E402
-from test_merge_private_mac import CID, DEV, NEWP, NEWP2, UA_NEW, lease  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import (FOLD_OVERLAP_SECONDS, MERGE_FOLD_DAYS, ConnectorFailure, MergeState,  # noqa: E402
+from _case import EnvTmpCase
+from test_merge import NOW, arp, row
+from test_merge_private_mac import CID, DEV, NEWP, NEWP2, UA_NEW, lease
+from leasewatch.config import Config
+from leasewatch.connectors import Batch
+from leasewatch.connectors.merge import (FOLD_OVERLAP_SECONDS, MERGE_FOLD_DAYS, ConnectorFailure, MergeState,
                                          merge)
 
 HOST = "alex-laptop"
@@ -33,15 +28,7 @@ def cand(mac=NEWP, **kw):
     return row(mac, **{"hostname": HOST, "first_seen": T, "split_from": "", **kw})
 
 
-class FoldTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self):
-        self.tmp.cleanup()
-        restore(self._env)
-
+class FoldTests(EnvTmpCase):
     def run_merge(self, prev, sightings, aliases=None, extra=None, **state):
         prev = {r["mac"]: r for r in prev}
         st = MergeState(aliases=dict(aliases or {}), **state)

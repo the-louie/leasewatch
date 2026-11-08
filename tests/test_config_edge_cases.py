@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 from leasewatch.config import Config, _env_int, _host_only, parse_instances
 

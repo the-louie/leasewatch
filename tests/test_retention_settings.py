@@ -3,33 +3,24 @@ import http.client
 import json
 import logging
 import os
-import sys
-import tempfile
 import threading
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from _fixtures import S, FakeClient  # noqa: E402
-from leasewatch.collector import EVENT_DAYS, HISTORY_PER_MAC, Collector  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
-from leasewatch.web import serve  # noqa: E402
+from _case import EnvTmpCase
+from _env import FW1_ENV
+from _fixtures import S, FakeClient
+from leasewatch.collector import EVENT_DAYS, HISTORY_PER_MAC, Collector
+from leasewatch.config import Config
+from leasewatch.db import Database
+from leasewatch.web import serve
 
 MAC = "aa:bb:cc:dd:ee:01"
 DAY = 86400
 
 
-class Base(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._saved = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0"})
-
-    def tearDown(self):
-        restore(self._saved)
-        self.tmp.cleanup()
+class Base(EnvTmpCase):
+    ENV = {**FW1_ENV, "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "0"}
 
     def build(self, **env):
         os.environ.update(env)

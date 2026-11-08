@@ -5,22 +5,20 @@ import json
 import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from leasewatch import db as dbmod  # noqa: E402
-from leasewatch.db import AlreadyADevice, Database  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import MergeState, merge  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_merge import NOW, S, row  # noqa: E402
-import test_ops_write as OW  # noqa: E402  (module import: its TestCase classes are not collected twice)
+from leasewatch import db as dbmod
+from leasewatch.db import AlreadyADevice, Database
+from leasewatch.config import Config
+from leasewatch.connectors import Batch
+from leasewatch.connectors.merge import MergeState, merge
+from _case import EnvTmpCase
+from test_merge import NOW, S, row
+import test_ops_write as OW
 
 A, B = "02:00:00:00:00:01", "00:00:5e:00:53:02"
 WITHOUT = [m for m in dbmod.MIGRATIONS if m[1] != "split_from"]
@@ -177,13 +175,7 @@ class SplitAliasTest(unittest.TestCase):
         self.assertEqual(self.db.q("SELECT COUNT(*) FROM events WHERE kind='split'")[0][0], 0)
 
 
-class FirstListingTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-        self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(restore, self._env)
-
+class FirstListingTest(EnvTmpCase):
     def run_merge(self, prev: dict, sightings: list):
         return merge(prev, {"fw1": Batch(sightings=sightings, attachments=[])}, Config(), NOW, MergeState())
 

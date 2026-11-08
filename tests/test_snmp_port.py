@@ -2,9 +2,7 @@
 
 Synthetic data only; the switch is a FakeWalker behind the fake pysnmp module of test_switch_profiles.
 """
-import contextlib, io, logging, os, sys, unittest
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contextlib, io, logging, os, unittest
 from _env import clean_env, restore, sources
 from test_switch_profiles import FakePysnmp, FakeWalker
 from leasewatch.__main__ import main

@@ -1,8 +1,6 @@
 """The `backup` and `vacuum` commands (leasewatch/maintenance.py)."""
 import contextlib, io, os, re, sqlite3, stat, sys, tempfile, threading, unittest
 from unittest import mock
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _env import clean_env, restore
 import leasewatch.__main__ as m
 from leasewatch import maintenance

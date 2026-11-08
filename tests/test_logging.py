@@ -7,8 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from leasewatch.__main__ import _JsonFormatter  # noqa: E402
+from leasewatch.__main__ import _JsonFormatter
 
 
 def run_service(**extra) -> str:

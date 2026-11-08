@@ -1,23 +1,18 @@
 """A new private (locally administered) MAC merged into the device it matches (client-id, then hostname),
 the alias rewrite of its records, the `merged` event, and no new-device mail for private MACs. Synthetic data only:
 the universally administered MACs are from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
-import os
-import sys
-import tempfile
 import unittest
 from dataclasses import replace
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, Base  # noqa: E402
-from _env import FW1_ENV, clean_env, restore  # noqa: E402
-from test_merge import NOW, S, arp, row, port  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
-from leasewatch.connectors import Batch  # noqa: E402
-from leasewatch.connectors.merge import (MERGE_HOLD_SECONDS, MERGE_RECENT_DAYS, ConnectorFailure, MergeState,  # noqa: E402
+from test_instances import FW1, Base
+from _case import EnvTmpCase
+from test_merge import NOW, S, arp, row, port
+from leasewatch.config import Config
+from leasewatch.connectors import Batch
+from leasewatch.connectors.merge import (MERGE_HOLD_SECONDS, MERGE_RECENT_DAYS, ConnectorFailure, MergeState,
                                          _merge_host, is_private_mac, merge)
-from leasewatch.fw1 import Sighting as Fw1Sighting  # noqa: E402
+from leasewatch.fw1 import Sighting as Fw1Sighting
 
 DEV = "02:00:00:00:10:01"     # the known device (its key)
 NEWP = "06:00:00:00:10:02"    # a new private MAC
@@ -32,15 +27,7 @@ def lease(mac, ip="10.0.0.7", host="", cid="", presence=True):
     return replace(S(mac, ip, host, presence=presence), client_id=cid)
 
 
-class RuleTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
-    def tearDown(self):
-        self.tmp.cleanup()
-        restore(self._env)
-
+class RuleTests(EnvTmpCase):
     def run_merge(self, prev, sightings, attachments=(), aliases=None, **state):
         prev = {r["mac"]: r for r in prev}
         st = MergeState(aliases=dict(aliases or {}), **state)

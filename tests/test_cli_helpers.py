@@ -8,17 +8,15 @@ import argparse
 import dataclasses
 import json
 import os
-import sys
 import threading
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_cli_check_collect import CliBase, inst  # noqa: E402
+from test_cli_check_collect import CliBase, inst
 
-import leasewatch.__main__ as m  # noqa: E402
-from leasewatch.connectors import Batch, Sighting, registry  # noqa: E402
+import leasewatch.__main__ as m
+from leasewatch.connectors import Batch, Sighting, registry
 
 
 class Spec:
@@ -324,10 +322,10 @@ class TestStatsReport(unittest.TestCase):
             def __str__(self) -> str:
                 raise ZeroDivisionError
 
-            __format__ = lambda self, spec: 1 / 0  # noqa: E731
+            __format__ = lambda self, spec: 1 / 0
 
         class K(str):
-            __format__ = lambda self, spec: 1 / 0  # noqa: E731
+            __format__ = lambda self, spec: 1 / 0
 
         class D:
             def __str__(self) -> str:

@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from leasewatch.unifi import parse_integration_clients  # noqa: E402
+from leasewatch.unifi import parse_integration_clients
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "unifi_integration")
 

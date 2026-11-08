@@ -1,8 +1,7 @@
 """The collector's Wi-Fi presence rows: the upsert, the retention and the WIFI_PRESENCE_DAYS setting. Synthetic data only."""
-import os, sys, tempfile, unittest
+import os, unittest
 from unittest import mock
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _case import EnvTmpCase
 from _env import FW1_ENV, clean_env, restore, sources, swap_client
 from _fixtures import FakeClient
 from leasewatch.collector import Collector
@@ -19,13 +18,9 @@ def arp(mac, ip="10.0.0.5"):
     return Sighting(mac=mac, ip=ip, hostname="", vendor="Acme", vlan="Clients", iface="opt3", source="arp", lease_type="", online=True)
 
 
-class WifiCollectorTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._env = clean_env({**FW1_ENV, "DATA_DIR": self.tmp.name})
-
+class WifiCollectorTests(EnvTmpCase):
     def tearDown(self):
-        self.db._conn.close(); self.tmp.cleanup(); restore(self._env)
+        self.db._conn.close()
 
     def build(self, days=None, macs=(MAC,)):
         if days is not None:

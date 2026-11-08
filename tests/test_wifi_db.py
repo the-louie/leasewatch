@@ -5,15 +5,13 @@ import hashlib
 import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from leasewatch import db as dbmod  # noqa: E402
-from leasewatch.db import Database  # noqa: E402
+from leasewatch import db as dbmod
+from leasewatch.db import Database
 
 A, B, C = "02:00:00:00:00:01", "02:00:00:00:00:02", "00:00:5e:00:53:03"
 COLS = ["mac", "ssid", "first_seen", "last_seen", "seconds_seen", "polls_seen", "last_ap"]

@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from _env import clean_env, restore
+from leasewatch import notify
+from leasewatch.config import Config
 
 PUB = "https://leases.example.lan"
 

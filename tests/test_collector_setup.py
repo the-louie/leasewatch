@@ -2,18 +2,14 @@
 a connector's constructor, device_names() while connectors are built, the 'changed' count during the wait. Fake
 connectors only; no network."""
 import logging
-import os
-import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_instances import FW1, MAC, Base, Fake, arp  # noqa: E402
-import test_collector_edge_cases as cedge  # noqa: E402
-from leasewatch import collector as collector_mod  # noqa: E402
-from leasewatch.collector import MAX_BACKOFF  # noqa: E402
-from leasewatch.connectors import Batch, HostContext, InstanceSpec, Sighting, registry  # noqa: E402
+from test_instances import FW1, MAC, Base, Fake, arp
+import test_collector_edge_cases as cedge
+from leasewatch import collector as collector_mod
+from leasewatch.collector import MAX_BACKOFF
+from leasewatch.connectors import Batch, HostContext, InstanceSpec, Sighting, registry
 
 
 class _Exits(Fake):

@@ -7,17 +7,14 @@ import hashlib
 import hmac
 import json
 import os
-import sys
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _env import clean_env, restore  # noqa: E402
-from leasewatch import notify  # noqa: E402
-from leasewatch.config import Config  # noqa: E402
+from _env import clean_env, restore
+from leasewatch import notify
+from leasewatch.config import Config
 
 DEV = {"mac": "02:00:00:00:00:09", "ip": "10.0.0.9", "hostname": "Alex's iPad", "vendor": "Acme", "vlan": "HomeNet",
        "lease_type": "dynamic"}

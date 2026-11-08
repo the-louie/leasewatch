@@ -3,7 +3,6 @@ import asyncio, os, sys, types, unittest
 from unittest import mock
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(__file__))
 from leasewatch import switch
 from leasewatch.connectors import HostContext
 from leasewatch.connectors.snmp_switch import SnmpSwitchConnector

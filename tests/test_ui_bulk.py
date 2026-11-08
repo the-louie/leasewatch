@@ -2,14 +2,10 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_ops_write as OW  # noqa: E402
+import test_ops_write as OW
 
 MACS = [f"02:00:00:00:01:{n:02x}" for n in range(1, 4)]
 ALIAS = "06:00:00:00:09:01"
