@@ -1,4 +1,6 @@
 """Device presence over MQTT: one state and one attributes topic per selected device, a stats topic and a status topic.
+With discovery on, Home Assistant also gets a device_tracker config per device and four sensor configs; with discovery
+off, the configs from an earlier run are cleared once. A birth message from Home Assistant sends everything again.
 
 The collector calls publish_poll() after each good poll. Only what changed since the last publish goes out (all of it
 after a (re)connect); a device that leaves the selection has its retained messages cleared. The ids that have retained
@@ -28,6 +30,9 @@ from .notify import _tls_context
 log = logging.getLogger("leasewatch.mqtt_pub")
 
 META_PUBLISHED = "mqtt.published"
+META_CLEARED = "mqtt.discovery_cleared"
+SUPPORT_URL = "https://github.com/the-louie/leasewatch"
+SENSORS = {"devices": "Devices", "online": "Online", "unacked": "Not yet known", "new": "New"}  # stats key -> name
 
 
 def node_id(cfg: Config) -> str:
@@ -62,7 +67,7 @@ class Publisher:
         self.client: Client | None = None
         self.full = True
         self.birth_seen = False
-        self.last: dict[str, tuple[str, str]] = {}  # id -> (state, attributes JSON) as last published
+        self.last: dict[str, tuple[str, str, str]] = {}  # id -> (state, attributes JSON, config JSON) as last published
         self.published: set[str] = set()  # ids that may have retained messages on the broker
 
     @property
@@ -144,6 +149,39 @@ class Publisher:
             "mac": mac,
         })
 
+    def _device_config(self, r: dict, i: str) -> str:
+        b, node = self.base, node_id(self.cfg)
+        mac = r["mac"].lower()
+        name = r.get("name") or r.get("hostname") or mac
+        device: dict = {"identifiers": [f"{node}_{i}"], "connections": [["mac", mac]], "name": name, "via_device": node}
+        if r.get("vendor"):
+            device["manufacturer"] = r["vendor"]
+        return _json({
+            "name": name, "unique_id": f"{node}_{i}",
+            "state_topic": f"{b}/device/{i}/state", "json_attributes_topic": f"{b}/device/{i}/attributes",
+            "payload_home": "home", "payload_not_home": "not_home", "source_type": "router",
+            "availability_topic": f"{b}/status", "payload_available": "online", "payload_not_available": "offline",
+            "device": device, "origin": self._origin(),
+        })
+
+    def _origin(self) -> dict:
+        return {"name": "leasewatch", "sw_version": self.version, "support_url": SUPPORT_URL}
+
+    def _sensor_topic(self, key: str) -> str:
+        return f"{self.cfg.mqtt_discovery_prefix}/sensor/{node_id(self.cfg)}/{key}/config"
+
+    def _sensor_config(self, key: str) -> str:
+        node = node_id(self.cfg)
+        device: dict = {"identifiers": [node], "name": f"leasewatch {self.cfg.site_name}", "manufacturer": "leasewatch",
+                        "sw_version": self.version}
+        if self.cfg.public_url:
+            device["configuration_url"] = self.cfg.public_url
+        return _json({
+            "name": SENSORS[key], "unique_id": f"{node}_{key}", "state_topic": f"{self.base}/stats",
+            "value_template": "{{ value_json." + key + " }}", "state_class": "measurement",
+            "availability_topic": f"{self.base}/status", "device": device, "origin": self._origin(),
+        })
+
     def _require(self) -> Client:
         if self.client is None:
             raise MqttError("mqtt: not connected")
@@ -160,21 +198,37 @@ class Publisher:
                 for topic, payload in client.poll_incoming():
                     if topic == birth and payload == b"online":
                         self.birth_seen = True
+                if self.birth_seen:  # Home Assistant (re)started: send everything again
+                    self.full = True
+                    self.birth_seen = False
+                discovery = self.cfg.mqtt_discovery_on
+                config_base = f"{self.cfg.mqtt_discovery_prefix}/device_tracker/{node_id(self.cfg)}"
                 want: dict[str, dict] = {device_id(r["mac"]): r for r in self.selected(rows)}
+                cleared = self.db.get_meta(META_CLEARED, "0") == "1" if self.full else True
+                if self.full and not discovery and not cleared:
+                    for i in sorted(self.published & set(want)):
+                        client.publish(f"{config_base}/{i}/config", b"", qos=1, retain=True)
+                    for key in SENSORS:
+                        client.publish(self._sensor_topic(key), b"", qos=1, retain=True)
                 for i, r in want.items():
                     state = "home" if r.get("online") else "not_home"
                     attrs = self._attributes(r)
+                    conf = self._device_config(r, i) if discovery else ""
                     old = None if self.full else self.last.get(i)
-                    if old is not None and old == (state, attrs):
+                    if old is not None and old == (state, attrs, conf):
                         continue
                     self.published.add(i)
+                    if conf and (old is None or old[2] != conf):
+                        client.publish(f"{config_base}/{i}/config", conf, qos=1, retain=True)
                     if old is None or old[0] != state:
                         client.publish(f"{b}/device/{i}/state", state, qos=1, retain=True)
                     if old is None or old[1] != attrs:
                         client.publish(f"{b}/device/{i}/attributes", attrs, qos=1, retain=True)
-                    self.last[i] = (state, attrs)
+                    self.last[i] = (state, attrs, conf)
                     sent += 1
-                config_base = f"{self.cfg.mqtt_discovery_prefix}/device_tracker/{node_id(self.cfg)}"
+                if self.full and discovery:
+                    for key in SENSORS:
+                        client.publish(self._sensor_topic(key), self._sensor_config(key), qos=1, retain=True)
                 for i in sorted((self.published | set(self.last)) - set(want)):
                     for topic in (f"{b}/device/{i}/state", f"{b}/device/{i}/attributes", f"{config_base}/{i}/config"):
                         client.publish(topic, b"", qos=1, retain=True)
@@ -185,6 +239,8 @@ class Publisher:
                     "devices": stats.get("total", 0), "online": stats.get("online", 0),
                     "unacked": stats.get("unacked", 0), "new": stats.get("new", 0),
                 }), qos=1, retain=True)
+                if self.full and discovery == cleared:  # off and not yet cleared, or on after a cleared run
+                    self.db.set_meta(META_CLEARED, "0" if discovery else "1")
         finally:
             if self.published != before:
                 try:

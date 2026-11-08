@@ -119,8 +119,54 @@ class PollTests(PubCase):
         self.assertEqual(by_topic[f"lw/device/{ID_B}/state"], (b"not_home", 1, True))
         self.assertIsNone(json.loads(by_topic[f"lw/device/{ID_B}/attributes"][0])["last_online"])
         self.assertEqual(by_topic["lw/stats"], (STATS_JSON, 1, True))
-        self.assertEqual(len(got), 5)
+        self.assertEqual(len(got), 11)  # 2 x (config, state, attributes), 4 sensor configs, stats
         self.assertEqual(json.loads(self.db.get_meta("mqtt.published")), [ID_A, ID_B])
+
+    def test_device_tracker_config_payload(self) -> None:
+        got = {t: (p, q, r) for t, p, q, r in self.poll()}
+        expected = (
+            b'{"availability_topic":"lw/status","device":{"connections":[["mac","02:00:00:00:00:0a"]],'
+            b'"identifiers":["leasewatch_example_home_02000000000a"],"name":"tv","via_device":"leasewatch_example_home"},'
+            b'"json_attributes_topic":"lw/device/02000000000a/attributes","name":"tv",'
+            b'"origin":{"name":"leasewatch","support_url":"https://github.com/the-louie/leasewatch","sw_version":"1.5.0"},'
+            b'"payload_available":"online","payload_home":"home","payload_not_available":"offline",'
+            b'"payload_not_home":"not_home","source_type":"router","state_topic":"lw/device/02000000000a/state",'
+            b'"unique_id":"leasewatch_example_home_02000000000a"}')
+        topic = f"homeassistant/device_tracker/leasewatch_example_home/{ID_A}/config"
+        self.assertEqual(got[topic], (expected, 1, True))
+        conf_b = json.loads(got[topic.replace(ID_A, ID_B)][0])
+        self.assertEqual(conf_b["name"], "host.example.lan")  # no name: the hostname
+        self.assertNotIn("manufacturer", conf_b["device"])
+        self.db.q("UPDATE devices SET vendor='Example Corp' WHERE mac=?", (MAC_A,))
+        self.pub.full = True
+        got = {t: p for t, p, _, _ in self.poll()}
+        self.assertEqual(json.loads(got[topic])["device"]["manufacturer"], "Example Corp")
+
+    def test_sensor_configs_on_first_poll(self) -> None:
+        got = {t: p for t, p, _, _ in self.poll()}
+        base = "homeassistant/sensor/leasewatch_example_home"
+        self.assertEqual([k for k in got if k.startswith(base)],
+                         [f"{base}/{k}/config" for k in ("devices", "online", "unacked", "new")])
+        conf = json.loads(got[f"{base}/unacked/config"])
+        self.assertEqual(conf, {
+            "name": "Not yet known", "unique_id": "leasewatch_example_home_unacked", "state_topic": "lw/stats",
+            "value_template": "{{ value_json.unacked }}", "state_class": "measurement",
+            "availability_topic": "lw/status",
+            "device": {"identifiers": ["leasewatch_example_home"], "name": "leasewatch Example Home",
+                       "manufacturer": "leasewatch", "sw_version": "1.5.0",
+                       "configuration_url": "https://lw.example.lan"},
+            "origin": {"name": "leasewatch", "sw_version": "1.5.0",
+                       "support_url": "https://github.com/the-louie/leasewatch"}})
+        self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)])  # sensors only when full
+
+    def test_name_change_republishes_only_that_config(self) -> None:
+        self.poll()
+        self.db.q("UPDATE devices SET name='lamp' WHERE mac=?", (MAC_B,))
+        got = self.poll()
+        self.assertEqual([g[0] for g in got], [
+            f"homeassistant/device_tracker/leasewatch_example_home/{ID_B}/config", f"lw/device/{ID_B}/attributes",
+            "lw/stats"])
+        self.assertEqual(json.loads(got[0][1])["name"], "lamp")
 
     def test_second_identical_poll_only_stats(self) -> None:
         self.poll()
@@ -148,15 +194,62 @@ class PollTests(PubCase):
             ("lw/stats", STATS_JSON, 1, True)])
         self.assertEqual(json.loads(self.db.get_meta("mqtt.published")), [ID_A])
 
-    def test_birth_message_seen(self) -> None:
-        self.assertFalse(self.pub.birth_seen)
-        self.broker.inject("homeassistant/status", b"online", qos=1)
+    def poll_until_more_than_stats(self) -> list[tuple[str, bytes, int, bool]]:
         for _ in range(100):  # the handler sends it within one tick; each poll reads what has arrived
-            self.poll()
-            if self.pub.birth_seen:
-                break
+            got = self.poll()
+            if len(got) > 1:
+                return got
             self.broker.wait_for(lambda: False, 0.02)
-        self.assertTrue(self.pub.birth_seen)
+        return got
+
+    def test_birth_online_republishes_everything_once(self) -> None:
+        self.poll()
+        self.broker.inject("homeassistant/status", b"online", qos=1)
+        got = self.poll_until_more_than_stats()
+        self.assertEqual(len(got), 11)
+        self.assertFalse(self.pub.birth_seen)
+        self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)])  # the next poll is diff-only
+
+    def test_birth_offline_changes_nothing(self) -> None:
+        self.poll()
+        self.broker.inject("homeassistant/status", b"offline", qos=1)
+        for _ in range(5):
+            self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)])
+            self.broker.wait_for(lambda: False, 0.02)
+
+
+class DiscoveryOffTests(PubCase):
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ["MQTT_DISCOVERY"] = "0"
+        self.pub = self.make()
+        self.db.set_meta("mqtt.published", json.dumps([ID_A, ID_B]))
+        self.pub.connect()
+
+    def test_no_configs_and_stale_ones_cleared_once(self) -> None:
+        got = self.poll()
+        configs = [g for g in got if g[0].startswith("homeassistant/")]
+        base = "homeassistant/%s/leasewatch_example_home"
+        self.assertEqual(sorted(c[0] for c in configs), sorted(
+            [f"{base % 'device_tracker'}/{ID_A}/config", f"{base % 'device_tracker'}/{ID_B}/config"]
+            + [f"{base % 'sensor'}/{k}/config" for k in ("devices", "online", "unacked", "new")]))
+        self.assertTrue(all(c[1] == b"" and c[2:] == (1, True) for c in configs))
+        self.assertEqual(self.db.get_meta("mqtt.discovery_cleared"), "1")
+        self.assertEqual(len(got), 11)
+        self.pub.full = True  # a reconnect: nothing is cleared again
+        self.assertEqual([g for g in self.poll() if g[0].startswith("homeassistant/")], [])
+        p = self.make()  # a restart
+        p.connect()
+        self.assertEqual([g for g in self.poll(p) if g[0].startswith("homeassistant/")], [])
+
+    def test_discovery_on_again_resets_the_flag(self) -> None:
+        self.poll()
+        os.environ["MQTT_DISCOVERY"] = "1"
+        p = self.make()
+        p.connect()
+        got = self.poll(p)
+        self.assertEqual(len([g for g in got if g[0].startswith("homeassistant/") and g[1]]), 6)
+        self.assertEqual(self.db.get_meta("mqtt.discovery_cleared"), "0")
 
 
 class RestartTests(PubCase):
