@@ -16,8 +16,12 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - `PURGE_DAYS` (0-3650, default 0 = off): deletes, once per poll, devices archived longer than that by the prune clock that are offline, not listed by any source for that long, unnamed, without a note and not marked known, with their history, events, Seen-by rows, Wi-Fi history and merged addresses. A purged MAC seen again is a new device. Never at the first poll or while the baseline waits; `python -m leasewatch vacuum` gives the space back.
 - `MAIL_ON_SOURCE=0|1` (default 0): the `source_down`/`source_up` events (a source down 3 polls, and back) are also sent by mail or webhook, one message per poll (webhook `event` `source_down` or `source_up`; one event's subject carries the error or the outage length, e.g. `fw1 is down: connection refused`, `fw1 is back after 2h0m`); a restart during an outage sends nothing new, and old events are not sent when it is turned on.
 - `LOG_FORMAT=plain|json|auto`: JSON log lines for log drivers; under journald the timestamp is left out (journald adds its own).
+- `import-csv` command: restores name, note, acked, archived and watch from the device CSV export (also after a `;` re-save in a spreadsheet); fills empty values by default, `--overwrite`, `--fields` and `--dry-run` available.
+- `reset-baseline` command: marks every listed device as baseline without deleting the database (`--yes`, `--clear-acks`, `--include-archived`).
+- The `owner: <name>` note convention is documented; the note field's placeholder shows it.
 
 ### Changed
+- the README's reset recipe names everything a file delete loses.
 - acked/unacked/archived/restored event details name the client address (and user) instead of being empty.
 
 ## 1.3.0 (2026-11-07)

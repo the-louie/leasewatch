@@ -635,7 +635,7 @@
       </dl>
       <div class="form">
         <label>Name (what this device is)<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="e.g. Alex's iPad"${ro}></label>
-        <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="where it lives, who owns it, anything useful"${ro}>${esc(d.note)}</textarea></label>
+        <label>Note<textarea id="fNote" rows="2" maxlength="1000" placeholder="owner: alex, where it lives, anything useful"${ro}>${esc(d.note)}</textarea></label>
         <div class="actions">${ro ? `
           <span class="muted" id="fReadOnly">${state.meta.role === "ro" ? "Read-only login: this user can look but not change anything" : state.meta.read_only ? "Read-only: changes are off on this server" : "Read-only: changes are off for this address"}</span>` : `
           <button class="btn" id="fSave">Save</button>
