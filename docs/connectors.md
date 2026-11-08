@@ -168,10 +168,19 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   | `lease_type` | the chosen `dhcp` lease only |
 
   "First" follows fixed sort keys (empty IP last, network, IP, static before dynamic, …), so the order in which you
-  return rows never changes the result.
+  return rows never changes the result. `dhcp6` also serves as the last `hostname` fallback and `ndp` as the last
+  `vendor` fallback; the built-in connector leaves `ip`, `network`, `iface` and `lease_type` empty on both.
+- **`ip6`.** Every sighting of any kind may carry one. The candidates of a MAC rank: global (2000::/3) before
+  unique-local (fc00::/7) before the rest; one a `dhcp6` sighting carries before one that is not; the MAC's own
+  EUI-64 address before others; the lowest value last. The stored address is sticky: it stays while it is still among
+  the candidates of the best class, or while no candidate is listed. An `ip6` change writes no history row and no
+  event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device. They must carry
+  `presence=False`: the host does not override the flag, so a `presence=True` there would make the device online.
 - **Which kind to use.** A DHCP lease or reservation: `dhcp`, `presence=False` unless the server says the client
   is online. An ARP/neighbour table entry: `arp`, `presence=True`. A device a controller or access point reports as
-  connected: `client`. A result of an active scan: `scan`.
+  connected: `client`. A result of an active scan: `scan`. An IPv6 neighbour table entry: `ndp`, `presence=False`
+  (an entry has no expiry and can outlive the device by a day). A DHCPv6 lease: `dhcp6`, `presence=False`. Put the
+  address in `ip6`, and leave `ip` empty.
 - **Switch ports** (`link="wired"` from an instance without the controller role): each instance's first wired
   attachment for a MAC is its candidate. An edge (non-uplink) port beats an uplink port; then the instance that
   already holds the device; then the order in `LW_CONNECTORS`. A port with an empty label ranks last. A port is
