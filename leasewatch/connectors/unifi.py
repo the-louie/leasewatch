@@ -1,12 +1,12 @@
 """A UniFi Network controller (self-hosted, or a UniFi OS console) as a connector: Wi-Fi SSID/AP/signal per client, or "wired" for a
-client the controller sees on a cable. A thin wrapper around unifi.UnifiClient (read-only user).
+client the controller sees on a cable. AUTH=session logs in with a read-only user (unifi.UnifiClient); AUTH=apikey sends a controller API key (unifi.UnifiKeyClient).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Mapping
 
-from ..unifi import UnifiClient, WifiInfo
+from ..unifi import UnifiClient, UnifiKeyClient, WifiInfo
 from . import (API_VERSION, Attachment, Batch, ConnectorError, ConnectorInfo, HostContext, Setting, SettingsMixin,
                mask_url_host, parse_bool, url_problems)
 
@@ -34,7 +34,7 @@ def to_attachments(wifi: dict[str, WifiInfo], source: str, observed_at: int) -> 
 
 class UnifiConnector(SettingsMixin):
     INFO = ConnectorInfo(
-        type="unifi", version="1.1", api_version=API_VERSION, produces=frozenset({"attachment"}),
+        type="unifi", version="1.2", api_version=API_VERSION, produces=frozenset({"attachment"}),
         roles=frozenset({"controller"}),
         settings=(
             Setting("url", required=True, help="https://<controller>"),
@@ -56,10 +56,15 @@ class UnifiConnector(SettingsMixin):
         s = self.settings
         s["url"] = s["url"].rstrip("/") or s["url"]  # "/" stays, so validate() calls it malformed, not missing
         verify = parse_bool(s["verify_tls"])
-        # read at call time: the host (and tests) may swap the client object; AUTH=apikey has no client yet, but validate() still runs
-        self.client = client if client is not None else None if s["auth"] == "apikey" else UnifiClient(_UnifiCfg(s["url"], s["site"], s["user"], s["password"],  # type: ignore[arg-type]
-                                                                                  True if verify is None else verify, bool(parse_bool(s["proxy"])),
-                                                                                  s["platform"]))
+        # read at call time: the host (and tests) may swap the client object
+        if client is not None:
+            self.client = client
+        elif s["auth"] == "apikey":
+            self.client = UnifiKeyClient(s["url"], s["site"], s["api_key"], verify_tls=True if verify is None else verify,
+                                         proxy=bool(parse_bool(s["proxy"])))
+        else:
+            self.client = UnifiClient(_UnifiCfg(s["url"], s["site"], s["user"], s["password"],  # type: ignore[arg-type]
+                                               True if verify is None else verify, bool(parse_bool(s["proxy"])), s["platform"]))
 
     def validate(self) -> list[str]:
         problems = self._generic_problems()
@@ -85,14 +90,9 @@ class UnifiConnector(SettingsMixin):
                 problems.append(where + "PASSWORD is required")
         return problems
 
-    def _need_client(self) -> Any:
-        if self.client is None:
-            raise ConnectorError("AUTH=apikey arrives with the key client")
-        return self.client
-
     def check(self) -> None:
         try:
-            self._need_client().clients()  # two reads on the kept session (login first if there is none)
+            self.client.clients()  # two reads on the kept session (login first if there is none)
         except ConnectorError:
             raise
         except Exception as e:  # never the URL or the password, but a TLS name mismatch echoes the host
@@ -100,7 +100,7 @@ class UnifiConnector(SettingsMixin):
 
     def collect(self) -> Batch:
         try:
-            wifi = self._need_client().clients()
+            wifi = self.client.clients()
             return Batch(attachments=to_attachments(wifi, self.name, self.ctx.now()), stats={"clients": len(wifi)})
         except ConnectorError:
             raise

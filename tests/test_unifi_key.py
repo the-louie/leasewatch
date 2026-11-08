@@ -302,5 +302,46 @@ class KeyClientErrors(KeyBase):
         self.assertIn("more than 50 pages", "\n".join(logs.output))
 
 
+class KeyConnector(KeyBase):
+    def conn(self, **kw):
+        from leasewatch.connectors import HostContext
+        from leasewatch.connectors.unifi import UnifiConnector
+        s = {"url": self.con.url, "auth": "apikey", "api_key": KEY, "verify_tls": "0", "platform": "unifi_os", **kw}
+        c = UnifiConnector("unifi", s, HostContext(now=lambda: 1762400000))
+        self.addCleanup(c.close)
+        return c
+
+    def test_check_and_collect(self):
+        c = self.conn()
+        self.assertEqual(c.validate(), [])
+        c.check()
+        b = c.collect()
+        self.assertEqual(b.stats, {"clients": 4})
+        got = {a.mac: a for a in b.attachments}
+        self.assertEqual(set(got), WANT)
+        self.assertEqual(got["02:00:00:00:00:21"].link, "wifi")
+        self.assertEqual(got["02:00:00:00:00:23"].link, "wired")
+        self.assertEqual(got["02:00:00:00:00:21"].alias, "alex-laptop")
+        self.assertEqual(got["02:00:00:00:00:22"].alias, "")
+        for a in b.attachments:
+            self.assertEqual((a.ssid, a.signal, a.present, a.source, a.observed_at), ("", None, True, "unifi", 1762400000))
+        self.assertTrue(all({k.lower(): v for k, v in h.items()}.get("x-api-key") == KEY for _, _, h in self.con.requests))
+        c.close()
+
+    def test_401_text_is_masked(self):
+        from leasewatch.connectors import ConnectorError
+        self.con.status[API + "/sites"] = 401
+        host, port = self.con.url.split("//")[1].split(":")
+        for call in ("check", "collect"):
+            with self.assertLogs("leasewatch.unifi", "DEBUG") as logs:
+                logging.getLogger("leasewatch.unifi").debug("marker")
+                with self.assertRaises(ConnectorError) as cm:
+                    getattr(self.conn(), call)()
+            for text in [str(cm.exception)] + logs.output:
+                for s in (KEY, host, port):
+                    self.assertNotIn(s, text)
+            self.assertEqual(str(cm.exception), "unifi: API key rejected (HTTP 401)")
+
+
 if __name__ == "__main__":
     unittest.main()

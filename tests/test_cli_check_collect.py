@@ -379,5 +379,41 @@ class TestCollect(CliBase):
         self.assertEqual((rc, out), (2, ""))
 
 
+class TestUnifiApiKey(CliBase):
+    """The built-in unifi connector with AUTH=apikey against the local stub console of test_unifi_key."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from test_unifi_key import Console
+        self.con = Console()
+        self.addCleanup(self.con.close)
+        self.env("unifi", inst("unifi", type_="unifi", URL=self.con.url, AUTH="apikey", API_KEY=self.key(),
+                               PLATFORM="unifi_os", VERIFY_TLS="0"))
+        for k in ("PASSWORD", "MODE"):  # inst() sets the synthetic connector's settings
+            os.environ.pop(f"LW_CONNECTOR__UNIFI__{k}")
+
+    @staticmethod
+    def key() -> str:
+        from test_unifi_key import KEY
+        return KEY
+
+    def test_check(self):
+        rc, out, err = self.cli("check", "unifi")
+        self.assertEqual(rc, 0, out + err)
+        self.assertRegex(out.splitlines()[-1], r"^unifi \(unifi\): ok \(\d+ ms\)$")
+        self.assertNotIn(self.key(), out + err)
+
+    def test_collect_json(self):
+        rc, out, err = self.cli("collect", "unifi", "--json")
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn(self.key(), out + err)
+        rep = json.loads(out)
+        self.assertEqual((rep["ok"], rep["stats"]), (True, {"clients": 4, "dropped": 0}))  # the host adds "dropped"
+        self.assertEqual(len(rep["attachments"]), 4)
+        for a in rep["attachments"]:
+            self.assertEqual((a["ssid"], a["signal"], a["present"]), ("", None, True))
+        self.assertEqual({a["link"] for a in rep["attachments"]}, {"wifi", "wired"})
+
+
 if __name__ == "__main__":
     unittest.main()

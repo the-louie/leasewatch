@@ -51,6 +51,9 @@ class DescribeTests(unittest.TestCase):
                 if s.choices and s.default:
                     self.assertIn(s.default, s.choices)
 
+    def test_unifi_version_counts_the_apikey_mode(self):
+        self.assertEqual(UnifiConnector.describe().version, "1.2")
+
     def test_snmp_switch_version_counts_the_1_3_settings(self):
         # PORT, PRIV and the new AUTH names (1.3) are a connector change, as PLATFORM took unifi to 1.1
         self.assertEqual(SnmpSwitchConnector.describe().version, "1.1")
@@ -130,12 +133,11 @@ class ValidateTests(unittest.TestCase):
         self.assertEqual(UnifiConnector("unifi", {"url": "https://unifi.example.lan", "auth": "session"}, CTX).validate(),
                          ["connector unifi (unifi): USER is required", "connector unifi (unifi): PASSWORD is required"])
 
-    def test_unifi_apikey_is_hidden_and_has_no_client_yet(self):
+    def test_unifi_apikey_is_hidden_and_builds_the_key_client(self):
         c = UnifiConnector("unifi", {"url": "https://unifi.example.lan", "auth": "apikey", "api_key": "k-Sekret-77"}, CTX)
         self.assertNotIn("k-Sekret-77", repr(c))
-        with self.assertRaises(ConnectorError) as cm:
-            c.check()
-        self.assertNotIn("k-Sekret-77", str(cm.exception))
+        self.assertNotIn("k-Sekret-77", repr(c.client))
+        self.assertEqual(type(c.client).__name__, "UnifiKeyClient")
         c.close()
 
 
