@@ -78,6 +78,8 @@ New devices are reported through every channel whose settings are complete; any 
   - `json` (default): `{"event": "new_devices", "site": SITE_NAME, "count": 2, "title": "<subject>", "message": "<text>", "url": "<PUBLIC_URL>/?filter=unacked" or null, "devices": [{"mac", "ip", "hostname", "vendor", "vlan", "lease_type", "url": "<PUBLIC_URL>/?device=<mac>" or null}]}`. Readable by Home Assistant webhook triggers, Gotify relays and most automation tools.
   - `ntfy`: `WEBHOOK_URL` is the topic URL (`https://ntfy.example.com/<topic>`, `?auth=…` allowed); leasewatch publishes JSON (`topic`, `title`, `message`, `click`) to the server's root URL. `click` is the device's page for one new device, else the list of unchecked ones. The message is cut to ntfy's 4096 bytes ("… and N more"); a device line and its link are kept or cut together.
   - `discord`: `WEBHOOK_URL` is the channel's webhook URL; the devices are shown in a code block, one link follows the code block (the device's page for one new device, else the list of unchecked ones), the message is cut to Discord's 2000 characters, and mentions are disabled (a hostname cannot ping anyone).
+
+  The `event` field of the JSON format is `new_devices` today; later alerts use `source_down`, `source_up` and `watch` with the same envelope (`site`, `title`, `message`, `url`, `count`, `devices`), so a receiver should branch on `event`.
   
   `WEBHOOK_SECRET` (optional) signs every request per [Standard Webhooks](https://www.standardwebhooks.com/): headers `webhook-id`, `webhook-timestamp` and `webhook-signature: v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">`. A `whsec_<base64>` secret is base64-decoded first (an empty key after `whsec_` is refused at startup); any other value is used as UTF-8 bytes.
 

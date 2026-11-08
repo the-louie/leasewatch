@@ -1,4 +1,4 @@
-"""Notify on new devices through every configured channel: Mailgun HTTP API, SMTP, webhook."""
+"""Notify on new devices (and, through send(), other alerts) through every configured channel: Mailgun HTTP API, SMTP, webhook."""
 from __future__ import annotations
 
 import base64
@@ -69,6 +69,7 @@ class Message:
     url: str = ""  # the review link, "" without PUBLIC_URL
     links: list[str] = field(default_factory=list)  # per device (aligned with `devices`) its page, [] without PUBLIC_URL
     blocks: list[str] = field(default_factory=list)  # per device its text lines (the device line, then its link line)
+    event: str = "new_devices"  # the webhook JSON's "event": new_devices, or source_down, source_up, watch
 
 
 class Channel(Protocol):
@@ -103,6 +104,12 @@ def build_message(cfg: Config, devices: list[dict]) -> Message:
     # no IP and no network: no "()" either
     subject = (f"New device: {who}" + (f" ({where})" if where else "")) if n == 1 else f"{n} new devices on the network"
     return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
+
+
+def build_alert(cfg: Config, subject: str, lines: list[str], event: str) -> Message:
+    """A message without devices (no device blocks, links or review link): the subject, then one text line per entry.
+    Control characters are replaced as in build_message; the subject carries no site prefix, as build_message's."""
+    return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(_LINE_UNSAFE.sub(" ", ln) for ln in lines), event=event)
 
 
 def _send(cfg: Config, subject: str, text: str) -> None:
@@ -272,7 +279,9 @@ class WebhookChannel:
             parts = urllib.parse.urlsplit(url)
             root, _, topic = parts.path.rstrip("/").rpartition("/")
             text = msg.text
-            if len(text.encode()) >= NTFY_MAX:  # ntfy takes a body that reaches the limit as an attachment
+            if len(text.encode()) >= NTFY_MAX and not msg.blocks:  # a message without devices: whole lines only
+                text = "\n".join(_fit_lines(text.split("\n"), NTFY_MAX - 40, lambda s: len(s.encode())))
+            elif len(text.encode()) >= NTFY_MAX:  # ntfy takes a body that reaches the limit as an attachment
                 # build_message's layout: two head lines, one block per device (its line, then its link line), then
                 # the review link (if any). A block is kept or cut whole, so no link is left without its device line
                 rows = text.split("\n")
@@ -292,11 +301,13 @@ class WebhookChannel:
             link = msg.links[0] if len(msg.links) == 1 else msg.url
             tail = f"\n{link}" if link else ""
             # a code block keeps the columns and shows hostnames as plain text; a backtick cannot close it
-            lines = [_device_line(d).replace("`", "'") for d in msg.devices]
+            # a message without devices shows its text lines in the code block instead
+            lines = [_device_line(d).replace("`", "'") for d in msg.devices] if msg.devices else \
+                [ln.replace("`", "'") for ln in msg.text.split("\n")]
             shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
             content = head + "\n```\n" + "\n".join(shown) + "\n```" + tail
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}
-        return url, {"event": "new_devices", "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
+        return url, {"event": msg.event, "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
                      "message": msg.text, "url": msg.url or None,
                      "devices": [{**{k: d.get(k) or "" for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")},
                                   "url": msg.links[i] if msg.links else None} for i, d in enumerate(msg.devices)]}
@@ -414,13 +425,14 @@ class Backoff:
         return {n: st.ok for n, st in self._state.items() if st.ok is not None}
 
 
-def new_devices(cfg: Config, devices: list[dict], backoff: Backoff | None = None) -> list[str]:
-    """Send one message through every channel; return the names that delivered. Raises NotifyError when none did
-    (the caller keeps the queue then); a channel that failed while another delivered is logged here.
+def send(cfg: Config, msg: Message, backoff: Backoff | None = None, what: str = "new devices") -> list[str]:
+    """Send `msg` through every channel; return the names that delivered. Raises NotifyError when none did
+    (the caller keeps the queue then); a channel that failed while another delivered is logged here. `what` names
+    the message in the log lines ("new devices"; a message without devices is logged by `what` alone).
 
     With a backoff, a channel that waits out its backoff is not called and counts as failed for this batch (it misses
-    it, as a channel that failed). When every channel waits, NotifyDeferred is raised and nothing was called."""
-    msg = build_message(cfg, devices)
+    it, as a channel that failed). When every channel waits, NotifyDeferred is raised and nothing was called. One
+    backoff shared by every kind of message: a channel that failed for one waits for all."""
     chans = channels(cfg)
     if not chans:
         raise NotifyError("no notification channel configured")
@@ -452,14 +464,17 @@ def new_devices(cfg: Config, devices: list[dict], backoff: Backoff | None = None
                                 for f in traceback.extract_tb(e.__traceback__))
                 log.error("%s failed unexpectedly: %s\nTraceback (most recent call last):%s", ch.name,
                           type(e).__name__, redact(stack))
-    n = len(devices)
+    n = len(msg.devices)
+    # counts and `what` only: the subject carries hostname, IP and network, which do not belong in the logs
+    failed_what = f"{n} device(s)" if n else what
+    sent_what = (f"{n} {what[:-1] if n == 1 and what.endswith('s') else what}") if n else what
     if backoff is not None:
         for name, e in errors:
             if backoff.failed(name, e):
-                log.warning("%s failed (%d device(s)): %s; retrying with backoff up to %d min", name, n, e,
+                log.warning("%s failed (%s): %s; retrying with backoff up to %d min", name, failed_what, e,
                             BACKOFF_CAP // 60)
             else:
-                log.debug("%s failed again (%d device(s)): %s", name, n, e)
+                log.debug("%s failed again (%s): %s", name, failed_what, e)
     if not ok:
         if not errors:
             raise NotifyDeferred("every channel is waiting out its backoff")
@@ -467,7 +482,11 @@ def new_devices(cfg: Config, devices: list[dict], backoff: Backoff | None = None
             raise errors[0][1]
         raise NotifyError("; ".join(str(e) for _, e in errors))
     for name, e in errors if backoff is None else ():
-        log.warning("%s failed (%d device(s)): %s", name, n, e)
-    # a count only: the subject carries hostname, IP and network, which do not belong in the logs
-    log.info("mail sent: %d new device%s (%s)", n, "s" if n != 1 else "", ", ".join(ok))
+        log.warning("%s failed (%s): %s", name, failed_what, e)
+    log.info("mail sent: %s (%s)", sent_what, ", ".join(ok))
     return ok
+
+
+def new_devices(cfg: Config, devices: list[dict], backoff: Backoff | None = None) -> list[str]:
+    """Send one message on `devices` through every channel (see send); the collector's call."""
+    return send(cfg, build_message(cfg, devices), backoff, "new devices")
