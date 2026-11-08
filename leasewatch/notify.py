@@ -25,6 +25,7 @@ from typing import Protocol
 from . import __version__
 from .config import Config
 from .connectors import build_opener, make_redactor, parse_bool
+from .mqtt import Client, MqttError
 
 log = logging.getLogger("leasewatch.notify")
 # hostnames come from DHCP clients: a CR/LF (or other control char) in the subject would inject mail headers
@@ -270,6 +271,18 @@ def _md_escape(text: str) -> str:
     return re.sub(r"([\\*_~`|>\[\]()#@<:-])", r"\\\1", text)
 
 
+def _event_payload(cfg: Config, msg: Message) -> dict:
+    return {"event": msg.event, "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
+            "message": msg.text, "url": msg.url or None,
+            "devices": [{**{k: d.get(k) or "" for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")},
+                         "url": msg.links[i] if msg.links else None} for i, d in enumerate(msg.devices)]}
+
+
+def webhook_json_body(cfg: Config, msg: Message) -> bytes:
+    """The JSON body of the webhook's `json` format (UTF-8); the MQTT event channel publishes the same bytes."""
+    return json.dumps(_event_payload(cfg, msg), ensure_ascii=False).encode("utf-8")
+
+
 class WebhookChannel:
     name = "webhook"
     timeout: float = 10
@@ -321,10 +334,7 @@ class WebhookChannel:
             shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
             content = head + "\n```\n" + "\n".join(shown) + "\n```" + tail
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}
-        return url, {"event": msg.event, "site": cfg.site_name, "count": len(msg.devices), "title": msg.subject,
-                     "message": msg.text, "url": msg.url or None,
-                     "devices": [{**{k: d.get(k) or "" for k in ("mac", "ip", "hostname", "vendor", "vlan", "lease_type")},
-                                  "url": msg.links[i] if msg.links else None} for i, d in enumerate(msg.devices)]}
+        return url, _event_payload(cfg, msg)
 
     def _signature_headers(self, body: bytes) -> dict:
         """Standard Webhooks: v1 = HMAC-SHA256 over "<id>.<timestamp>.<body>"."""
@@ -377,7 +387,43 @@ class WebhookChannel:
             raise WebhookError("webhook: bad WEBHOOK_URL") from e
 
 
-_CHANNELS = {"mailgun": MailgunChannel, "smtp": SmtpChannel, "webhook": WebhookChannel}
+class MqttChannelError(NotifyError):
+    pass
+
+
+_shared_client: Callable[[], Client | None] = lambda: None  # noqa: E731
+
+
+def set_shared_client(provider: Callable[[], Client | None]) -> None:
+    """Where the "mqtt" channel gets its connection: `provider()` returns the publisher's connected client, or None.
+    The collector sets it once, after it built its Publisher. The channel never opens a connection of its own."""
+    global _shared_client
+    _shared_client = provider
+
+
+class MqttChannel:
+    """The webhook's JSON body, published on <MQTT_TOPIC>/event (QoS 1, not retained) through the connection the
+    presence publisher holds. Without a connected client it fails ("mqtt: not connected"): the Backoff waits and the
+    publisher reconnects on its own poll step."""
+    name = "mqtt"
+
+    def __init__(self, cfg: Config, client: Callable[[], Client | None] | None = None) -> None:
+        self.cfg = cfg
+        self._client = client
+
+    def send(self, msg: Message) -> None:
+        client = (self._client or _shared_client)()
+        if client is None or not client.connected:
+            raise MqttChannelError("mqtt: not connected")
+        try:
+            client.publish(f"{self.cfg.mqtt_topic}/event", webhook_json_body(self.cfg, msg), qos=1, retain=False)
+        except MqttError as e:
+            raise MqttChannelError(str(e) if str(e).startswith("mqtt:") else f"mqtt: {e}") from e
+        except OSError as e:
+            raise MqttChannelError(f"mqtt: {e.strerror or type(e).__name__}") from e
+
+
+_CHANNELS = {"mailgun": MailgunChannel, "smtp": SmtpChannel, "webhook": WebhookChannel, "mqtt": MqttChannel}
 
 
 def channels(cfg: Config) -> list[Channel]:
@@ -415,6 +461,10 @@ class Backoff:
 
     def due(self, name: str) -> bool:
         return self._clock() >= self._get(name).retry_at
+
+    def retry_in(self, name: str) -> int:
+        """Seconds until the channel is due again (rounded; 0 when it is due)."""
+        return max(0, round(self._get(name).retry_at - self._clock()))
 
     def failed(self, name: str, error: object) -> bool:
         """Record a failed attempt; True when it is the first of a spell (the one to log as a warning)."""
@@ -473,7 +523,7 @@ def send(cfg: Config, msg: Message, backoff: Backoff | None = None, what: str = 
             if key not in _logged_bugs:
                 _logged_bugs.add(key)
                 redact = make_redactor([cfg.mailgun_key, cfg.smtp_user, cfg.smtp_password, cfg.webhook_url,
-                                        cfg.webhook_secret])
+                                        cfg.webhook_secret, cfg.mqtt_password])
                 stack = "".join(f'\n  File "{f.filename}", line {f.lineno}, in {f.name}'
                                 for f in traceback.extract_tb(e.__traceback__))
                 log.error("%s failed unexpectedly: %s\nTraceback (most recent call last):%s", ch.name,

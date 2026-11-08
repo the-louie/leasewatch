@@ -172,6 +172,8 @@ class Collector:
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
         # MQTT presence (MQTT_URL set): published after each good poll; its retry wait is the "mqtt" channel's backoff
         self._mqtt = Publisher(cfg, db, __version__) if cfg.mqtt_on else None
+        # the "mqtt" event channel publishes through the publisher's connection (none: it fails, the backoff waits)
+        notify.set_shared_client(lambda: self._mqtt.client if self._mqtt and self._mqtt.connected else None)
         self._mqtt_failed_polls = 0  # failed polls in a row; at SOURCE_DOWN_POLLS the status goes offline
         self._mqtt_failing = False  # the broker could not be reached since the last publish that worked: warned once
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
@@ -907,7 +909,7 @@ class Collector:
         except Exception as e:  # the publisher closed the client; the next due good poll reconnects and sends all
             text = str(e) if isinstance(e, (OSError, MqttError)) else f"{type(e).__name__}: {e}"
             self._mail_backoff.failed("mqtt", text)
-            wait = max(0, round(self._mail_backoff._get("mqtt").retry_at - self._mail_backoff._clock()))
+            wait = self._mail_backoff.retry_in("mqtt")
             log.log(logging.DEBUG if self._mqtt_failing else logging.WARNING, "mqtt: %s (retry in %d s)",
                     text.removeprefix("mqtt: "), wait)
             self._mqtt_failing = True
