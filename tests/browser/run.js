@@ -120,6 +120,72 @@ const scenarios = {
     res.cleared = await page.evaluate(() => location.search);
     return res;
   },
+  // ?lang=sv: the static texts, the rows, the drawer, the event kinds and the tag headings come from the Swedish table;
+  // the server's event detail stays English; the tables fit at 800, 1024 and 1280 px
+  async lang_sv(page, base) {
+    const A = '02:00:00:00:70:01';
+    await page.goto(`${base}?lang=sv`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(`${row(A)}`);
+    await page.waitForSelector('#tags .grp');
+    await page.waitForSelector('#events .k.renamed');
+    const sv = k => page.evaluate(key => window.LW_STRINGS.sv[key], k);
+    const res = { html_lang: await page.evaluate(() => document.documentElement.lang) };
+    res.sub = { shown: await page.$eval('[data-i18n="nav.sub"]', e => e.textContent), table: await sv('nav.sub') };
+    res.new_badge = { shown: await page.$eval(`${row(A)} .badge.new`, e => e.textContent), table: await sv('row.new') };
+    res.headers = {};
+    for (const [cls, key] of [['c-dev', 'th.device'], ['c-first', 'th.first'], ['c-last', 'th.last']])
+      res.headers[key] = { shown: await page.$eval(`thead th.${cls}`, e => e.textContent.trim()), table: await sv(key) };
+    res.kind_option = { shown: await page.$eval('#evKind option[value="renamed"]', e => e.textContent), table: await sv('kind.renamed') };
+    res.event = await page.$eval('#events li:has(.k.renamed)', li => ({ kind: li.querySelector('.k').textContent, detail: li.querySelector('.muted').textContent }));
+    res.event.table = await sv('kind.renamed');
+    res.headings = { shown: await page.$$eval('#tags .grp', gs => gs.map(g => g.textContent)), table: [await sv('chip.tags'), await sv('chip.owner')] };
+    await page.click(`${row(A)} .nm`); await waitOpen(page, A);
+    res.drawer = {};
+    for (const [id, key] of [['#fSave', 'drawer.save'], ['#fArch', 'drawer.archive'], ['#fWatch', 'drawer.watch']])
+      res.drawer[key] = { shown: await page.$eval(id, e => e.textContent), table: await sv(key) };
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await page.click('.card[data-filter="new"]');
+    await page.waitForFunction(() => new URLSearchParams(location.search).get('filter') === 'new');
+    res.filtered = await page.evaluate(() => location.search);
+    await page.click('.card[data-filter="new"]'); // filter off again: all rows back for the width checks
+    await page.waitForFunction(() => !new URLSearchParams(location.search).has('filter'));
+    // widths: nothing scrolls sideways and no header text is cut by its cell
+    res.widths = {};
+    for (const width of [800, 1024, 1280]) {
+      await page.setViewport({ width, height: 900 });
+      res.widths[width] = await page.evaluate(() => {
+        const wrap = document.querySelector('.table-wrap'), de = document.documentElement;
+        return { page_scroll: de.scrollWidth - innerWidth, table_scroll: wrap.scrollWidth - wrap.clientWidth,
+          th_over: [...document.querySelectorAll('thead th')].filter(th => th.scrollWidth > th.clientWidth)
+            .map(th => `${th.className}: ${th.scrollWidth}>${th.clientWidth}`) };
+      });
+    }
+    return res;
+  },
+  // the browser's own language (sv-SE) picks Swedish with no parameter; ?lang=en overrides it. A fresh page with
+  // the override, so the other scenarios keep en-US
+  async lang_auto(page, base) {
+    const p2 = await page.browser().newPage();
+    try {
+      await p2.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'languages', { get: () => ['sv-SE', 'sv'] });
+        Object.defineProperty(navigator, 'language', { get: () => 'sv-SE' });
+      });
+      const read = () => p2.evaluate(() => ({ html_lang: document.documentElement.lang, data_lang: document.documentElement.dataset.lang,
+        sub: document.querySelector('[data-i18n="nav.sub"]').textContent, search: location.search }));
+      const res = {};
+      await p2.goto(base, { waitUntil: 'domcontentloaded' });
+      await p2.waitForSelector('#rows tr');
+      res.auto = await read();
+      await p2.goto(`${base}?lang=en`, { waitUntil: 'domcontentloaded' });
+      await p2.waitForSelector('#rows tr');
+      res.en = await read();
+      res.plain = await page.evaluate(() => ({ html_lang: document.documentElement.lang, languages: navigator.languages.slice() }));
+      return res;
+    } finally {
+      await p2.close().catch(() => {});
+    }
+  },
   async search(page) {
     const res = {};
     for (const q of ['ipad', '10.0.2.', '02:00:00:00:00:0c', 'zzz-nothing']) {

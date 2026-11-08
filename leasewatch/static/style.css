@@ -140,6 +140,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .c-where .sig { font-variant-numeric: tabular-nums; }
 .status .src { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
 .status .src .dot { width: 7px; height: 7px; }
+@media (max-width: 1279px) { :lang(sv) .c-act .btn.ack { white-space: normal; text-align: left; line-height: 1.15; } } /* "Markera som känd" wraps where the table is tight */
+th.c-first, th.c-last { white-space: normal; } /* a long heading (Swedish "Första gången sedd") wraps instead of widening the column past its dates */
 .c-first, .c-last { white-space: nowrap; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
 .c-first.recent { color: var(--text); }
 .c-act { width: 1%; text-align: right; white-space: nowrap; }

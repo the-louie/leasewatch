@@ -864,6 +864,59 @@ class BrowserIp6Test(_BrowserCase):
         self.assertEqual(r["meta_enter"], {"copied": [self.V6], "open": False, "cls": True, "title": "Copied"}, r["meta_enter"])
 
 
+class BrowserLangSvTest(_BrowserCase):
+    """?lang=sv: the texts come from the Swedish table (read in the browser, so a new wording does not break the test),
+    the server's event text stays English, and the table fits at 800, 1024 and 1280 px. A browser that prefers
+    Swedish gets it with no parameter, and ?lang=en overrides that."""
+    A, B = "02:00:00:00:70:01", "02:00:00:00:70:02"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        # B is there at the start, A comes later: A is new
+        base, db = start(cls, [s(cls.B, 71, "printer")], [s(cls.A, 70, "thermostat")])
+        db.q("UPDATE devices SET tags=? WHERE mac=?", ("iot,owner:alex", cls.A))
+        db.q("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)", (int(time.time()), cls.A, "renamed", "(none) -> Hall sensor"))
+        cls.run_scenarios(base, ("lang_sv", "lang_auto"))
+
+    def test_texts_come_from_the_swedish_table(self) -> None:
+        d = self.result("lang_sv")
+        self.assertEqual(d["html_lang"], "sv")
+        self.assertEqual(d["sub"]["shown"], d["sub"]["table"])
+        self.assertEqual(d["sub"]["shown"], "Vem finns på nätverket, nyast först")  # the owner-facing sample
+        for part in (d["new_badge"], d["kind_option"], d["headings"], *d["headers"].values(), *d["drawer"].values()):
+            self.assertEqual(part["shown"], part["table"], part)
+        self.assertEqual(sorted(d["headers"]), ["th.device", "th.first", "th.last"])
+        self.assertEqual(sorted(d["drawer"]), ["drawer.archive", "drawer.save", "drawer.watch"])
+
+    def test_event_kind_is_swedish_and_its_detail_stays_english(self) -> None:
+        e = self.result("lang_sv")["event"]
+        self.assertEqual(e["kind"], e["table"])
+        self.assertEqual(e["detail"], "(none) → Hall sensor")
+
+    def test_tag_headings_and_the_param_survives_a_filter(self) -> None:
+        d = self.result("lang_sv")
+        self.assertEqual(d["headings"]["shown"], d["headings"]["table"])
+        self.assertEqual(d["filtered"], "?filter=new&lang=sv")
+
+    def test_tables_fit_at_desktop_widths(self) -> None:
+        for width, d in self.result("lang_sv")["widths"].items():
+            with self.subTest(width=width):
+                self.assertLessEqual(d["page_scroll"], 0, d)
+                self.assertLessEqual(d["table_scroll"], 0, d)
+                self.assertEqual(d["th_over"], [], d)
+
+    def test_browser_language_picks_swedish_and_the_param_overrides(self) -> None:
+        d = self.result("lang_auto")
+        self.assertEqual((d["auto"]["html_lang"], d["auto"]["data_lang"], d["auto"]["sub"]), ("sv", "auto", "Vem finns på nätverket, nyast först"))
+        self.assertEqual((d["en"]["html_lang"], d["en"]["sub"], d["en"]["search"]), ("en", "Who is on the network, newest first", "?lang=en"))
+        self.assertEqual(d["plain"]["html_lang"], "en")  # the override stayed on its own page
+
+
 class BrowserSsidTest(_BrowserCase):
     """The Wi-Fi network chips and the SSID filter, on presence rows seeded straight into the DB. One SSID name carries
     markup and quotes, as anyone in radio range can name a network that way."""
