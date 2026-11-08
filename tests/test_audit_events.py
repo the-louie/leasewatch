@@ -35,8 +35,8 @@ class AuditTests(_Base):
         self.post(body={"note": "secret text"})
         self.post(body={"note": "other secret"})
         ev = self.events()
-        self.assertEqual(ev, [("note", "note changed (0 -> 11 chars) (by 127.0.0.1)"),
-                              ("note", "note changed (11 -> 12 chars) (by 127.0.0.1)")])
+        self.assertEqual(ev, [("note", "0 -> 11 chars (by 127.0.0.1)"),
+                              ("note", "11 -> 12 chars (by 127.0.0.1)")])
         self.assertNotIn("secret", json.dumps(ev))
 
     def test_both_fields_two_events(self) -> None:

@@ -97,6 +97,12 @@ class RoConfigTests(unittest.TestCase):
                          ["AUTH_RO_USER needs AUTH_USER"])
         self.assertFalse(self.cfg(AUTH_RO_USER=RO_USER, AUTH_RO_PASSWORD_HASH=RO_HASH).auth_ro_enabled)
 
+    def test_ro_hash_needs_the_same_iterations(self):
+        other = auth.make_hash("pw", auth.MIN_ITERATIONS + 1)
+        self.assertEqual(auth.parse_hash(HASH)[0], auth.parse_hash(RO_HASH)[0])
+        self.assertEqual(self.auth_problems(**self.MAIN, AUTH_RO_USER=RO_USER, AUTH_RO_PASSWORD_HASH=other),
+                         ["AUTH_RO_PASSWORD_HASH must use the same iteration count as AUTH_PASSWORD_HASH"])
+
     def test_ro_name_must_differ(self):
         self.assertEqual(self.auth_problems(**self.MAIN, AUTH_RO_USER=USER, AUTH_RO_PASSWORD_HASH=RO_HASH),
                          ["AUTH_RO_USER must differ from AUTH_USER"])
@@ -125,7 +131,7 @@ class RoLoginWebTests(WebTestCase):
         return {**(extra or {}), "Authorization": header}
 
     def test_ro_reads_but_may_not_write(self):
-        st, _, body = self.req("GET", "/api/stats", headers=self.creds(RO_GOOD))
+        st, _, body = self.req("GET", "/api/devices", headers=self.creds(RO_GOOD))
         self.assertEqual(st, 200)
         self.assertIs(json.loads(body)["meta"]["can_write"], False)
         self.assertIs(json.loads(body)["meta"]["read_only"], False)
@@ -135,7 +141,7 @@ class RoLoginWebTests(WebTestCase):
         self.assertEqual(self.db.device_detail(MAC2)["device"]["note"], "")
 
     def test_rw_still_writes(self):
-        st, _, body = self.req("GET", "/api/stats", headers=self.creds(GOOD))
+        st, _, body = self.req("GET", "/api/devices", headers=self.creds(GOOD))
         self.assertIs(json.loads(body)["meta"]["can_write"], True)
         st, _, body = self.req("POST", f"/api/devices/{MAC2}", body=json.dumps({"note": "hi"}).encode(),
                                headers=self.creds(GOOD, CT))
@@ -158,13 +164,25 @@ class RoLoginWebTests(WebTestCase):
         st, _, _ = self.req("GET", "/api/devices", headers=self.creds(RO_GOOD, {"If-None-Match": ro["ETag"]}))
         self.assertEqual(st, 304)
 
+    def test_meta_carries_the_role_and_the_etag_the_role_bit(self):
+        _, rw, body_rw = self.req("GET", "/api/devices", headers=self.creds(GOOD))
+        _, ro, body_ro = self.req("GET", "/api/devices", headers=self.creds(RO_GOOD))
+        self.assertEqual(json.loads(body_ro)["meta"]["role"], "ro")
+        self.assertEqual(json.loads(body_rw)["meta"]["role"], "rw")
+        self.assertFalse(json.loads(body_ro)["meta"]["can_write"])
+        # a blocked rw client has can_write false too: the tag still differs from the ro login's
+        w = self.srv.RequestHandlerClass
+        with mock.patch.object(w, "_can_write", return_value=False):
+            _, blocked, _ = self.req("GET", "/api/devices", headers=self.creds(GOOD))
+        self.assertNotEqual(blocked["ETag"], ro["ETag"])
+
     def test_busy_gives_503_for_ro(self):
         v = self.srv.RequestHandlerClass.verifier
         v._sem.acquire()
         v._sem.acquire()
         try:
             with mock.patch.object(auth, "BUSY_TIMEOUT", 0.05):
-                st, _, body = self.req("GET", "/api/stats", headers=self.creds(RO_GOOD))
+                st, _, body = self.req("GET", "/api/devices", headers=self.creds(RO_GOOD))
         finally:
             v._sem.release()
             v._sem.release()

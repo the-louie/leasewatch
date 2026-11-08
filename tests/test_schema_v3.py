@@ -24,7 +24,8 @@ V2_COLUMNS = [
     ("loc_source", "TEXT NOT NULL DEFAULT ''"),
 ]
 V2_SEEN = "CREATE TABLE IF NOT EXISTS seen (mac TEXT, source TEXT, last_seen INTEGER NOT NULL, last_present INTEGER, PRIMARY KEY(mac, source))"
-NEW_COLUMNS = {"client_id": "", "archived_ts": None, "mail_queued": None, "split_from": None, "label": "", "watch": 0}
+NEW_COLUMNS = {"client_id": "", "archived_ts": None, "mail_queued": None, "split_from": None, "label": "", "watch": 0,
+               "watch_online": None}
 ALIAS_COLUMNS = ["mac", "device", "reason", "detail", "merged_ts", "last_seen"]
 
 A, B = "02:00:00:00:00:01", "aa:bb:cc:00:00:02"
@@ -110,7 +111,7 @@ class SchemaV3Test(unittest.TestCase):
         self.assertEqual(db.q("SELECT * FROM aliases"), [])
 
     def assert_defaults(self, db: Database) -> None:
-        for r in db.q("SELECT client_id, archived_ts, mail_queued, split_from, label, watch FROM devices"):
+        for r in db.q("SELECT client_id, archived_ts, mail_queued, split_from, label, watch, watch_online FROM devices"):
             self.assertEqual(dict(r), NEW_COLUMNS)
 
     def test_fresh_file_is_v3(self) -> None:

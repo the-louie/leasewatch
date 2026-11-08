@@ -80,6 +80,8 @@ MIGRATIONS = [
     ("devices", "label", "TEXT NOT NULL DEFAULT ''"),
     # 1 = the operator watches the device (the drawer's Watch toggle); 0 = not watched
     ("devices", "watch", "INTEGER NOT NULL DEFAULT 0"),
+    # the online state the last offline/online event of a watched device reported (NULL = none yet, or not watched)
+    ("devices", "watch_online", "INTEGER"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
@@ -403,7 +405,7 @@ class Database:
                 return None
             return self._apply_user_fields(c, key, int(time.time()), acked, name, note, archived, actor, watch)[0]
 
-    def split_alias(self, device_mac: str, alias: str) -> tuple[dict, dict] | None:
+    def split_alias(self, device_mac: str, alias: str, actor: str = "") -> tuple[dict, dict] | None:
         """Turn the alias MAC of a device back into a device of its own: (the device, the new row), or None when
         alias is no alias of that device. The device keeps its history, events and seen rows, because they cannot be
         told apart by MAC. Raises AlreadyADevice (nothing written) when alias already has a devices row."""
@@ -417,6 +419,7 @@ class Database:
             if c.execute("SELECT 1 FROM devices WHERE mac=?", (alias,)).fetchone():
                 raise AlreadyADevice(alias)
             now = int(time.time())
+            by = f" (by {actor})" if actor else ""
             day = time.strftime("%Y-%m-%d", time.localtime(a["merged_ts"]))
             # both rows keep the client-id after a client-id merge; a hostname merge says nothing about it
             cid = c.execute("SELECT client_id FROM devices WHERE mac=?", (key,)).fetchone()["client_id"] if a["reason"] == "client-id" else ""
@@ -424,8 +427,8 @@ class Database:
             c.execute("INSERT INTO devices (mac, first_seen, last_seen, last_online, online, client_id, baseline, acked, split_from) "
                       "VALUES (?, ?, ?, NULL, 0, ?, 0, 0, ?)", (alias, now, a["last_seen"], cid, key))
             c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)",
-                      (now, key, f"{alias} split off (merged by {a['reason']} {a['detail']} on {day})"))
-            c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)", (now, alias, f"split from {key}"))
+                      (now, key, f"{alias} split off (merged by {a['reason']} {a['detail']} on {day}){by}"))
+            c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)", (now, alias, f"split from {key}{by}"))
             out = []
             for m in (key, alias):
                 d = dict(c.execute("SELECT * FROM devices WHERE mac=?", (m,)).fetchone())
@@ -513,7 +516,7 @@ class Database:
                           (now, mac, "renamed", f"{old_name[:40] or '(none)'} -> {new_name[:40] or '(none)'}{by}"))
             if new_note is not None and new_note != old_note:
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
-                          (now, mac, "note", f"note changed ({len(old_note)} -> {len(new_note)} chars){by}"))
+                          (now, mac, "note", f"{len(old_note)} -> {len(new_note)} chars{by}"))
         return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()), ack_change or arch_change
 
     def stats(self, new_days: int) -> dict:

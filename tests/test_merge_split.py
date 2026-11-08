@@ -245,6 +245,12 @@ class SplitWebTest(SplitWebBase):
         self.assertEqual(self.kinds(self.dev), ["split"])
         self.assertEqual(self.kinds(self.al), ["split"])
 
+    def test_both_events_name_the_actor(self) -> None:
+        self.assertEqual(self.split(self.al)[0], 200)
+        det = {r["mac"]: r["detail"] for r in self.db.q("SELECT mac, detail FROM events WHERE kind='split'")}
+        self.assertTrue(det[self.dev].endswith(" (by 127.0.0.1)"), det[self.dev])
+        self.assertEqual(det[self.al], f"split from {self.dev} (by 127.0.0.1)")
+
     def test_path_may_be_the_alias(self) -> None:
         st, out = self.split(self.al.upper(), path=f"/api/devices/{self.al}")
         self.assertEqual((st, out["device"]["mac"], out["split"]["mac"]), (200, self.dev, self.al))

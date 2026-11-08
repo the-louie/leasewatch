@@ -540,8 +540,8 @@ def type_origins() -> dict:
 
 def broken_types() -> dict[str, str]:
     """type -> why it is not loaded, for every declared type that was refused or failed to import. A plugin that
-    declares a built-in type name is not here: the built-in stays loaded, and the refusal is in the log (an ERROR for
-    this connector API, a WARNING for another API version)."""
+    declares a built-in type name is not here: the built-in stays loaded, and the refusal is in refused_types() (so in
+    /api/status and `check`) and in the log (an ERROR for this connector API, a WARNING for another API version)."""
     return dict(_loaded().broken)
 
 
@@ -553,7 +553,7 @@ def refused_types() -> dict[str, str]:
 def type_report(instances: Iterable[InstanceSpec], mask: Callable[[str], str] | None = None) -> dict:
     """The loaded types, the refused and the broken ones as plain data for /api/status. Sorted like type_help():
     built-ins first, then entry points, then LW_CONNECTORS_DIR. No path: Origin.location stays out. A reason is cut to
-    its first line and 200 characters, then passed through `mask` (a plugin's text may echo a host or a secret)."""
+    its first line and 200 characters, after `mask` ran over the whole text (a plugin's text may echo a host or a secret)."""
     from .loader import BUILTIN, DIR
     reg, origins = registry(), type_origins()
     used: dict[str, int] = {}
@@ -561,8 +561,9 @@ def type_report(instances: Iterable[InstanceSpec], mask: Callable[[str], str] | 
         used[sp.type] = used.get(sp.type, 0) + 1
 
     def why(text: str) -> str:
-        first = (text.splitlines() or [""])[0][:200]
-        return mask(first) if mask else first
+        # mask the whole text first: a secret or host that crosses the cut would show its first characters
+        text = mask(text) if mask else text
+        return (text.splitlines() or [""])[0][:200]
 
     rows = []
     for t, o in sorted(((t, o) for t, o in origins.items() if t in reg),

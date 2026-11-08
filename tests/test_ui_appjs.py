@@ -820,5 +820,13 @@ out.ids2 = state.events.map(x => x.id); out.paged2 = state.evPaged;
         for kind in ("archived", "restored", "merged"):
             self.assertTrue(re.search(rf"\.k\.{kind}\b[^{{]*\{{[^}}]*color:", css), kind)
 
+    # a read-only login is worded apart from a blocked address; the generic .note rule leaves the event label alone
+    def test_read_only_login_line_and_note_scope(self) -> None:
+        src, css = _read("leasewatch", "static", "app.js"), _read("leasewatch", "static", "style.css")
+        self.assertIn('state.meta.role === "ro" ? "Read-only login: this user can look but not change anything"', src)
+        self.assertIn("Read-only: changes are off for this address", src)
+        self.assertNotRegex(css, r"(^|[},\s])\.note\s*[,{]")  # a bare .note would style <span class="k note"> too
+        self.assertRegex(css, r"\.k\.renamed, \.k\.note\s*\{[^}]*color:")
+
 if __name__ == "__main__":
     unittest.main()

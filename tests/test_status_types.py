@@ -107,6 +107,16 @@ class TypesTests(StatusTypesBase):
         self.assertNotIn("second", rep["refused"][0]["reason"])
         self.assertEqual(rep["broken"][0]["reason"], "see <host>")
 
+    def test_a_secret_crossing_the_cut_is_masked_whole(self):
+        from leasewatch.connectors import loader
+        secret = "S3cr3tT0ken-ABCDE"[:16]
+        res = loader.LoadResult(broken={"z": "x" * 190 + secret + " tail"})
+        with mock.patch("leasewatch.connectors._loaded", return_value=res):
+            rep = type_report([], lambda s: s.replace(secret, "<secret>"))
+        r = rep["broken"][0]["reason"]
+        self.assertNotIn(secret[:4], r)
+        self.assertLessEqual(len(r), 200)
+
     def test_a_host_in_a_reason_is_masked_in_the_response(self):
         from leasewatch.connectors import loader
         res = loader.LoadResult(broken={"z": "cannot reach fw1.example.lan"})

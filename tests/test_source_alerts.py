@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from test_ops_events import ENV, Clock, down  # noqa: E402
 from test_instances import Base  # noqa: E402
 from leasewatch import notify  # noqa: E402
-from leasewatch.collector import ALERT_MARK, Collector  # noqa: E402
+from leasewatch.collector import ALERT_BATCH, ALERT_MARK, Collector  # noqa: E402
 from leasewatch.connectors import Batch  # noqa: E402
 
 ON = {**ENV, "WEBHOOK_URL": "https://hook.example.com/t", "MAIL_ON_SOURCE": "1"}
@@ -66,13 +66,13 @@ class SourceAlertTests(Base):
         self.poll(col)
         self.assertEqual(len(self.msgs), 1)
         m = self.msgs[0]
-        self.assertEqual((m.event, m.subject, m.devices), ("source_down", "x is down", []))
+        self.assertEqual((m.event, m.subject, m.devices), ("source_down", "x is down: down", []))
         self.assertRegex(m.text, r"^\d{4}-\d\d-\d\d \d\d:\d\d source_down: x: down$")
         self.poll(col, 2)
         self.assertEqual(len(self.msgs), 1)
         x.on_collect = Batch
         self.poll(col)
-        self.assertEqual([(m.event, m.subject) for m in self.msgs[1:]], [("source_up", "x is back")])
+        self.assertEqual([(m.event, m.subject) for m in self.msgs[1:]], [("source_up", "x is back after 10m")])
         self.assertIn("source_up: x: up after 10m", self.msgs[1].text)
         top = db.q("SELECT MAX(id) FROM events")[0][0]
         self.assertEqual(db.get_meta(ALERT_MARK), str(top))
@@ -81,7 +81,29 @@ class SourceAlertTests(Base):
         col, db = self.start()
         self.client.fail = True
         self.poll(col, 3)
-        self.assertEqual([(m.event, m.subject) for m in self.msgs], [("source_down", "fw1 is down")])
+        self.assertEqual([(m.event, m.subject) for m in self.msgs], [("source_down", "fw1 is down: boom")])
+
+    def test_one_event_subject_carries_the_error_or_the_length_cut_to_80(self):
+        def subject(kind, detail):
+            return Collector._alert_subject([{"mac": "", "kind": kind, "detail": detail}], {})
+        self.assertEqual(subject("source_down", "fw1: connection refused"), "fw1 is down: connection refused")
+        self.assertEqual(subject("source_up", "fw1: up after 2h0m"), "fw1 is back after 2h0m")
+        long = subject("source_down", "fw1: " + "x" * 200)
+        self.assertEqual((len(long), long[:16]), (80, "fw1 is down: xxx"))
+
+    def test_more_than_a_batch_goes_in_two_polls_and_nothing_is_lost(self):
+        col, db = self.start()
+        with db.tx() as c:
+            c.executemany("INSERT INTO events(ts, mac, kind, detail) VALUES(?, '', 'source_down', ?)",
+                          [(self.clock.t, f"y{i}: down") for i in range(ALERT_BATCH + 10)])
+        top = db.q("SELECT MAX(id) FROM events")[0][0]
+        self.poll(col)
+        self.poll(col)
+        self.poll(col)
+        self.assertEqual([m.subject for m in self.msgs], [f"{ALERT_BATCH} source events", "10 source events"])
+        sent = [ln.split(" ", 3)[3] for m in self.msgs for ln in m.text.splitlines()]
+        self.assertEqual(sent, [f"y{i}: down" for i in range(ALERT_BATCH + 10)])
+        self.assertEqual(db.get_meta(ALERT_MARK), str(top))
 
     def test_several_events_in_one_message(self):
         col, db = self.start()

@@ -13,8 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from test_ops_events import ENV, Clock, down  # noqa: E402
 from test_instances import MAC, Base, Fake, arp  # noqa: E402
-from leasewatch.connectors import Attachment, Batch, registry  # noqa: E402
-
+from leasewatch.connectors import Attachment, Batch, Sighting, registry  # noqa: E402
 ON = {**ENV, "WEBHOOK_URL": "https://hook.example.com/t", "MAIL_ON_WATCH": "1", "PUBLIC_URL": "https://lw.example.lan/"}
 MAC2, MAC3, MAC4, MAC5 = (f"02:00:00:00:00:0{i}" for i in range(2, 6))
 GRACE = 10 * 60
@@ -83,9 +82,10 @@ class WatchAlertTests(Base):
         self.assertEqual(len(self.msgs), 1)
         m = self.msgs[0]
         self.assertEqual((m.event, m.subject, m.devices), ("watch", "printer: offline", []))
-        line, link = m.text.splitlines()
+        line, empty, link = m.text.splitlines()
         self.assertRegex(line, r"^\d{4}-\d\d-\d\d \d\d:\d\d printer offline: last seen \d+ min ago$")
-        self.assertEqual(link, f"    https://lw.example.lan/?device={MAC}")
+        self.assertEqual((empty, link), ("", f"https://lw.example.lan/?device={MAC}"))
+        self.assertEqual((m.links, m.url), ([link], link))
         self.client.rows = [arp(MAC, "10.0.0.5")]
         self.poll(col)
         self.assertEqual(self.events(db), [(MAC, "offline"), (MAC, "online")])
@@ -129,9 +129,10 @@ class WatchAlertTests(Base):
         self.assertEqual(len(self.msgs), 1)
         m = self.msgs[0]
         self.assertEqual((m.subject, m.event), ("5 changes on watched devices", "watch"))
-        kinds = sorted(ln.split(" ")[3].rstrip(":") for ln in m.text.splitlines() if not ln.startswith(" "))
+        kinds = sorted(ln.split(" ")[3].rstrip(":") for ln in m.text.splitlines() if ln[:1].isdigit())
         self.assertEqual(kinds, ["ip", "offline", "port", "vlan", "wifi"])
         self.assertEqual(sum(1 for ln in m.text.splitlines() if "?device=" in ln), 5)
+        self.assertEqual((len(m.links), m.url), (5, ""))
 
     def test_unwatched_device_gets_no_event_and_no_message(self):
         col, db = self.start()
@@ -207,6 +208,98 @@ class WatchAlertTests(Base):
         db.update_user_fields(MAC, True, None, None, archived=True, actor="op")
         self.poll(col)
         self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: ip"])
+
+    def test_events_of_a_device_watched_later_are_not_sent(self):
+        col, db = self.start()
+        for i in range(5):
+            self.client.rows = [arp(MAC, f"10.0.0.{10 + i}")]
+            self.poll(col)
+        self.assertEqual(len(db.q("SELECT 1 FROM events WHERE kind='ip'")), 5)
+        self.watch(db, MAC)
+        self.poll(col, 2)
+        self.assertEqual(self.msgs, [])
+        self.client.rows = [arp(MAC, "10.0.0.30")]
+        self.poll(col)
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: ip"])  # only what is written after the watch
+
+    def test_watch_turned_on_after_source_alone_sends_nothing_old(self):
+        col, db = self.start({**ON, "MAIL_ON_WATCH": "0", "MAIL_ON_SOURCE": "1"})
+        self.watch(db, MAC)
+        for i in range(4):
+            self.client.rows = [arp(MAC, f"10.0.0.{10 + i}")]
+            self.poll(col)
+        self.assertEqual(len(db.q("SELECT 1 FROM events WHERE kind='ip'")), 4)
+        col.close()
+        col2, db2 = self.collector({**ON, "MAIL_ON_SOURCE": "1"}, [arp(MAC, "10.0.0.13")])
+        self.addCleanup(col2.close)
+        self.poll(col2, 2)
+        self.assertEqual(self.msgs, [])
+
+    def test_partial_outage_writes_no_offline_or_online(self):
+        env = {**ON, "LW_CONNECTORS": "fw1,x,fy", "LW_CONNECTOR__FY__TYPE": "fakefw"}
+        col, db = self.collector(env)
+        self.addCleanup(col.close)
+        fy = col._connectors["fy"]
+        ok = lambda: Batch(sightings=[Sighting(mac=MAC2, source="", kind="arp", observed_at=0, presence=True,  # noqa: E731
+                                               ip="10.0.0.6")])
+        fy.on_collect = ok
+        self.poll(col, 2)
+        self.watch(db, MAC, MAC2)
+        self.poll(col)
+        fy.on_collect = down  # fy alone sees MAC2; fw1 still answers
+        self.poll(col, GRACE // self.clock.step + 3)
+        self.assertEqual(db.q("SELECT online FROM devices WHERE mac=?", (MAC2,))[0][0], 0)  # the grace rule
+        fy.on_collect = ok
+        self.poll(col, 3)
+        self.assertEqual(self.events(db), [])
+        self.assertEqual(self.msgs, [])
+
+    def test_offline_swallowed_by_a_failed_poll_is_written_at_the_next_trusted_poll(self):
+        col, db = self.start()
+        self.watch(db, MAC)
+        self.poll(col)
+        self.client.rows = []
+        self.poll(col, GRACE // self.clock.step - 1)
+        self.client.fail = True
+        self.poll(col, 2)  # the grace passes in _fail: online turns off silently
+        self.client.fail = False
+        self.poll(col)  # the previous poll failed: not trusted
+        self.assertEqual(self.events(db), [])
+        self.poll(col)
+        self.assertEqual(self.events(db), [(MAC, "offline")])
+        self.poll(col, 2)
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: offline"])
+
+    def test_left_during_a_long_outage_is_reported_once_the_sources_are_back(self):
+        col, db = self.start()
+        self.watch(db, MAC)
+        self.poll(col)
+        self.client.fail = True
+        self.client.rows = []
+        self.poll(col, GRACE // self.clock.step + 3)
+        self.assertEqual(self.events(db), [])
+        self.client.fail = False
+        self.poll(col, 4)
+        self.assertEqual(self.events(db), [(MAC, "offline")])
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: offline"])
+
+    def test_watched_again_after_unwatch_gets_no_stale_event(self):
+        col, db = self.start()
+        self.watch(db, MAC)
+        self.poll(col)
+        self.assertEqual(db.q("SELECT watch_online FROM devices WHERE mac=?", (MAC,))[0][0], 1)
+        db.update_user_fields(MAC, None, None, None, watch=False, actor="op")
+        self.poll(col)
+        self.assertIsNone(db.q("SELECT watch_online FROM devices WHERE mac=?", (MAC,))[0][0])
+        self.leave(col)  # offline while not watched: no event
+        self.watch(db, MAC)
+        self.poll(col, 2)
+        self.assertEqual(self.events(db), [])
+        self.assertEqual(db.q("SELECT watch_online FROM devices WHERE mac=?", (MAC,))[0][0], 0)
+        self.client.rows = [arp(MAC, "10.0.0.5")]
+        self.poll(col)
+        self.assertEqual(self.events(db), [(MAC, "online")])
+        self.assertEqual([m.subject for m in self.msgs], [f"{MAC}: online"])
 
     def test_bad_value_is_a_problem(self):
         self.assertIn("MAIL_ON_WATCH must be 1 or 0", self.cfg({**ON, "MAIL_ON_WATCH": "2"}).validate())

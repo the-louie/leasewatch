@@ -201,7 +201,7 @@ h3 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color:
 .tl li::before { content: ""; position: absolute; left: -6px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .tl li.none { color: var(--muted); } .tl li.none::before { display: none; }
 .tl .t { color: var(--muted); font-size: 12px; display: block; }
-.note { font-size: 13px; margin: 0 0 8px; }
+p.note { font-size: 13px; margin: 0 0 8px; }
 table.aliases, table.wifi { font-size: 13px; margin-bottom: 4px; }
 table.aliases th, table.wifi th { padding: 4px 8px 4px 0; font-size: 11px; background: none; }
 table.aliases td, table.wifi td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }

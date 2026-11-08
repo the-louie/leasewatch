@@ -456,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
     def _etag(self, version: int, meta: dict, query: str = "0") -> str:
         # the write bit: meta.can_write differs per client and login, so two clients must not share a tag (and a 304); the
         # stale and collector bits: the page shows a banner for each, so a flip must not be answered with a 304
-        w = int(self._can_write())
+        w = 2 if self.role == "ro" else int(self._can_write())  # 2: a read-only login, which the page words apart from a blocked address
         return f'W/"{self.boot}.{version}.{w}{int(meta["stale"])}{int(meta["collector_stale"])}.{query}"'
 
     def _matches(self, etag: str) -> bool:
@@ -669,7 +669,7 @@ class Handler(BaseHTTPRequestHandler):
             "connectors": [self._connector_meta(m, s) for s in cfg.instances],
             # read_only: for every client; can_write: for this client and login (the page leaves out its edit controls
             # when false)
-            "read_only": cfg.read_only_on, "can_write": self._can_write(),
+            "read_only": cfg.read_only_on, "can_write": self._can_write(), "role": self.role,
         }
 
     def _connector_meta(self, m: dict, s: InstanceSpec) -> dict:
@@ -709,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(body) > 1:
             return self._error(400, "split cannot be combined with other fields")
         try:
-            res = self.db.split_alias(mac, alias.lower())
+            res = self.db.split_alias(mac, alias.lower(), actor=self._actor())
         except AlreadyADevice:
             return self._error(409, "MAC already has a device row")
         except Exception:

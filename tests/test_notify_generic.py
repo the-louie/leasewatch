@@ -112,6 +112,39 @@ class DevicelessSendTests(Base):
         self.assertEqual(m["Subject"], SUBJECT)
         self.assertEqual(m.get_content().strip(), TEXT)
 
+    def test_alert_with_one_link_on_every_channel(self) -> None:
+        link = "https://lw.example.lan/?device=02:00:00:00:00:09"
+        msg = notify.build_alert(Config(), "pad: offline", ["2026-11-08 10:00 pad offline: last seen 12 min ago"],
+                                 "watch", [link])
+        self.assertEqual((msg.links, msg.url), ([link], link))
+        h = self.hook()
+        notify.send(self.cfg(WEBHOOK_URL=h.url + "/d", WEBHOOK_FORMAT="discord"), msg)
+        content = self.body(h)["content"]
+        self.assertTrue(content.endswith(f"```\n{link}"), content)  # after the code block: clickable
+        self.assertEqual(content.count(link), 1)
+        h = self.hook()
+        notify.send(self.cfg(WEBHOOK_URL=h.url + "/lw", WEBHOOK_FORMAT="ntfy"), msg)
+        self.assertEqual(self.body(h)["click"], link)
+        h = self.hook()
+        notify.send(self.cfg(WEBHOOK_URL=h.url + "/j", WEBHOOK_FORMAT="json"), msg)
+        self.assertEqual(self.body(h)["url"], link)
+        srv = FakeSmtp()
+        self.addCleanup(srv.close)
+        cfg = self.cfg(WEBHOOK_URL="", SMTP_HOST="127.0.0.1", SMTP_PORT=str(srv.port), SMTP_TLS="none",
+                       MAIL_TO="ops@example.com", SMTP_FROM="leasewatch@example.com")
+        self.assertEqual(notify.send(cfg, msg), ["smtp"])
+        body = email.message_from_bytes(srv.messages[0], policy=email.policy.default).get_content()
+        self.assertIn(link, body.splitlines())
+
+    def test_alert_with_several_links_on_discord(self) -> None:
+        links = [f"https://lw.example.lan/?device=02:00:00:00:00:0{i}" for i in (1, 2)]
+        msg = notify.build_alert(Config(), "2 changes on watched devices", ["a offline", "b online"], "watch", links)
+        self.assertEqual(msg.url, "")
+        h = self.hook()
+        notify.send(self.cfg(WEBHOOK_URL=h.url + "/d", WEBHOOK_FORMAT="discord"), msg)
+        self.assertEqual(self.body(h)["content"], "2 changes on watched devices\n```\na offline\nb online\n```\n"
+                         + "\n".join(links))
+
     def test_failure_logs_what_and_no_secret(self) -> None:
         h = self.hook(status=503)
         cfg = self.cfg(WEBHOOK_URL=h.url + "/hook/" + TOKEN, MAILGUN_KEY="mg-key-123", MAILGUN_DOMAIN="mg.example.com",

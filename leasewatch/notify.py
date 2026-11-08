@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
@@ -67,7 +67,9 @@ class Message:
     text: str  # control characters removed per line
     devices: list[dict] = field(default_factory=list)  # the rows as queued (raw values, for the webhook JSON)
     url: str = ""  # the review link, "" without PUBLIC_URL
-    links: list[str] = field(default_factory=list)  # per device (aligned with `devices`) its page, [] without PUBLIC_URL
+    # per device (aligned with `devices`; in a message without devices, per device it names) its page, [] without
+    # PUBLIC_URL
+    links: list[str] = field(default_factory=list)
     blocks: list[str] = field(default_factory=list)  # per device its text lines (the device line, then its link line)
     event: str = "new_devices"  # the webhook JSON's "event": new_devices, or source_down, source_up, watch
 
@@ -106,10 +108,15 @@ def build_message(cfg: Config, devices: list[dict]) -> Message:
     return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
 
 
-def build_alert(cfg: Config, subject: str, lines: list[str], event: str) -> Message:
-    """A message without devices (no device blocks, links or review link): the subject, then one text line per entry.
-    Control characters are replaced as in build_message; the subject carries no site prefix, as build_message's."""
-    return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(_LINE_UNSAFE.sub(" ", ln) for ln in lines), event=event)
+def build_alert(cfg: Config, subject: str, lines: list[str], event: str, links: Sequence[str] = ()) -> Message:
+    """A message without devices (no device blocks): the subject, one text line per entry, then (with links) an empty
+    line and one line per link. links: the page of each device the message names; with exactly one it is also the
+    message's url (ntfy's click, the JSON's url). Control characters are replaced as in build_message; the subject
+    carries no site prefix, as build_message's."""
+    links = [_LINE_UNSAFE.sub(" ", ln) for ln in links]
+    text = [_LINE_UNSAFE.sub(" ", ln) for ln in lines] + (["", *links] if links else [])
+    return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(text), url=links[0] if len(links) == 1 else "",
+                   links=links, event=event)
 
 
 def _send(cfg: Config, subject: str, text: str) -> None:
@@ -298,12 +305,19 @@ class WebhookChannel:
         if cfg.webhook_format == "discord":
             head = _md_escape(msg.subject)
             # one link, after the code block (a link inside it is not clickable): the device for one, else the list
+            # a message without devices: each device page it names (build_alert's links), after the code block, in at
+            # most half the message
             link = msg.links[0] if len(msg.links) == 1 else msg.url
-            tail = f"\n{link}" if link else ""
+            tail = "".join(f"\n{ln}" for ln in _fit_lines(msg.links, DISCORD_MAX // 2, len)) \
+                if not msg.devices and len(msg.links) > 1 else f"\n{link}" if link else ""
             # a code block keeps the columns and shows hostnames as plain text; a backtick cannot close it
-            # a message without devices shows its text lines in the code block instead
+            # a message without devices shows its text lines in the code block instead, without build_alert's link
+            # lines (an empty line, then one per link, at the end)
+            rows = msg.text.split("\n")
+            if not msg.devices and msg.links:
+                rows = rows[:-len(msg.links) - 1]
             lines = [_device_line(d).replace("`", "'") for d in msg.devices] if msg.devices else \
-                [ln.replace("`", "'") for ln in msg.text.split("\n")]
+                [ln.replace("`", "'") for ln in rows]
             shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
             content = head + "\n```\n" + "\n".join(shown) + "\n```" + tail
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}

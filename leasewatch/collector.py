@@ -38,8 +38,9 @@ SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_
 ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sends
 WATCH_KINDS = ("offline", "online", "ip", "vlan", "port", "wifi")  # MAIL_ON_WATCH sends these of watched devices
 ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
-ALERT_MARK = "notify.alert_event_id"  # meta: id of the newest event already sent as an alert
-ALERT_SUBJECTS = {"source_down": "{name} is down", "source_up": "{name} is back"}  # one event: by its kind
+ALERT_MARK = "notify.alert_event_id"  # meta: the events up to this id were considered (sent, or no alert then)
+# one event: by its kind, with the error or the outage length from its detail (the subject cut to 80 characters)
+ALERT_SUBJECTS = {"source_down": "{name} is down: {text}", "source_up": "{name} is back {text}"}
 
 
 def outage_text(seconds: int) -> str:
@@ -710,8 +711,10 @@ class Collector:
             log.warning("mail sent but the queue was not cleared (%d device(s) will be mailed again): %s", len(macs), e)
 
     def _alert(self) -> None:
-        """Send the alert events written since the mark (meta notify.alert_event_id) as one message, at most
-        ALERT_BATCH per poll, oldest first; on delivery the mark moves to the newest one sent. Alert events: the
+        """Send the alert events written since the mark (meta notify.alert_event_id: the events up to this id were
+        considered) as one message, at most ALERT_BATCH per poll, oldest first; on delivery the mark moves to the
+        newest one sent; with none to send it moves to the newest event, so an event that was no alert when it was
+        considered (a device watched later, a flag turned on later) is never sent as new. Alert events: the
         ALERT_KINDS with MAIL_ON_SOURCE=1, and the WATCH_KINDS of devices with watch=1 with MAIL_ON_WATCH=1 (one mark
         for both). Only with a channel. No mark yet (first start with alerts on): the mark is set to the newest event
         and nothing is sent, so old events are not sent at an upgrade. While both are off the mark is removed (once
@@ -742,14 +745,20 @@ class Collector:
                 where.append(f"(kind IN ({','.join('?' * len(WATCH_KINDS))}) "
                              "AND mac IN (SELECT mac FROM devices WHERE watch=1))")
                 args += WATCH_KINDS
-            rows = self.db.q(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND ({' OR '.join(where)}) "
-                             f"ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH))
-            if not rows:
-                return
+            with self.db.tx() as c:  # one read: no event written between the two lands behind a moved mark unseen
+                rows = c.execute(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND "
+                                 f"({' OR '.join(where)}) ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH)).fetchall()
+                top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                # nothing to send: every event up to the newest was considered, so a device watched later (or a flag
+                # turned on later) gets only what is written after it
+                if not rows:
+                    if top > int(mark):
+                        self.db.set_meta(ALERT_MARK, str(top), c)
+                    return
             names = self._alert_names(rows)
             src = [r for r in rows if r["kind"] in ALERT_KINDS]
             msg = notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
-                                     src[-1]["kind"] if src else "watch")
+                                     src[-1]["kind"] if src else "watch", self._alert_links(rows))
         except Exception as e:  # sqlite3.Error or a bug: the mark stays, tried again at the next poll
             log.warning("%s skipped: %s", what, db_error_text(e) if isinstance(e, sqlite3.Error) else type(e).__name__)
             return
@@ -786,10 +795,10 @@ class Collector:
                 names[d["mac"]] = d["name"] or d["hostname"] or d["mac"]
         return names
 
-    def _alert_lines(self, rows: list, names: dict[str, str]) -> list[str]:
-        """`<time> <kind>: <detail>` per source event; `<time> <name> <kind>[: <detail>]` per device event, followed
-        by its page link (as in the new-device mail) when PUBLIC_URL is set. The time is in the container's TZ."""
-        base = self.cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
+    @staticmethod
+    def _alert_lines(rows: list, names: dict[str, str]) -> list[str]:
+        """`<time> <kind>: <detail>` per source event; `<time> <name> <kind>[: <detail>]` per device event. The time
+        is in the container's TZ."""
         lines = []
         for r in rows:
             at = time.strftime('%Y-%m-%d %H:%M', time.localtime(r["ts"]))
@@ -797,13 +806,19 @@ class Collector:
                 lines.append(f"{at} {r['kind']}: {r['detail']}")
                 continue
             lines.append(f"{at} {names[r['mac']]} {r['kind']}" + (f": {r['detail']}" if r["detail"] else ""))
-            if base:
-                lines.append(f"    {base}/?device={r['mac']}")
         return lines
+
+    def _alert_links(self, rows: list) -> list[str]:
+        """The page link of each device in rows (as in the new-device message), once per device in the order of
+        first appearance; [] without PUBLIC_URL."""
+        base = self.cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
+        if not base:
+            return []
+        return [f"{base}/?device={mac}" for mac in dict.fromkeys(r["mac"] for r in rows if r["mac"])]
 
     @staticmethod
     def _alert_subject(rows: list, names: dict[str, str]) -> str:
-        """One event: by its kind and instance ("fw1 is down") or device ("printer: offline"); several: their count,
+        """One event: by its kind and instance ("fw1 is down: timeout", "fw1 is back after 2h0m") or device ("printer: offline"); several: their count,
         named by what they are (source events, changes on watched devices, or alerts when both)."""
         if len(rows) > 1:
             devices = sum(1 for r in rows if r["mac"])
@@ -813,8 +828,11 @@ class Collector:
         r = rows[0]
         if r["mac"]:
             return f"{names[r['mac']]}: {r['kind']}"
-        name = r["detail"].split(":", 1)[0]  # source_down/source_up details start with "<instance>: "
-        return ALERT_SUBJECTS.get(r["kind"], "{name}: " + r["kind"]).format(name=name)
+        # source_down/source_up details are "<instance>: <error>" and "<instance>: up after <length>"
+        name, _, text = r["detail"].partition(": ")
+        if text.startswith("up after "):
+            text = text[len("up "):]
+        return ALERT_SUBJECTS.get(r["kind"], "{name}: " + r["kind"]).format(name=name, text=text).rstrip(": ")[:80]
 
     def _write_notify_state(self) -> None:
         """notify.<channel>.ok (1/0) in the meta table, written only when it changed."""

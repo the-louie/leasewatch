@@ -229,12 +229,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
                   "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
-                  "client_id", "archived_ts", "label")
+                  "client_id", "archived_ts", "label", "watch_online")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
                 "wifi_alias": "", "link": "", "loc_source": "", "client_id": "",
-                "archived_ts": None, "label": ""}
+                "archived_ts": None, "label": "", "watch_online": None}
 
 
 @dataclass
@@ -519,7 +519,7 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
         # devices not seen on the wire for longer than the grace period go offline
         if row["online"] and (row["last_online"] or 0) < grace:
             row["online"] = 0
-    res.events += _watch_events(rows, before, res, state, now)
+    res.events += _watch_events(rows, before, res, state, now, lease_blind)
     res.events += _auto_archive(rows, cfg, state, now)
     _assemble(res, rows, before, merged, state, changes)
     return res
@@ -669,21 +669,35 @@ def _back_event(cur: dict, m: Merged, now: int, prev_ok: bool) -> tuple[str, str
 
 
 def _watch_events(rows: dict[str, dict], before: dict[str, dict], res: MergeResult, state: MergeState,
-                  now: int) -> list[tuple[str, str, str]]:
-    """`offline` / `online` for each watched row (watch=1) whose online flag changed this poll; other rows get none.
-    offline: after the grace (in _update_row for a device still listed, or by the grace rule in merge), so the grace
-    is the debounce. online: back on the wire, unless this poll writes its `back` event (a day away or the archive)."""
-    # prev_ok: after a failed poll every device looks "away" for the outage (and _fail turned online off silently),
-    # so neither direction is evidence of a change
-    if not state.prev_ok:
+                  now: int, lease_blind: bool = False) -> list[tuple[str, str, str]]:
+    """`offline` / `online` for each watched row (watch=1) whose online flag differs from the one its last event
+    reported (watch_online, set in place); other rows get none and their watch_online is cleared, so watching again
+    starts clean. offline: after the grace (in _update_row for a device still listed, or by the grace rule in merge),
+    so the grace is the debounce. online: back on the wire, unless this poll writes its `back` event (a day away or the
+    archive). Only on a poll every source can be trusted for: the previous poll was ok (after a failed one every
+    device looks "away" for the outage, and _fail turned online off silently) and no sighting producer failed this
+    poll (lease_blind: a device only the failed one lists goes offline by the grace rule). A change on another poll is
+    written at the first trusted poll after it, if it still holds."""
+    if not state.prev_ok or lease_blind:
+        for row in rows.values():  # unwatched rows need no evidence to forget what was reported
+            if not row.get("watch"):
+                row["watch_online"] = None
         return []
     back = {mac for mac, kind, _ in res.events if kind == "back"}
     events = []
     for mac, row in rows.items():
-        was = before.get(mac)
-        if not row.get("watch") or was is None or bool(was["online"]) == bool(row["online"]):
+        if not row.get("watch"):
+            row["watch_online"] = None
             continue
-        if not row["online"]:
+        online = int(bool(row["online"]))
+        reported = row.get("watch_online")
+        if reported is None:  # just watched: the state before this poll is what was known when the watch began
+            was = before.get(mac)
+            reported = online if was is None else int(bool(was["online"]))
+        row["watch_online"] = online
+        if online == bool(reported):
+            continue
+        if not online:
             ago = max(0, now - (row["last_online"] or now)) // 60
             events.append((mac, "offline", f"last seen {ago} min ago"))
         elif mac not in back:

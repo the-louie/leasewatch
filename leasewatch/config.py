@@ -570,6 +570,11 @@ class Config:
             problems.append("AUTH_RO_USER must not contain ':' or control characters")
         if self.auth_ro_password_hash and parse_hash(self.auth_ro_password_hash) is None:
             problems.append("AUTH_RO_PASSWORD_HASH is not a valid hash (make one with python -m leasewatch hash-password)")
+        # the answer time of a login must not tell whether the read-only name exists: one iteration count for both
+        if self.auth_ro_password_hash and self.auth_password_hash:
+            main, ro = parse_hash(self.auth_password_hash), parse_hash(self.auth_ro_password_hash)
+            if main and ro and main[0] != ro[0]:
+                problems.append("AUTH_RO_PASSWORD_HASH must use the same iteration count as AUTH_PASSWORD_HASH")
         problems += self._notify_problems()
         problems += self.connector_problems
         for spec in self.connector_specs:
