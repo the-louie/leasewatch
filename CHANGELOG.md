@@ -5,6 +5,9 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- UniFi, session mode: the connector (version 1.3) also reports each client's controller hostname and vendor (OUI) as `client` sightings with `presence=False` and no IP, so they fill a device's name and vendor after the lease's. `HOSTNAMES=1` (default; `0` turns it off); key mode has neither.
+- For connector authors: `HostContext.device_ips()` maps an address (IPv4 or IPv6) to the device's MAC, merged addresses included; the kind `scan` now covers passive discovery too (its rank is unchanged).
+- New contrib connector `leasewatch-mdns` (type `mdns`): listen-only, it joins the mDNS group (224.0.0.251, UDP 5353) and never sends. It turns the announcements it hears into `scan` sightings with `hostname` and `label` (name and model), `presence=False`, no IP. Needs host networking.
 - Tags per device: free tags typed comma-separated in the device page (lower-case, dashes for blanks, letters, digits, `_`, `:`, `.` and `-`, the first character a letter or digit, 1-24 characters, at most 8, else refused with the reason), `owner:alex` as the way to record an owner, a chip per tag in the toolbar with online/total counts and a `?tag=` filter (once any `owner:` tag exists, the chips show those as the bare name under an "Owner" heading and the other tags under "Tags"; the address keeps the full tag, as in `?tag=owner:alex`), tags in the search, a `tags` event with who did it, a `"tags"` key in `POST /api/devices/<mac>` (the bulk route refuses it); a tagged device counts as named and is never folded into another device, archived by `PRUNE_DAYS`/`PRUNE_PRIVATE_DAYS` or deleted by `PURGE_DAYS`.
 - The device CSV also exports `tags`, `baseline`, `acked_at` and `split_from` (last columns, so no earlier column moves; `import-csv` does not read the last three).
 - `import-csv` reads and restores tags, and its default `--fields` list grew to `name,note,acked,archived,watch,tags`.
@@ -14,6 +17,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Swedish: the page is shown in Swedish when the browser's language is Swedish, or with `?lang=sv`, or with `UI_LANG=sv`; `UI_LANG=en` pins English (default `auto`). Event details, mails, CSV headers and the API stay English.
 
 ### Changed
+- A failed Wi-Fi controller no longer holds private-MAC merges back; only a source that has listed leases does.
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
 - A sighting's `ip` that is not a dotted IPv4 address is emptied by the host, and the merge reads an empty `ip` as unknown, so a device keeps its last IPv4 address; only a device none of whose sightings has an IPv4 address ends up with no IP.
 - CI: actions pinned by commit SHA, checkouts without a persisted token, read-only workflow permissions.

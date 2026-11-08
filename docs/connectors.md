@@ -82,7 +82,7 @@ One device as one source saw it (an IP, a hostname, a network).
 |---|---|---|
 | `mac` | `str` | As the source gives it. The host normalises it to `aa:bb:cc:dd:ee:ff` and drops the record if it is not a MAC. |
 | `source` | `str` | Leave it `""`. The host sets it to the instance name. |
-| `kind` | `str` | What the evidence is: `"dhcp"`, `"arp"`, `"client"`, `"scan"`, `"ndp"` or `"dhcp6"`. `"ndp"` is an IPv6 neighbour entry and `"dhcp6"` a DHCPv6 lease; both enrich a device that other kinds created, never create one, and rank after every other kind. See the ranking below. |
+| `kind` | `str` | What the evidence is: `"dhcp"`, `"arp"`, `"client"`, `"scan"`, `"ndp"` or `"dhcp6"`. `"scan"` is name or service discovery, passive (what devices announce, e.g. mDNS) or active (a probe); normally `presence=False`, because the names are cached and ARP already says who is on the wire. `"ndp"` is an IPv6 neighbour entry and `"dhcp6"` a DHCPv6 lease; both enrich a device that other kinds created, never create one, and rank after every other kind. See the ranking below. |
 | `presence` | `bool` | `True` only if the source saw the device on the wire **now** (an ARP entry, a lease the DHCP server marks online, an active controller client). A lease or a reservation alone is `False`. |
 | `observed_at` | `int` | Epoch seconds when you collected it (use `ctx.now()`). Informational in API 1; the merge does not rank by it. |
 | `ip` | `str` | IPv4 address, or `""`. IPv4 only; anything else (IPv6, junk, a leading zero as in `010.0.0.1`) is treated as empty. |
@@ -181,7 +181,9 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   presence as `False` whatever the connector sends; emit `presence=False` anyway so the record says what it means.
 - **Which kind to use.** A DHCP lease or reservation: `dhcp`, `presence=False` unless the server says the client
   is online. An ARP/neighbour table entry: `arp`, `presence=True`. A device a controller or access point reports as
-  connected: `client`. A result of an active scan: `scan`. An IPv6 neighbour table entry: `ndp`, `presence=False`
+  connected: `client` (the built-in `unifi` connector also emits `client` sightings with the controller's hostname and
+  OUI vendor, `presence=False`, in session mode). Name or service discovery, passive (what devices announce, e.g.
+  mDNS) or active (a probe): `scan`, normally `presence=False`. An IPv6 neighbour table entry: `ndp`, `presence=False`
   (an entry has no expiry and can outlive the device by a day). A DHCPv6 lease: `dhcp6`, `presence=False`. Put the
   address in `ip6`, and leave `ip` empty.
 - **Switch ports** (`link="wired"` from an instance without the controller role): each instance's first wired
@@ -420,7 +422,8 @@ services:
   host: on a 1.2 host the `Sighting(...)` call fails with an unexpected keyword. Guard it with `"label" in
   Sighting.__dataclass_fields__` or require host 1.3 in your package metadata. 1.4 added the stat
   `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs). 1.5 adds the kinds `ndp` and `dhcp6`,
-  the Sighting field `ip6` and `HostContext.device_ips()`; a connector written for 1.4 is unaffected and needs no change.
+  the Sighting field `ip6` and `HostContext.device_ips()`. 1.5 also widened the description of `scan` to passive
+  discovery; the kind's rank is unchanged. A connector written for 1.4 is unaffected and needs no change.
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional

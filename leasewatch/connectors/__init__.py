@@ -76,7 +76,8 @@ class Sighting:
     mac: as the source gives it; the host normalises it to "aa:bb:cc:dd:ee:ff" and drops the record if it is not a
     MAC. source: the connector instance name, filled in by the host (the connector may leave it ""). kind: what the
     evidence is, "dhcp" | "arp" | "client" | "scan" | "ndp" | "dhcp6" (ranking in merge.py). "ndp" is an IPv6 neighbour entry,
-    "dhcp6" a DHCPv6 lease; both enrich a device that other kinds created, never create one, never assert presence,
+    "dhcp6" a DHCPv6 lease; "scan" is name or service discovery, passive (e.g. mDNS) or active, normally
+    presence=False; "ndp" and "dhcp6" both enrich a device that other kinds created, never create one, never assert presence,
     and rank after every other kind. presence: True only if the source saw the
     device on the wire now (an ARP entry, ISC's "online" lease status, an active controller client); a lease or
     reservation alone is False. Only presence=True makes a device online and moves last_online, for every kind.
