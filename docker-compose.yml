@@ -15,6 +15,7 @@ services:
     environment:
       TZ: UTC  # your zone (e.g. Europe/Stockholm): used for log and CSV timestamps; the UI uses the browser's zone
       # LOG_FORMAT: json  # one JSON object per log line, for a log driver that parses JSON (default: plain text)
+      # MQTT_URL: mqtt://mosquitto:1883  # publish presence to a broker on the same compose network (Home Assistant discovery)
       # LW_CONNECTORS_DIR: /connectors  # connectors that are not built in (e.g. a copy of contrib/leasewatch-dnsmasq in ./connectors)
     volumes:
       - ./data:/data
