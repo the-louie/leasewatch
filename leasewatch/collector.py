@@ -681,16 +681,19 @@ class Collector:
                 continue
             self._notify_ok[name] = ok
 
-    def run_once(self) -> dict:
-        t0 = time.time()
-        producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
-        # read again below after the collection; here only to keep a pending baseline's failed check()s from backing off
+    def _sightings(self, producers: list[str]) -> tuple[dict[str, object], dict[str, str], dict[str, Batch]] | dict:
+        """Collect the sighting producers: (every answer, status, the batches), or the failed poll when none answered."""
+        # read again in run_once after the collection; here only to keep a pending baseline's failed check()s from backing off
         got, status = self._collect(producers, self.db.get_meta("first_run_done", "") != "1")
         ok = {n: b for n, b in got.items() if isinstance(b, Batch)}
         if not ok:  # every sighting producer failed: the poll fails, so nothing stays online forever
             errors = [(n, b.error) for n, b in got.items()]
             msg = errors[0][1] if len(errors) == 1 else "; ".join(f"{n}: {e}" for n, e in errors) or "no sighting connector is enabled"
             return self._fail(msg, status)
+        return got, status, ok
+
+    def _raw_stats(self, ok: dict[str, Batch]) -> tuple[list, dict[str, int]]:
+        """This poll's sightings and the summed integer stats of its batches; sets _poll_hosts."""
         sightings = [s for b in ok.values() for s in b.sightings]
         raw_stats: dict[str, int] = {}
         for b in ok.values():
@@ -699,12 +702,17 @@ class Collector:
                     raw_stats[k] = raw_stats.get(k, 0) + v
         # this poll's hostnames, read by _device_names() while the switch names its uplink ports
         self._poll_hosts = {mac: m.hostname for mac, m in merge([to_fw1(s) for s in sightings]).items()}
+        return sightings, raw_stats
+
+    def _enrich(self, producers: list[str], got: dict[str, object], status: dict[str, str]) -> dict[str, str]:
+        """Collect the other instances into got; returns the status of the whole collection."""
         more, enrich_status = self._collect([n for n in self._runs if n not in producers])
         got.update(more)
-        enrich_status = {**status, **enrich_status}
-        now = int(time.time())
-        first_run = self.db.get_meta("first_run_done", "") != "1"
-        prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
+        return {**status, **enrich_status}
+
+    def _baseline_gate(self, first_run: bool, sightings: list, ok: dict[str, Batch], producers: list[str],
+                       raw_stats: dict[str, int], enrich_status: dict[str, str]) -> list[str] | dict:
+        """The producers the baseline waits for, or the failed poll when a first poll found no devices."""
         # only a truly first poll: during the baseline wait devices are already stored, and an empty poll then is
         # an ordinary one that must run the merge (devices go offline), not fail as "first poll"
         if first_run and not sightings and not self.db.q("SELECT 1 FROM devices LIMIT 1"):
@@ -719,41 +727,72 @@ class Collector:
         if waiting and not self._baseline_wait_logged:
             log.warning("baseline held back until %s has answered once", ", ".join(waiting))
             self._baseline_wait_logged = True
-        batches = {n: got[n] for n in self._runs if n in got}
+        return waiting
+
+    def _merge_state(self, first_run: bool, prev_ok: bool, producers: list[str], waiting: list[str]) -> MergeState:
         # the controller role, not the type: any instance whose describe() says so (getattr: a type without roles)
         # producers: only an instance that lists sightings can hold a lease, so a failed switch does not hold lease types
-        state = MergeState(self._no_lease_since, first_run, prev_ok,
-                           frozenset(n for n, conn in self._connectors.items()
-                                     if "controller" in getattr(conn.describe(), "roles", frozenset())),
-                           producers=frozenset(producers), held_back=bool(waiting),
-                           undecided_since=self._undecided_since)
+        return MergeState(self._no_lease_since, first_run, prev_ok,
+                          frozenset(n for n, conn in self._connectors.items()
+                                    if "controller" in getattr(conn.describe(), "roles", frozenset())),
+                          producers=frozenset(producers), held_back=bool(waiting),
+                          undecided_since=self._undecided_since)
+
+    def _commit(self, c: sqlite3.Connection, state: MergeState, batches: dict, now: int, t0: float,
+                raw_stats: dict[str, int], first_run: bool, waiting: list[str], status: dict[str, str]):
+        """The poll's write, in the caller's transaction: merge against the stored rows, write, then the poll meta."""
+        prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
+        # read with prev in one transaction, so the alias map and the rows it points to agree
+        state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
+        if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS; only read when it runs
+            state.restored = {r["mac"]: r["ts"] for r in c.execute(
+                "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
+        state.prune_now = self._prune_reference(c, now)
+        res = merge_batches(prev, batches, self.cfg, now, state)
+        self._write(c, prev, res, now, state.prune_now)
+        self._write_poll_meta(c, t0, now, raw_stats, first_run, waiting, status)
+        self._write_source_events(c)
+        return res
+
+    def _write_poll_meta(self, c: sqlite3.Connection, t0: float, now: int, raw_stats: dict[str, int], first_run: bool,
+                         waiting: list[str], status: dict[str, str]) -> None:
+        """The meta rows of a successful poll, in the caller's transaction."""
+        for k, v in status.items():
+            self.db.set_meta(k, v, c)
+        if not waiting:
+            self.db.set_meta("first_run_done", "1", c)
+        self.db.set_meta("last_poll_ts", str(now), c)
+        self.db.set_meta("last_attempt_ts", str(now), c)
+        self.db.set_meta("last_poll_ok", "1", c)
+        self._count_poll(c, True, status)
+        self.db.set_meta("last_error", "", c)
+        self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
+        last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
+        if "reservations" in raw_stats:  # only a Kea firewall reports them
+            last_raw += f", {raw_stats['reservations']} reservations"
+        self.db.set_meta("last_raw", last_raw, c)
+        if first_run and not waiting:
+            self.db.set_meta("baseline_ts", str(now), c)
+
+    def run_once(self) -> dict:
+        t0 = time.time()
+        producers = [n for n, r in self._runs.items() if "sighting" in r.produces]
+        collected = self._sightings(producers)
+        if isinstance(collected, dict):  # the failed poll
+            return collected
+        got, status, ok = collected
+        sightings, raw_stats = self._raw_stats(ok)
+        enrich_status = self._enrich(producers, got, status)
+        now = int(time.time())
+        first_run = self.db.get_meta("first_run_done", "") != "1"
+        prev_ok = self.db.get_meta("last_poll_ok", "1") == "1"
+        waiting = self._baseline_gate(first_run, sightings, ok, producers, raw_stats, enrich_status)
+        if isinstance(waiting, dict):  # the failed poll
+            return waiting
+        batches = {n: got[n] for n in self._runs if n in got}
+        state = self._merge_state(first_run, prev_ok, producers, waiting)
         with self.db.tx() as c:
-            prev = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices").fetchall()}
-            # read with prev in one transaction, so the alias map and the rows it points to agree
-            state.aliases = {r["mac"]: r["device"] for r in c.execute("SELECT mac, device FROM aliases").fetchall()}
-            if self.cfg.prune_days > 0:  # a restore by hand holds against PRUNE_DAYS; only read when it runs
-                state.restored = {r["mac"]: r["ts"] for r in c.execute(
-                    "SELECT mac, MAX(ts) ts FROM events WHERE kind='restored' GROUP BY mac").fetchall()}
-            state.prune_now = self._prune_reference(c, now)
-            res = merge_batches(prev, batches, self.cfg, now, state)
-            self._write(c, prev, res, now, state.prune_now)
-            for k, v in enrich_status.items():
-                self.db.set_meta(k, v, c)
-            if not waiting:
-                self.db.set_meta("first_run_done", "1", c)
-            self.db.set_meta("last_poll_ts", str(now), c)
-            self.db.set_meta("last_attempt_ts", str(now), c)
-            self.db.set_meta("last_poll_ok", "1", c)
-            self._count_poll(c, True, enrich_status)
-            self.db.set_meta("last_error", "", c)
-            self.db.set_meta("last_poll_ms", str(int((time.time() - t0) * 1000)), c)
-            last_raw = f"{raw_stats.get('leases', 0)} leases, {raw_stats.get('arp', 0)} arp"
-            if "reservations" in raw_stats:  # only a Kea firewall reports them
-                last_raw += f", {raw_stats['reservations']} reservations"
-            self.db.set_meta("last_raw", last_raw, c)
-            if first_run and not waiting:
-                self.db.set_meta("baseline_ts", str(now), c)
-            self._write_source_events(c)
+            res = self._commit(c, state, batches, now, t0, raw_stats, first_run, waiting, enrich_status)
         self._source_events_written()
         # only now: a poll whose write failed stored nothing, so its producers have not yet answered for the baseline
         for n in ok:
