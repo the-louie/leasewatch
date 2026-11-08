@@ -20,7 +20,7 @@ install -d -o 10001 -g 10001 data           # the container runs as uid:gid 1000
 docker compose up -d --build                # publishes port 8080 on the host; for nginx-proxy see the commented variant in docker-compose.yml
 docker compose exec leasewatch wget -qO- http://127.0.0.1:8080/api/stats   # the meta block shows the last poll; /healthz is for monitors (503 + reason on failure, which busybox wget does not print)
 ```
-The default compose file publishes `8080:8080` and needs no external network. leasewatch covers IPv4 only (no NDP or IPv6 sightings). Timestamps in logs and CSV are UTC unless `TZ` is set (the image has tzdata).
+The default compose file publishes `8080:8080` and needs no external network. leasewatch covers IPv4 only (no NDP or IPv6 sightings). Timestamps in logs and CSV are UTC unless `TZ` is set (the image has tzdata). `LOG_FORMAT=plain|json|auto` (default `auto`) sets the log line layout: under systemd/journald the time is left out automatically (journald adds its own); with Docker use `LOG_FORMAT=json` if a log driver parses JSON.
 
 Without Docker: `pip install .` (or `pip install '.[snmp]'` for the SNMP switch connector) installs the `leasewatch` command, which runs like `python3 -m leasewatch`. It reads its settings from the environment only (it does not read `.env`) and needs a writable `DATA_DIR` (default `/data`), e.g. `DATA_DIR=./data`.
 

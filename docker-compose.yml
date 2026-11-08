@@ -13,6 +13,7 @@ services:
       - "8080:8080"
     environment:
       TZ: UTC  # your zone (e.g. Europe/Stockholm): used for log and CSV timestamps; the UI uses the browser's zone
+      # LOG_FORMAT: json  # one JSON object per log line, for a log driver that parses JSON (default: plain text)
       # LW_CONNECTORS_DIR: /connectors  # connectors that are not built in (e.g. a copy of contrib/leasewatch-dnsmasq in ./connectors)
     volumes:
       - ./data:/data

@@ -15,6 +15,7 @@ runs) and rotates DATA_DIR/backups/;
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -22,6 +23,7 @@ import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Callable
 
 from . import __version__, maintenance
@@ -571,6 +573,30 @@ def types_line() -> str:
     return _printable("connector types: " + type_help())
 
 
+class _JsonFormatter(logging.Formatter):
+    """One JSON object per record on one line: ts (local time, ms, UTC offset), level, logger, msg, exc (if any)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        out = {"ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
+               "level": record.levelname, "logger": record.name, "msg": record.getMessage()}
+        if record.exc_info:
+            out["exc"] = self.formatException(record.exc_info)
+        return json.dumps(out, ensure_ascii=False, default=str)
+
+
+def _log_setup(level: str, fmt: str) -> bool:
+    """Configure the root logger for the service; False when `fmt` is not plain, json or auto (plain is used)."""
+    known = fmt in ("auto", "plain", "json")
+    line = "%(levelname)s %(name)s: %(message)s"
+    if fmt == "plain" or (fmt == "auto" and "JOURNAL_STREAM" not in os.environ) or not known:
+        line = "%(asctime)s " + line  # journald adds its own time, so only `auto` under it leaves this out
+    logging.basicConfig(level=level, format=line)
+    if fmt == "json":
+        for h in logging.getLogger().handlers:
+            h.setFormatter(_JsonFormatter())
+    return known
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in SUBCOMMANDS:
@@ -610,8 +636,11 @@ def main(argv: list[str] | None = None) -> int:
             return 130  # 128 + SIGINT, as the shell reports an interrupted command
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
     known = isinstance(logging.getLevelName(level), int)
-    logging.basicConfig(level=level if known else "INFO", format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    fmt = (os.environ.get("LOG_FORMAT") or "auto").strip().lower()
+    fmt_known = _log_setup(level if known else "INFO", fmt)
     log = logging.getLogger("leasewatch")
+    if not fmt_known:
+        log.warning("LOG_FORMAT=%r is not plain, json or auto; using plain", fmt)
     if not known:
         log.warning("LOG_LEVEL=%r is not a log level, using INFO", level)
     cfg = Config()

@@ -2,6 +2,11 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+- `LOG_FORMAT=plain|json|auto`: JSON log lines for log drivers; under journald the timestamp is left out (journald adds its own).
+
 ## 1.3.0 (2026-11-07)
 
 ### Added

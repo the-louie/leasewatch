@@ -15,13 +15,13 @@ import _netguard  # noqa: E402
 # a module run on its own (not through discover) is guarded too; see _netguard.py
 _netguard.install()
 
-# Every name read through _env/_env_int in leasewatch/config.py, plus LOG_LEVEL (__main__.py) and
+# Every name read through _env/_env_int in leasewatch/config.py, plus LOG_LEVEL and LOG_FORMAT (__main__.py) and
 # LW_CONNECTORS_DIR (connectors/__init__.py: a developer's own plugin dir must not reach the tests).
 # Derived with: grep -oE '_env(_int)?\("[A-Z0-9_]+"' leasewatch/config.py. Keep in sync when a setting is added.
 CONFIG_VARS = (
     "ALLOWED_HOSTS", "DATA_DIR", "LEASE_TYPE_MODE", "LISTEN_HOST", "LISTEN_PORT", "MAIL_FROM_NAME", "MAILGUN_API_BASE",
     "MAILGUN_DOMAIN", "MAILGUN_KEY", "MAIL_TO", "NEW_DAYS", "ONLINE_GRACE_MINUTES", "POLL_SECONDS", "PRUNE_DAYS", "PUBLIC_URL",
-    "SITE_NAME", "LOG_LEVEL", "LW_CONNECTORS", "LW_CONNECTORS_DIR", "AUTH_USER", "AUTH_PASSWORD_HASH", "BACKUP_KEEP",
+    "SITE_NAME", "LOG_LEVEL", "LOG_FORMAT", "LW_CONNECTORS", "LW_CONNECTORS_DIR", "AUTH_USER", "AUTH_PASSWORD_HASH", "BACKUP_KEEP",
     "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_VERIFY_TLS",
     "WIFI_PRESENCE_DAYS", "WEBHOOK_URL", "WEBHOOK_SECRET", "WEBHOOK_FORMAT", "READ_ONLY", "WRITE_ALLOW",
 )
