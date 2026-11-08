@@ -271,7 +271,7 @@ A connector may import only these 15 names, and only as `from leasewatch.connect
 | `Setting` | One setting key (section 3). |
 | `Sighting`, `Attachment`, `Batch` | The records (section 2). |
 | `ConnectorError` | The one exception to raise. |
-| `HostContext` | What the host lends you: `log`, `now()` (epoch seconds), `norm_mac(text)`, `redact(text)`, `opener_factory(...)`, `device_names()` (MAC to the device's name or hostname, read-only; lets a switch name an uplink after the device behind it), `timeout` (the instance's `TIMEOUT`). |
+| `HostContext` | What the host lends you: `log`, `now()` (epoch seconds), `norm_mac(text)`, `redact(text)`, `opener_factory(...)`, `device_names()` (MAC to the device's name or hostname, read-only; lets a switch name an uplink after the device behind it), `device_ips()` (IP, v4 or v6, to the device's key MAC, read-only; lets a listener that hears only addresses name a device), `timeout` (the instance's `TIMEOUT`). |
 | `SettingsMixin` | `_init_settings(name, settings, ctx)`, `describe()`, `_generic_problems()`, a repr without secrets. Set the class attribute `INFO`. |
 | `build_opener` | The default HTTP(S) opener (section 4). |
 | `make_redactor`, `make_host_mask` | Masking helpers (section 4). |
@@ -419,8 +419,8 @@ services:
   Added so far inside API 1: 1.3 added `Sighting.label` (optional, default `""`). A connector that sets it needs a 1.3
   host: on a 1.2 host the `Sighting(...)` call fails with an unexpected keyword. Guard it with `"label" in
   Sighting.__dataclass_fields__` or require host 1.3 in your package metadata. 1.4 added the stat
-  `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs). 1.5 adds the kinds `ndp` and `dhcp6`
-  and the Sighting field `ip6`; a connector written for 1.4 is unaffected and needs no change.
+  `ssid_unavailable`; an older host ignores it (it keeps the stored SSIDs). 1.5 adds the kinds `ndp` and `dhcp6`,
+  the Sighting field `ip6` and `HostContext.device_ips()`; a connector written for 1.4 is unaffected and needs no change.
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional

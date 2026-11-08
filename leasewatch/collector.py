@@ -157,8 +157,10 @@ class Collector:
         # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
         self._ctx = instances_context(specs)
         self._ctx.device_names = self._device_names
+        self._ctx.device_ips = self._device_ips
         # before the instances are built: a connector may call device_names() in __init__
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
+        self._poll_ips: dict[str, str] = {}  # ip -> mac from this poll's sightings, for _device_ips()
         self._connectors: dict = {}
         self._closed = False
         self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
@@ -279,6 +281,16 @@ class Collector:
         # a merged private MAC goes by its device's name: the switch names an uplink after it
         for r in self.db.q("SELECT a.mac, a.device FROM aliases a JOIN devices d ON d.mac = a.device"):
             out[r["mac"]] = out.get(r["device"]) or hosts.get(r["mac"], "")
+        return out
+
+    def _device_ips(self) -> dict[str, str]:
+        """ip -> the device's key MAC (IPv4 and IPv6): this poll's sightings, then the stored rows, which win."""
+        aliases = {r["mac"]: r["device"] for r in self.db.q("SELECT mac, device FROM aliases")}
+        out = {ip: aliases.get(mac, mac) for ip, mac in self._poll_ips.items()}
+        for r in self.db.q("SELECT mac, ip, ip6 FROM devices"):
+            for ip in (r["ip"], r["ip6"]):
+                if ip:
+                    out[ip] = r["mac"]
         return out
 
     def _work(self, run: _Run, gen: int, conn: object, check: bool) -> None:
@@ -943,6 +955,7 @@ class Collector:
                     raw_stats[k] = raw_stats.get(k, 0) + v
         # this poll's hostnames, read by _device_names() while the switch names its uplink ports
         self._poll_hosts = {mac: m.hostname for mac, m in merge([to_fw1(s) for s in sightings]).items()}
+        self._poll_ips = {ip: s.mac for s in sightings for ip in (s.ip, s.ip6) if ip}
         return sightings, raw_stats
 
     def _enrich(self, producers: list[str], got: dict[str, object], status: dict[str, str]) -> dict[str, str]:

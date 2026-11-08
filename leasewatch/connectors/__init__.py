@@ -220,6 +220,9 @@ class HostContext:
     # mac -> the device's name, else its hostname, as the host knows it (read-only); lets a switch name an unnamed
     # uplink port after the AP or switch behind it
     device_names: Callable[[], dict[str, str]] = field(default=lambda: {})
+    # ip -> mac (the device's key MAC, also for an IP last seen on one of its merged addresses), IPv4 and IPv6, as
+    # the host knows it (read-only); lets a passive listener that hears only addresses attribute a name to a device
+    device_ips: Callable[[], dict[str, str]] = field(default=lambda: {})
     # the instance's TIMEOUT (a host key, so absent from settings); set per instance by build_instance, so a
     # connector can cap its own I/O there instead of running on after the host has abandoned the collect
     timeout: int = 60
