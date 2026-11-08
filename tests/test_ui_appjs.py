@@ -500,6 +500,39 @@ out.v = [t("app.copied"), t("count.devices", { n: 2 })];
 """)
         self.assertEqual(out["v"], ["app.copied", "count.devices"])
 
+    # the real Swedish table's plural: one form for 1, another for 2, not the English text
+    def test_t_swedish_plural_from_the_table(self) -> None:
+        out = _run([], r"""location.search = "?lang=sv";
+//--
+out.n = Object.keys(window.LW_STRINGS.sv).length; out.v = [t("count.devices", { n: 1 }), t("count.devices", { n: 2 })];
+""")
+        if out["n"] == 0:  # skipped only while the table is wholly empty; a half-filled one is checked
+            self.assertEqual(out["n"], 0)
+            self.skipTest("sv table not filled yet")
+        one, two = out["v"]
+        self.assertNotEqual(one, two)
+        self.assertIn("1", one)
+        self.assertIn("2", two)
+        self.assertNotIn(one, ("1 device", "count.devices"))
+
+    # the marks are rewritten in Swedish (text and each attribute of a data-i18n-attr pair); in English nothing is touched,
+    # as the HTML already holds the English text
+    def test_apply_i18n_marks(self) -> None:
+        script = r"""
+window.LW_STRINGS.sv = { "x.text": "Svensk text", "x.title": "Svensk titel", "x.ph": "Sök" };
+window.LW_STRINGS.en["x.text"] = "Not the HTML text";
+const mk = (ds) => ({ dataset: ds, textContent: "HTML text", attrs: {}, setAttribute(n, v) { this.attrs[n] = v; } });
+const text = mk({ i18n: "x.text" }), attr = mk({ i18nAttr: "title:x.title, placeholder:x.ph" });
+const root = { querySelectorAll: s => s === "[data-i18n]" ? [text] : s === "[data-i18n-attr]" ? [attr] : [] };
+//--
+applyI18n(root);
+out.v = [lang, text.textContent, attr.attrs, attr.textContent];
+"""
+        out = _run(["applyI18n"], 'location.search = "?lang=sv";' + script)
+        self.assertEqual(out["v"], ["sv", "Svensk text", {"title": "Svensk titel", "placeholder": "Sök"}, "HTML text"])
+        out = _run(["applyI18n"], 'location.search = "?lang=en";' + script)
+        self.assertEqual(out["v"], ["en", "HTML text", {}, "HTML text"])
+
     # the collector's counts are rebuilt from the table: every part, only the two base parts, and a text of another shape
     def test_last_raw_parts(self) -> None:
         out = _run([], r"""//--
