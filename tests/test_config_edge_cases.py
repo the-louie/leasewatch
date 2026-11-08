@@ -140,6 +140,18 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(specs[0].settings["key"], "abcdefgh")
 
+    # the UniFi API key is a secret: <KEY>_FILE supplies it, and its value is redacted
+    def test_unifi_api_key_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "apikey")
+            with open(path, "w") as f:
+                f.write("api-Sekret-4242\n")
+            env = {"LW_CONNECTORS": "unifi", "LW_CONNECTOR__UNIFI__TYPE": "unifi", "LW_CONNECTOR__UNIFI__URL": "https://10.0.0.2",
+                   "LW_CONNECTOR__UNIFI__AUTH": "apikey", "LW_CONNECTOR__UNIFI__API_KEY_FILE": path}
+            specs, problems = parse_instances(env)
+        self.assertEqual(problems, [])
+        self.assertEqual(specs[0].settings["api_key"], "api-Sekret-4242")
+
     # an "@" in the path or query is not a credential
     def test_at_sign_in_path_or_query_accepted(self) -> None:
         self.assertEqual(self.cfg(PUBLIC_URL="https://lw.example.lan/?x=a@b").validate(), [])

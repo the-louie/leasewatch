@@ -38,7 +38,7 @@ class FakeFw1:
 class DescribeTests(unittest.TestCase):
     def test_describe_is_well_formed(self):
         for cls, secrets in ((OpnsenseConnector, {"key", "secret"}), (SnmpSwitchConnector, {"auth_key", "priv_key"}),
-                             (UnifiConnector, {"password"})):
+                             (UnifiConnector, {"password", "api_key"})):
             info = cls.describe()
             self.assertEqual(info.api_version, API_VERSION)
             self.assertRegex(info.type, r"^[a-z0-9_]+$")
@@ -59,7 +59,7 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual({s.key for s in OpnsenseConnector.describe().settings},
                          {"url", "key", "secret", "verify_tls", "dhcp_backend", "ignore_interfaces", "proxy"})
         self.assertEqual({s.key for s in SnmpSwitchConnector.describe().settings}, {"host", "port", "name", "user", "auth", "auth_key", "priv", "priv_key", "profile", "profile_file", "min_macs"})
-        self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "verify_tls", "proxy", "platform"})
+        self.assertEqual({s.key for s in UnifiConnector.describe().settings}, {"url", "site", "user", "password", "auth", "api_key", "verify_tls", "proxy", "platform"})
 
     def test_wrappers_are_connectors(self):
         for c in (OpnsenseConnector("fw1", FW1, CTX), SnmpSwitchConnector("switch", SW, CTX), UnifiConnector("unifi", UF, CTX)):
@@ -111,6 +111,32 @@ class ValidateTests(unittest.TestCase):
         self.assertTrue("connector unifi (unifi): USER is required" in p and "connector unifi (unifi): PASSWORD is required" in p, p)
         self.assertEqual(UnifiConnector("unifi", {**UF, "url": "ftp://unifi.example.lan"}, CTX).validate(),
                          ["url must be a URL (https://<controller>)"])
+
+    def test_unifi_apikey_mode(self):
+        w = "connector unifi (unifi): "
+        base = {"url": "https://unifi.example.lan", "auth": "apikey"}
+        self.assertEqual(UnifiConnector("unifi", base, CTX).validate(), [w + "API_KEY is required"])
+        self.assertEqual(UnifiConnector("unifi", {**base, "api_key": "k-123", "platform": "unifi_os"}, CTX).validate(), [])
+        self.assertEqual(UnifiConnector("unifi", {**base, "api_key": "k-123"}, CTX).validate(), [])
+        self.assertEqual(UnifiConnector("unifi", {**base, "api_key": "k-123", "platform": "classic"}, CTX).validate(),
+                         [w + "PLATFORM classic has no API keys (use unifi_os or auto)"])
+        for extra in ({"user": "u"}, {"password": "p"}):
+            self.assertEqual(UnifiConnector("unifi", {**base, "api_key": "k-123", **extra}, CTX).validate(),
+                             [w + "USER and PASSWORD are not used with AUTH=apikey"])
+        self.assertEqual(UnifiConnector("unifi", {**base, "auth": "token"}, CTX).validate()[0], w + "AUTH must be one of session, apikey")
+
+    def test_unifi_session_mode_ignores_the_key(self):
+        self.assertEqual(UnifiConnector("unifi", {**UF, "api_key": "k-123"}, CTX).validate(), [])
+        self.assertEqual(UnifiConnector("unifi", {"url": "https://unifi.example.lan", "auth": "session"}, CTX).validate(),
+                         ["connector unifi (unifi): USER is required", "connector unifi (unifi): PASSWORD is required"])
+
+    def test_unifi_apikey_is_hidden_and_has_no_client_yet(self):
+        c = UnifiConnector("unifi", {"url": "https://unifi.example.lan", "auth": "apikey", "api_key": "k-Sekret-77"}, CTX)
+        self.assertNotIn("k-Sekret-77", repr(c))
+        with self.assertRaises(ConnectorError) as cm:
+            c.check()
+        self.assertNotIn("k-Sekret-77", str(cm.exception))
+        c.close()
 
 
 class OpnsenseTests(unittest.TestCase):
