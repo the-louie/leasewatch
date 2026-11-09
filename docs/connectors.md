@@ -44,7 +44,7 @@ describe()  ->  __init__(name, settings, ctx)  ->  validate()  ->  check()  ->  
 | `validate()` | At start, right after `__init__`. | No I/O. Returns a list of problem strings; an empty list means the settings are fine. |
 | `check()` | Once before the first `collect()`. | One cheap probe of the source (open the file, one request). Returns `None` or raises `ConnectorError`. |
 | `collect()` | Once per poll. | Returns a `Batch`, or raises `ConnectorError`. |
-| `close()` | By the `check` and `collect` commands and by the contract tests. The running server does not call it today; the instance lives until the process ends. | Never raises. May be called twice. Do not keep a connection open across polls in a way that needs `close()` to clean up. |
+| `close()` | By the `check` and `collect` commands and by the contract tests. The running server calls it once at shutdown, after the last poll. | Never raises. May be called twice. Do not keep a connection open across polls in a way that needs `close()` to clean up. |
 
 How the host runs it (`leasewatch/collector.py`):
 
@@ -54,7 +54,8 @@ How the host runs it (`leasewatch/collector.py`):
   skipped`) until the thread ends. The value is in `ctx.timeout`; use it to cap your own I/O (for example
   `min(ctx.timeout, 30)` as a socket timeout) so that your thread ends.
 - **Order.** Instances whose `produces` has `"sighting"` run first, in parallel. Then all other instances run, in
-  parallel. The poll fails only when every sighting producer failed.
+  parallel. The poll fails only when every sighting producer without the `controller` or `names` role failed: a
+  secondary source never fails a poll.
 - **Check backoff.** If `check()` fails or hangs, it is tried again after `POLL_SECONDS`, then after double that time,
   and so on up to 600 s. After that wait, the host stops calling `check()` and calls `collect()` every poll. Once
   `check()` has passed, a failing `collect()` does not run `check()` again. Exception: while the first baseline is
@@ -133,6 +134,8 @@ the documented string key `"strategy"`.
 | `ssid_unavailable` | attachment producers | Set it (> 0) when your controller cannot report SSIDs, signal or radio this poll; the host then clears the stored values instead of keeping them, and writes one `wifi` event, `SSID unknown (controller reports none)`, for each device whose stored SSID it clears. The built-in UniFi connector sets it in key mode. |
 | `dropped` | you and the host | Records you skipped as unusable. The host adds the records it dropped itself. **A batch with `dropped > 0` is not a complete list**: for a controller, and for the switch that holds a device, it counts as failed in the merge (see below). |
 
+Any `*_unavailable` stat above 0 (such as `labels_unavailable`, `ndp_unavailable`, `kea6_unavailable`) and `dropped` above 0 also appear in `/api/status` as the instance's `warnings` and in the page's status tooltip; `ssid_unavailable` is not shown there, and `labels_unavailable` is not shown for an instance with the `names` role (an empty cache is its normal state).
+
 The status count of an instance is always `len(sightings) + len(attachments)`, whatever `stats` says.
 
 ### What the host does with a batch
@@ -167,7 +170,7 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   | Field | Order |
   |---|---|
   | `ip`, `network`, `iface` | Taken together from one sighting: the `dhcp` lease whose IP is in an `arp` sighting, shown where ARP saw it; else the first `arp`, else the lease if it has an IP. Only without any `arp` sighting and lease with an IP: a sighting with an IP first, then `client`, then `scan`. |
-  | `hostname` | the lease's hostname, then the first non-empty in `dhcp`, `client`, `arp`, `scan` |
+  | `hostname` | the lease's hostname, then the first non-empty in `dhcp`, `arp`, `client`, `scan` (`dhcp6` last) |
   | `vendor` | first non-empty in `dhcp`, `arp`, `client`, `scan` |
   | `lease_type` | the chosen `dhcp` lease only |
 
@@ -478,7 +481,7 @@ What it checks (all tests are named `test_contract_*`):
   is missing.
 - The repr shows no secret value, also not in its repr or JSON escaped form.
 - `check()` returns `None`; `collect()` returns a `Batch` whose `sightings` and `attachments` are lists or tuples, with at
-  least one record, only of the declared kinds, `kind` in `dhcp/arp/client/scan`, `link` in `wired/wifi`, a MAC
+  least one record, only of the declared kinds, `kind` in `dhcp/arp/client/scan/ndp/dhcp6`, `link` in `wired/wifi`, a MAC
   that `norm_mac` accepts and an int (not bool) `observed_at > 0`.
 - With `failing_settings()`: a `ConnectorError` whose text holds no secret value (escaped forms included) and no
   host of a URL setting, in any spelling `make_host_mask()` masks (whole occurrences only: `10.0.0.15` is not
@@ -540,7 +543,9 @@ $ python -m leasewatch collect lan --json
       "network": "LAN",
       "iface": "",
       "lease_type": "static",
-      "client_id": ""
+      "client_id": "",
+      "label": "",
+      "ip6": ""
     },
     {
       "mac": "02:00:00:00:00:02",
@@ -554,7 +559,9 @@ $ python -m leasewatch collect lan --json
       "network": "LAN",
       "iface": "",
       "lease_type": "static",
-      "client_id": ""
+      "client_id": "",
+      "label": "",
+      "ip6": ""
     }
   ],
   "attachments": []
@@ -773,7 +780,7 @@ LW_CONNECTOR__DHCP1__PATH=/leases/example.leases
 
 ## What it sees
 
-- Which records (`dhcp`/`arp`/`client`/`scan` sightings, `wired`/`wifi` attachments) and which fields are filled.
+- Which records (`dhcp`/`arp`/`client`/`scan`/`ndp`/`dhcp6` sightings, `wired`/`wifi` attachments) and which fields are filled.
 - Whether it sets presence (can it make a device *Online*?) and the lease type.
 - What is skipped, and what is counted as `dropped`.
 
