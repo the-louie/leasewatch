@@ -121,7 +121,7 @@ def _extract(src: str, name: str) -> str:
 
 # helpers most tests need; each test adds the functions it exercises
 BASE = ["state", "esc", "pad", "abs", "rel", "pad3", "ipKey", "ipCmp", "isNew", "label", "typeText", "sourcesText",
-        "onWifi", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
+        "onWifi", "linkKind", "linkLabel", "LINK_SVG", "linkIcon", "connLabel", "whereHtml", "whereText", "vlanColor", "VLAN_COLORS", "kindText", "FORM_FIELDS", "formValues", "applyForm", "formEdited", "copyable",
         "aliasesHtml", "wifiHtml", "paintVc", "durText", "ssidRow", "onSsidNow", "tagsOf", "T", "pickLang", "lang", "langParam", "t", "RAW_RE", "rawText", "apiErrorText"]
 
 # the page globals the language code reads, a block outside the rest: a test's own "const location" or
@@ -302,6 +302,26 @@ state.status = "all"; state.q = "ge1/0/5"; out.search = filtered().map(d => d.ma
         self.assertEqual(out["wifi"], ["02:00:00:00:00:02"])
         self.assertEqual(out["search"], ["02:00:00:00:00:01"])
         self.assertIn("ap-hall", out["live"])
+
+    # the row icon's link type is the one the Wi-Fi and wired filters use
+    def test_link_kind_matches_the_filters(self) -> None:
+        out = _run(["filtered"], r"""//--
+const base = { wifi_ssid: "", wifi_ap: "", link: "", sw_port: "", sw_via: "", loc_source: "", vlan: "LAN" };
+state.devices = [
+  { ...base, mac: "02:00:00:00:00:11", ip: "10.0.0.11", wifi_ssid: "home", wifi_ap: "ap-hall", link: "wifi", loc_source: "unifi" },
+  { ...base, mac: "02:00:00:00:00:12", ip: "10.0.0.12", wifi_ap: "ap-hall", loc_source: "unifi" },
+  { ...base, mac: "02:00:00:00:00:13", ip: "10.0.0.13", link: "wired", loc_source: "unifi" },
+  { ...base, mac: "02:00:00:00:00:14", ip: "10.0.0.14", sw_port: "GE1/0/7", loc_source: "sw1" },
+  { ...base, mac: "02:00:00:00:00:15", ip: "10.0.0.15" },
+  { ...base, mac: "02:00:00:00:00:16", ip: "10.0.0.16", wifi_ap: "ap-hall", sw_port: "GE1/0/8", loc_source: "sw1" },
+];
+out.kinds = state.devices.map(linkKind);
+state.status = "wifi"; out.wifi = filtered().map(d => d.mac);
+state.status = "wired"; out.wired = filtered().map(d => d.mac);
+""")
+        self.assertEqual(out["kinds"], ["wifi", "wifi", "wired", "wired", "", "wired"])
+        self.assertEqual(out["wifi"], ["02:00:00:00:00:11", "02:00:00:00:00:12"])
+        self.assertEqual(out["wired"], ["02:00:00:00:00:13", "02:00:00:00:00:14", "02:00:00:00:00:16"])
 
     # a controller never places a switch port, so it is not named after one; a switch still is
     def test_port_not_labelled_with_controller(self) -> None:

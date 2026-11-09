@@ -111,6 +111,8 @@
   // a controller client can come without an SSID (hidden network, mid-association): its AP and signal still place it.
   // merge clears the port when a device goes on Wi-Fi, so an SSID-less row with a port is one a switch placed since
   const onWifi = d => !!(d.wifi_ssid || ((d.wifi_ap || d.link === "wifi") && !d.sw_port));
+  const linkKind = d => onWifi(d) ? "wifi" : (d.link === "wired" || d.sw_port) ? "wired" : "";
+  const linkLabel = k => k === "wifi" ? t("row.link_wifi") : k === "wired" ? t("row.link_wired") : t("row.link_unknown");
   // the device's presence row of the filtered SSID (null without the filter, or when it has none yet)
   const ssidRow = d => state.ssid === null ? null : (d.wifi_presence || []).find(p => p.ssid === state.ssid) || null;
   const onSsidNow = d => !!d.online && onWifi(d) && d.wifi_ssid === state.ssid;
@@ -126,6 +128,15 @@
     return "";
   };
   const whereText = d => onWifi(d) ? `${d.wifi_ssid || "Wi-Fi"} @ ${d.wifi_ap || ""}` : d.sw_port ? `${d.sw_port} ${d.sw_via || ""}` : "";
+  // the link-type icon of the row's first column, as HTML for the drawer: the three glyphs, CSS shows the one of data-k
+  const LINK_SVG = '<svg class="k-wifi" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.5 9a15 15 0 0 1 21 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="currentColor" stroke-width="1"/></svg>'
+    + '<svg class="k-wired" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2ZM9 8v3M12 8v3M15 8v3M12 5v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    + '<svg class="k-unknown" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+  const linkIcon = d => {
+    const k = linkKind(d), onl = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
+    const lab = esc(linkLabel(k) + " · " + onl);
+    return `<span class="lk${d.online ? " on" : ""}" role="img" data-k="${k || "unknown"}" title="${lab}" aria-label="${lab}">${LINK_SVG}</span>`;
+  };
 
   // the server's error messages a user can meet, in the page's language; any other message is shown as sent
   const apiErrorText = m => m === "read-only" ? t("err.read_only") : m === "writes are not allowed from this address" ? t("err.not_allowed_from_address")
@@ -369,8 +380,8 @@
         case "dynamic": if (d.lease_type !== "dynamic") return false; break;
         case "static": if (d.lease_type !== "static") return false; break;
         case "arp": if (d.lease_type) return false; break;
-        case "wifi": if (!onWifi(d)) return false; break;
-        case "wired": if (onWifi(d) || (d.link !== "wired" && !d.sw_port)) return false; break;
+        case "wifi": if (linkKind(d) !== "wifi") return false; break;
+        case "wired": if (linkKind(d) !== "wired") return false; break;
       }
       if (q) {
         const hay = `${d.name} ${d.hostname} ${d.ip} ${d.ip6 || ""} ${d.mac} ${d.vendor} ${d.vlan} ${d.note} ${whereText(d)} ${d.wifi_alias} ${d.label} ${(d.aliases || []).join(" ")} ${tagsOf(d).join(" ")}`.toLowerCase();
@@ -430,8 +441,10 @@
       tr.dataset.mac = d.mac;
       const fresh = isNew(d) && !d.acked;
       if (fresh) tr.classList.add("is-new");
-      const dot = $(".online-dot", tr); dot.classList.toggle("on", !!d.online);
-      dot.title = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
+      const lk = $(".lk", tr), k = linkKind(d);
+      lk.dataset.k = k || "unknown"; lk.classList.toggle("on", !!d.online);
+      const onl = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
+      lk.title = linkLabel(k) + " · " + onl; lk.setAttribute("aria-label", lk.title);
       const nm = $(".dev-name", tr), lbl = label(d);
       $(".nm", nm).textContent = lbl;
       // a real checkbox: Tab reaches it and Space toggles it natively (the row's own keys ignore it); a click anywhere
@@ -747,7 +760,7 @@
     $("#dTitle").textContent = label(d);
     const b = $("#dBody");
     const kv = `
-        <dt>${esc(t("drawer.status"))}</dt><dd><span class="online-dot ${d.online ? "on" : ""}"></span> ${esc(d.online ? t("row.online") : (d.last_online ? t("drawer.offline_last", { ago: rel(d.last_online) }) : (d.sources === "" ? t("drawer.offline_split") : t("drawer.offline_never"))))}</dd>
+        <dt>${esc(t("drawer.status"))}</dt><dd>${linkIcon(d)} ${esc(d.online ? t("row.online") : (d.last_online ? t("drawer.offline_last", { ago: rel(d.last_online) }) : (d.sources === "" ? t("drawer.offline_split") : t("drawer.offline_never"))))}</dd>
         <dt>${esc(t("drawer.ip"))}</dt><dd class="mono">${esc(d.ip || "–")}</dd>
         ${d.ip6 ? `<dt>${esc(t("drawer.ip6"))}</dt><dd class="mono">${esc(d.ip6)}</dd>` : ""}
         <dt>${esc(t("drawer.mac"))}</dt><dd class="mono">${esc(d.mac)}</dd>

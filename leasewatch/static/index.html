@@ -80,7 +80,7 @@
     <table id="tbl">
       <thead><tr>
         <th class="c-sel" scope="col"><input type="checkbox" id="selAll" aria-label="Select all visible" data-i18n-attr="aria-label:aria.select_all"></th>
-        <th class="c-dot" scope="col"><span class="sr" data-i18n="th.online">online</span></th>
+        <th class="c-dot" scope="col"><span class="sr" data-i18n="th.online">online / link</span></th>
         <th class="c-dev" scope="col" data-i18n="th.device">Device</th>
         <th class="c-ip" scope="col" data-i18n="th.ip">IP</th>
         <th class="c-mac" scope="col" data-i18n="th.mac">MAC</th>
@@ -138,7 +138,7 @@
 <template id="rowTpl">
   <tr class="row" tabindex="0">
     <td class="c-sel"><input type="checkbox" class="sel"></td>
-    <td class="c-dot"><span class="online-dot"></span></td>
+    <td class="c-dot"><span class="lk" role="img"><svg class="k-wifi" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.5 9a15 15 0 0 1 21 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="currentColor" stroke-width="1"/></svg><svg class="k-wired" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2ZM9 8v3M12 8v3M15 8v3M12 5v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="k-unknown" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg></span></td>
     <td class="c-dev"><div class="dev-name"><span class="nm"></span></div><div class="dev-tags"></div><div class="dev-sub"></div><div class="dev-meta"><span class="mono ip"></span><span class="mono ip6 hidden" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span><span class="badge vlan"></span><span class="muted where"></span><span class="muted last"></span></div></td>
     <td class="c-ip mono"><span class="cp" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span><span class="cp ip6 mono hidden" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span></td>
     <td class="c-mac mono"><span class="cp" role="button" tabindex="0" title="Click to copy" data-i18n-attr="title:app.click_to_copy"></span></td>

@@ -256,7 +256,7 @@ class BrowserUITest(_BrowserCase):
 
     def test_sr_labels_visually_hidden(self) -> None:
         d = self.result("columns")
-        self.assertEqual([e["text"] for e in d["sr"]], ["online", "actions"])
+        self.assertEqual([e["text"] for e in d["sr"]], ["online / link", "actions"])
         for e in d["sr"]:
             with self.subTest(text=e["text"]):
                 self.assertEqual((e["w"], e["h"]), (1, 1))
@@ -626,7 +626,24 @@ class BrowserLongTextTest(_BrowserCase):
         for m, (ssid, ap, sig, port, via) in cls.WHERE.items():
             db.q("UPDATE devices SET wifi_ssid=?, wifi_ap=?, wifi_signal=?, sw_port=?, sw_via=? WHERE mac=?",
                  (ssid, ap, sig, port, via, m))
-        cls.run_scenarios(base, ("longtext",))
+        cls.run_scenarios(base, ("longtext", "linkicons"))
+
+    def test_link_icons_show_the_link_type(self) -> None:
+        d = self.result("linkicons")
+        rows = {r["mac"]: r for r in d["rows"]}
+        want = {self.WIFI: ("wifi", "Wi-Fi · "), self.WIFI2: ("wifi", "Wi-Fi · "), self.PORT: ("wired", "wired · "),
+                self.PLAIN: ("unknown", "link unknown · ")}
+        self.assertEqual(set(rows), set(want))
+        for m, (k, prefix) in want.items():
+            with self.subTest(mac=m):
+                r = rows[m]
+                self.assertEqual(r["k"], k)
+                self.assertEqual(r["visible"], 1)
+                self.assertEqual(r["width"], 16)
+                self.assertTrue(r["on"])
+                self.assertEqual(r["color"], d["ok_color"])
+                self.assertEqual(r["title"], r["aria"])
+                self.assertTrue(r["title"].startswith(prefix), r["title"])
 
     def test_no_horizontal_scroll(self) -> None:
         d = self.result("longtext")

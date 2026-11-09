@@ -114,8 +114,12 @@ tr.row.is-new:hover td { background: var(--new-bg); }
 tbody tr:last-child td { border-bottom: 0; }
 .c-dot { width: 28px; padding-right: 0; }
 .c-dev { max-width: 320px; }
-.online-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 45%, transparent); }
-.online-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+/* link-type icon (Wi-Fi, wired, unknown): grey offline, green online; CSS shows the glyph of data-k */
+.lk { display: inline-flex; width: 16px; height: 16px; vertical-align: -3px; color: color-mix(in srgb, var(--muted) 45%, transparent); }
+.lk.on { color: var(--ok); }
+.lk svg { width: 16px; height: 16px; display: none; }
+.lk[data-k="wifi"] .k-wifi, .lk[data-k="wired"] .k-wired, .lk[data-k="unknown"] .k-unknown { display: block; }
+.kv .lk { margin-right: 4px; }
 .dev-name { font-weight: 600; display: flex; align-items: center; gap: 7px; min-width: 0; }
 .dev-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dev-name.unnamed .nm { font-weight: 500; color: var(--muted); font-style: italic; }

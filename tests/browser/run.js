@@ -384,6 +384,21 @@ const scenarios = {
     res.dialog_log = dialogs;
     return res;
   },
+  // the first column's link-type icon: its kind, the one glyph shown, the online colour, the tooltip and the label
+  async linkicons(page) {
+    const rows = await page.$$eval('#rows tr', trs => trs.map(t => {
+      const lk = t.querySelector('.c-dot .lk');
+      return { mac: t.dataset.mac, k: lk.dataset.k, on: lk.classList.contains('on'),
+               visible: [...lk.querySelectorAll('svg')].filter(s => getComputedStyle(s).display !== 'none').length,
+               width: lk.getBoundingClientRect().width, color: getComputedStyle(lk).color, title: lk.title, aria: lk.getAttribute('aria-label') };
+    }));
+    // the --ok colour as the browser computes it, to compare with an online icon
+    const ok_color = await page.evaluate(() => {
+      const s = document.createElement('span'); s.style.color = 'var(--ok)'; document.body.appendChild(s);
+      const c = getComputedStyle(s).color; s.remove(); return c;
+    });
+    return { rows, ok_color };
+  },
   // private (locally administered) MACs: the row's class, the golden MAC text and the hint; a hardware MAC has none
   async private(page) {
     const rows = await page.$$eval('#rows tr', trs => trs.map(t => {
