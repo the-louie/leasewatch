@@ -30,6 +30,7 @@ from .fw1 import Fw1Client
 from .mqtt import MqttError
 from .mqtt_pub import Publisher
 from . import __version__, notify
+from .texts import t
 
 log = logging.getLogger("leasewatch.collector")
 CLOSE_SECONDS = 5  # all connectors together, well inside the 30 s the container gets to stop
@@ -43,8 +44,13 @@ ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sen
 WATCH_KINDS = ("offline", "online", "ip", "vlan", "port", "wifi")  # MAIL_ON_WATCH sends these of watched devices
 ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
 ALERT_MARK = "notify.alert_event_id"  # meta: the events up to this id were considered (sent, or no alert then)
-# one event: by its kind, with the error or the outage length from its detail (the subject cut to 80 characters)
-ALERT_SUBJECTS = {"source_down": "{name} is down: {text}", "source_up": "{name} is back {text}"}
+
+
+def _kind_text(lang: str, kind: str) -> str:
+    """The event kind in lang (kind.<kind>); the raw kind when no language has a key for it."""
+    key = "kind." + kind
+    text = t(lang, key)
+    return kind if text == key else text
 
 
 def _positive(v: object) -> bool:
@@ -893,7 +899,8 @@ class Collector:
         """The alert message for rows. Raises on a DB error."""
         names = self._alert_names(rows)
         src = [r for r in rows if r["kind"] in ALERT_KINDS]
-        return notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
+        lang = self.cfg.mail_lang
+        return notify.build_alert(self.cfg, self._alert_subject(rows, names, lang), self._alert_lines(rows, names, lang),
                                   src[-1]["kind"] if src else "watch", self._alert_links(rows))
 
     def _alert_deliver(self, msg: notify.Message, rows: list, what: str) -> bool:
@@ -936,16 +943,17 @@ class Collector:
         return names
 
     @staticmethod
-    def _alert_lines(rows: list, names: dict[str, str]) -> list[str]:
+    def _alert_lines(rows: list, names: dict[str, str], lang: str = "en") -> list[str]:
         """`<time> <kind>: <detail>` per source event; `<time> <name> <kind>[: <detail>]` per device event. The time
-        is in the container's TZ."""
+        is in the container's TZ; the kind is in lang, the detail as stored."""
         lines = []
         for r in rows:
             at = time.strftime('%Y-%m-%d %H:%M', time.localtime(r["ts"]))
+            kind = _kind_text(lang, r["kind"])
             if not r["mac"]:
-                lines.append(f"{at} {r['kind']}: {r['detail']}")
+                lines.append(f"{at} {kind}: {r['detail']}")
                 continue
-            lines.append(f"{at} {names[r['mac']]} {r['kind']}" + (f": {r['detail']}" if r["detail"] else ""))
+            lines.append(f"{at} {names[r['mac']]} {kind}" + (f": {r['detail']}" if r["detail"] else ""))
         return lines
 
     def _alert_links(self, rows: list) -> list[str]:
@@ -957,22 +965,29 @@ class Collector:
         return [f"{base}/?device={mac}" for mac in dict.fromkeys(r["mac"] for r in rows if r["mac"])]
 
     @staticmethod
-    def _alert_subject(rows: list, names: dict[str, str]) -> str:
+    def _alert_subject(rows: list, names: dict[str, str], lang: str = "en") -> str:
         """One event: by its kind and instance ("fw1 is down: timeout", "fw1 is back after 2h0m") or device ("printer: offline"); several: their count,
-        named by what they are (source events, changes on watched devices, or alerts when both)."""
+        named by what they are (source events, changes on watched devices, or alerts when both). In lang, cut to 80."""
         if len(rows) > 1:
             devices = sum(1 for r in rows if r["mac"])
-            what = ("source events" if not devices else "changes on watched devices" if devices == len(rows)
-                    else "alerts")
-            return f"{len(rows)} {what}"
+            key = ("alert.count_source" if not devices else "alert.count_watch" if devices == len(rows)
+                   else "alert.count_mixed")
+            return t(lang, key, n=len(rows))
         r = rows[0]
         if r["mac"]:
-            return f"{names[r['mac']]}: {r['kind']}"
+            return f"{names[r['mac']]}: {_kind_text(lang, r['kind'])}"
         # source_down/source_up details are "<instance>: <error>" and "<instance>: up after <length>"
         name, _, text = r["detail"].partition(": ")
-        if text.startswith("up after "):
+        up = text.startswith("up after ")
+        if up:
             text = text[len("up "):]
-        return ALERT_SUBJECTS.get(r["kind"], "{name}: " + r["kind"]).format(name=name, text=text).rstrip(": ")[:80]
+        if r["kind"] == "source_up" and up:
+            subject = t(lang, "alert.source_up_after", name=name, length=text[len("after "):])
+        elif r["kind"] in ALERT_KINDS:
+            subject = t(lang, "alert." + r["kind"], name=name, text=text)
+        else:
+            subject = f"{name}: {_kind_text(lang, r['kind'])}"
+        return subject.rstrip(": ")[:80]
 
     def _write_notify_state(self) -> None:
         """notify.<channel>.ok (1/0) in the meta table, written only when it changed."""

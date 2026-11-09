@@ -16,11 +16,12 @@ class EnglishTableTests(unittest.TestCase):
         self.assertEqual(TEXTS["sv"], {})
 
     def test_alert_subjects_equal_the_collector_templates(self):
+        # the subject templates the collector used before the table replaced them, kept here as the en reference
+        old = {"source_down": "{name} is down: {text}", "source_up": "{name} is back {text}"}
         for kind, key in (("source_down", "alert.source_down"), ("source_up", "alert.source_up")):
-            self.assertEqual(t("en", key, name="fw1", text="x"),
-                             collector.ALERT_SUBJECTS[kind].format(name="fw1", text="x"))
+            self.assertEqual(t("en", key, name="fw1", text="x"), old[kind].format(name="fw1", text="x"))
         self.assertEqual(t("en", "alert.source_up_after", name="fw1", length="2h0m"),
-                         collector.ALERT_SUBJECTS["source_up"].format(name="fw1", text="after 2h0m"))
+                         old["source_up"].format(name="fw1", text="after 2h0m"))
 
     def test_alert_counts_equal_the_collector_subject(self):
         src = {"mac": "", "kind": "source_down", "detail": "fw1: x"}
