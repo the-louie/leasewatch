@@ -54,6 +54,7 @@
     drawerGet: null, // {mac, focus, ctl} of the one drawer GET in flight: only its reply is applied; replacing it aborts it
     skew: 0, // server clock minus browser clock at the last load: "on the wire" is judged in server time
     form: null, // {mac, name, note} the drawer form was rendered with (or last saved): what "edited" is measured against
+    drafts: {}, // mac -> {name, note, tags} a failed save sent after its drawer closed; restored on the next open, memory only
     saving: null, // {form, name, note} posted from that Name input while its save runs: its reference until the POST settles
     // URL -> {etag, data} of the last 200 of the two big GETs, in memory (the server sends Cache-Control: no-store, so
     // the browser cache keeps nothing): the request says which copy it has, and a 304 means that copy is still current
@@ -630,7 +631,10 @@
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
   // or the user agrees to drop them
   function discardOk() {
-    return !formEdited(state.open) || confirm(t("drawer.discard"));
+    if (!formEdited(state.open)) return true;
+    if (!confirm(t("drawer.discard"))) return false;
+    delete state.drafts[state.open]; // dropped on purpose: a later open must not bring it back
+    return true;
   }
   // the drawer's text fields, by the key the API takes: a new field is added here and in the form markup only
   const FORM_FIELDS = { name: "#fName", note: "#fNote", tags: "#fTags" };
@@ -778,6 +782,7 @@
         <label>${esc(t("drawer.name"))}<input id="fName" maxlength="80" value="${esc(d.name)}" placeholder="${esc(t("drawer.name_ph"))}"${ro}></label>
         <label>${esc(t("drawer.note"))}<textarea id="fNote" rows="2" maxlength="1000" placeholder="${esc(t("drawer.note_ph"))}"${ro}>${esc(d.note)}</textarea></label>
         <label>${esc(t("drawer.tags"))}<input id="fTags" maxlength="232" value="${esc(tagsOf(d).join(", "))}" placeholder="${esc(t("drawer.tags_ph"))}"${ro}></label>
+        <p class="muted note hidden" id="fDraft">${esc(t("drawer.draft_restored"))}</p>
         <div class="actions">${ro ? `
           <span class="muted" id="fReadOnly">${esc(state.meta.role === "ro" ? t("drawer.ro_login") : state.meta.read_only ? t("err.read_only") : t("err.not_allowed_from_address"))}</span>` : `
           <button class="btn" id="fSave">${esc(t("drawer.save"))}</button>
@@ -796,6 +801,12 @@
     paintVc(b);
     drawerActions(d);
     state.form = { mac, ...formValues() };
+    // an open (not a poll) of a device whose last save failed after its drawer closed: the typed text comes back into
+    // the clean form, which then counts as edited
+    if (focus && state.drafts[mac] && !ro) {
+      for (const [k, sel] of Object.entries(FORM_FIELDS)) $(sel).value = state.drafts[mac][k] ?? $(sel).value;
+      $("#fDraft").classList.remove("hidden");
+    }
     if (focus) $("#fName").focus();
     else if (fid && document.getElementById(fid)) { const el = document.getElementById(fid); el.focus({ preventScroll: true }); /* the reader may have scrolled the body */ if (caret) el.setSelectionRange(...caret); }
   }
@@ -849,7 +860,13 @@
     if (saving) state.saving = saving;
     try {
       try { await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }); }
+      catch (e) {
+        // the drawer (or its form) the text was typed in is gone: keep what was sent for the next open of this device
+        if (form && !(state.open === mac && form === $("#fName"))) state.drafts[mac] = applyForm(fields, {});
+        throw e;
+      }
       finally { if (state.saving === saving) state.saving = null; } // on a failure the form's reference is state.form again
+      if (form) { delete state.drafts[mac]; $("#fDraft")?.classList.add("hidden"); }
       // a drawer GET of this device still running may have been served before the save: its reply is stale. An open's
       // pending Name focus moves to the refresh below. Another device's GET is left alone
       const g = state.drawerGet?.mac === mac ? state.drawerGet : null;

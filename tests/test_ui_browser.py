@@ -1508,6 +1508,53 @@ class BrowserSelectTagsTest(_BrowserCase):
                                                           "ph": "iot, owner:alex", "label": "Taggar"})
 
 
+class BrowserDraftTest(_BrowserCase):
+    """A save that fails after its drawer closed keeps the typed text as a draft for the next open."""
+    D, E = "02:00:00:00:70:01", "02:00:00:00:70:02"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        base, _db = start(cls, [s(cls.D, 70, "camera"), s(cls.E, 71, "lamp")])
+        cls.run_scenarios(base, ("draft",))
+
+    def test_close_during_failing_save_asks_nothing_and_shows_the_banner(self) -> None:
+        d = self.result("draft")["closed"]
+        self.assertEqual(d["asked"], 0)
+        self.assertTrue(d["banner"].startswith("Save failed: "), d["banner"])
+
+    def test_reopen_restores_the_typed_text_and_says_so(self) -> None:
+        d = self.result("draft")["reopened"]
+        self.assertEqual((d["name"], d["tags"], d["line"]), ("Draft Name", "iot, owner:alex", "Unsaved draft restored"))
+        self.assertEqual(d["server"], "")
+
+    def test_restored_text_is_an_edit_asked_about_once(self) -> None:
+        d = self.result("draft")["discard"]
+        self.assertEqual((d["dialogs"], d["open"], d["name"]), (1, True, "Draft Name"))
+
+    def test_save_stores_it_and_the_line_goes(self) -> None:
+        r = self.result("draft")
+        self.assertEqual(r["saved"]["server"], ["Draft Name", "iot,owner:alex"])  # the server's form
+        self.assertIsNone(r["saved"]["view"]["line"])
+        self.assertEqual(r["saved"]["dialogs"], 0)
+        self.assertEqual(r["again"], {"name": "Draft Name", "tags": "iot, owner:alex", "line": None})
+
+    def test_failed_save_with_the_drawer_open_is_unchanged(self) -> None:
+        d = self.result("draft")["open_fail"]
+        self.assertTrue(d["banner"].startswith("Save failed: "), d["banner"])
+        self.assertEqual((d["view"]["name"], d["view"]["line"], d["open"]), ("Open Fail", None, True))
+        self.assertEqual(d["reopened"], {"name": "Draft Name", "tags": "iot, owner:alex", "line": None})
+
+    def test_swedish_line_and_discard_drops_the_draft(self) -> None:
+        d = self.result("draft")["sv"]
+        self.assertEqual((d["name"], d["tags"], d["line"]), ("Utkast", "iot", "Osparat utkast återställt"))
+        self.assertEqual(d["after_discard"], {"name": "", "tags": "", "line": None})
+
+
 class BrowserAuthTest(_BrowserCase):
     """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
 

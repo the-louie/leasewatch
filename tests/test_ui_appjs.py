@@ -166,7 +166,8 @@ const tpl = { content: { cloneNode: () => ({ firstElementChild: new El("TR") }) 
 const body = new El(); body.parent = null;
 // the drawer body: pick the controls out of the HTML the code writes, as a browser would build them
 body.onHtml = h => {
-  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) delete byId[id];
+  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved", "fDraft"]) delete byId[id];
+  if (/id="fDraft"/.test(h)) { byId.fDraft = new El("P"); if (/class="[^"]*\bhidden\b[^"]*" id="fDraft"/.test(h)) byId.fDraft.classList.add("hidden"); }
   const kv = /<dl class="kv">([\s\S]*?)<\/dl>/.exec(h);
   body.kv = new El("DL"); body.kv.parent = body; body.kv._html = kv ? kv[1] : "";
   const name = /id="fName"[^>]*value="([^"]*)"/.exec(h);
@@ -177,7 +178,7 @@ body.onHtml = h => {
   if (tags) { byId.fTags = new El("INPUT"); byId.fTags.value = tags[1]; }
   for (const id of ["fSave", "fAck", "fArch", "fWatch"]) { const m = new RegExp(`<button class="([^"]*)" id="${id}">([^<]*)<`).exec(h); if (m) { byId[id] = new El("BUTTON"); byId[id].className = m[1]; byId[id].textContent = m[2]; } }
   if (/id="fSaved"/.test(h)) byId.fSaved = new El("SPAN");
-  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved"]) if (byId[id]) byId[id].parent = body;
+  for (const id of ["fName", "fNote", "fTags", "fSave", "fAck", "fArch", "fWatch", "fSaved", "fDraft"]) if (byId[id]) byId[id].parent = body;
 };
 const els = { "#rows": rows, "#rowTpl": tpl, "#dBody": body };
 const $ = (s, el) => {
@@ -330,8 +331,9 @@ out.behind = seenHtml([{ source: "fw1", last_seen: srv - 700, last_present: srv 
 
     DRAWER = r"""const history = { replaceState() {} }, location = { pathname: "/" };
 const server = { mac: "02:00:00:00:00:01", name: "", note: "", acked: 0, baseline: 0, vlan: "LAN", ip: "10.0.0.5", first_seen: 1, last_seen: 1, sources: "arp" };
-let typing = null, failGet = false, posts = [];
+let typing = null, failGet = false, failPost = false, posts = [];
 const api = async (path, opts) => {
+  if (opts?.method && failPost) throw new Error("boom");
   if (opts?.method) { posts.push(JSON.parse(opts.body)); await null; if (typing) await typing(); Object.assign(server, JSON.parse(opts.body)); server.acked = server.acked ? 1 : 0; return { ok: true }; }
   if (failGet) throw new Error("timeout");
   return { device: { ...server }, history: [], events: [], seen: [] };
@@ -418,6 +420,30 @@ out.body = body.innerHTML.slice(0, 40); out.note = byId.fNote?.value ?? null; ou
         self.assertEqual(out["saved"], "Alex's iPad")
         self.assertNotEqual(out["body"], "<p>timeout</p>")
         self.assertEqual(out["note"], "typed")
+
+    # a save that fails after its drawer closed keeps what it sent as a draft; the next open fills the form from it
+    # and shows the line; a failure with the drawer open makes none; a successful save drops it
+    def test_failed_save_after_close_keeps_a_draft(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "formValues", "formEdited", "applyForm"], self.DRAWER + r"""
+state.open = server.mac; await refreshDrawer(server.mac, true);
+byId.fName.value = "A"; byId.fTags.value = "iot";
+failPost = true;
+await setFields(server.mac, formValues(), byId.fName);
+out.open_fail = { ...state.drafts };
+const sent = formValues(); state.open = null;
+await setFields(server.mac, sent, byId.fName);
+out.draft = state.drafts[server.mac];
+byId.fName.value = ""; byId.fTags.value = ""; // a form that was closed and is clean again
+state.open = server.mac; await refreshDrawer(server.mac, true);
+out.restored = { name: byId.fName.value, tags: byId.fTags.value, hidden: byId.fDraft.classList.contains("hidden"), edited: formEdited(server.mac) };
+failPost = false;
+await setFields(server.mac, formValues(), byId.fName);
+out.after = { drafts: { ...state.drafts }, hidden: byId.fDraft.classList.contains("hidden") };
+""")
+        self.assertEqual(out["open_fail"], {})
+        self.assertEqual(out["draft"], {"name": "A", "note": "", "tags": "iot"})
+        self.assertEqual(out["restored"], {"name": "A", "tags": "iot", "hidden": False, "edited": True})
+        self.assertEqual(out["after"], {"drafts": {}, "hidden": True})
 
     # a baseline device is already known: "Save & mark known" is not the primary action
     def test_baseline_device_ack_button_not_primary(self) -> None:

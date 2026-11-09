@@ -841,6 +841,90 @@ const scenarios = {
       ph: document.querySelector('#selTags').placeholder, label: document.querySelector('#selTags').getAttribute('aria-label') }));
     return res;
   },
+  // a save that fails after its drawer was closed keeps the typed text as a draft for the next open of that device;
+  // a save that fails with the drawer open changes nothing; the line says so in Swedish too
+  async draft(page, base) {
+    const D = '02:00:00:00:70:01', E = '02:00:00:00:70:02';
+    page.__allow = [500];
+    const dialogs = [];
+    page.on('dialog', async d => { dialogs.push(d.message()); await (res.answer ? d.accept() : d.dismiss()); });
+    // POST mode: 'hold' keeps the request until release(), 'fail' answers 500 at once, 'pass' lets it through
+    let mode = 'pass', held = null, posts = 0;
+    await page.setRequestInterception(true);
+    page.on('request', r => {
+      if (r.method() !== 'POST') return r.continue();
+      posts++;
+      if (mode === 'hold') held = r;
+      else if (mode === 'fail') r.respond({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' });
+      else r.continue();
+    });
+    const res = { answer: false };
+    const banner = () => page.$eval('#banner', b => b.classList.contains('hidden') ? null : b.textContent);
+    const hideBanner = () => page.evaluate(() => document.querySelector('#banner').classList.add('hidden'));
+    const view = () => page.evaluate(() => { const l = document.querySelector('#fDraft');
+      return { name: document.querySelector('#fName').value, tags: document.querySelector('#fTags').value,
+               line: l && !l.classList.contains('hidden') ? l.textContent : null }; });
+    const setVal = async (sel, v) => { await page.click(sel, { clickCount: 3 }); await page.keyboard.press('Backspace'); await page.type(sel, v); };
+    // type, Save, close while the POST runs, then let it fail
+    const failClosed = async (mac, name, tags) => {
+      await page.click(`${row(mac)} .c-dev`); await waitOpen(page, mac);
+      await setVal('#fName', name); await setVal('#fTags', tags);
+      mode = 'hold'; held = null;
+      await page.click('#fSave');
+      while (!held) await new Promise(r => setTimeout(r, 20));
+      const before = dialogs.length;
+      await page.keyboard.press('Escape'); await waitClosed(page);
+      const asked = dialogs.length - before;
+      await hideBanner();
+      await held.respond({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' });
+      await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+      mode = 'pass';
+      return asked;
+    };
+    res.closed = { asked: await failClosed(D, 'Draft Name', 'iot, owner:alex') };
+    res.closed.banner = await banner();
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    res.reopened = await view();
+    res.reopened.server = (await serverDevice(page, D)).name;
+    // the restored text counts as an edit: one prompt; kept open on Cancel
+    let n = dialogs.length;
+    await page.keyboard.press('Escape'); await new Promise(r => setTimeout(r, 300));
+    res.discard = { dialogs: dialogs.length - n, open: await drawerOpen(page), name: await page.$eval('#fName', e => e.value) };
+    // Save now goes through: stored, the line is gone, the next open has no draft
+    await page.click('#fSave');
+    await page.waitForFunction(() => document.querySelector('#fSaved') && document.querySelector('#fSaved').textContent === 'saved');
+    const sd = await serverDevice(page, D);
+    res.saved = { server: [sd.name, sd.tags], view: await view() };
+    n = dialogs.length;
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    res.saved.dialogs = dialogs.length - n;
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    res.again = await view();
+    // a failure with the drawer open: the form keeps the text, the banner shows, no draft is made
+    await hideBanner();
+    await setVal('#fName', 'Open Fail');
+    mode = 'fail'; const p0 = posts;
+    await page.click('#fSave');
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    mode = 'pass';
+    res.open_fail = { posts: posts - p0, banner: await banner(), view: await view(), open: await drawerOpen(page) };
+    await setVal('#fName', sd.name); // nothing left to discard
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    res.open_fail.reopened = await view();
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    // Swedish
+    await page.goto(`${base}?lang=sv`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(row(E));
+    await failClosed(E, 'Utkast', 'iot');
+    await page.click(`${row(E)} .c-dev`); await waitOpen(page, E);
+    res.sv = await view();
+    res.answer = true; // discard it: the draft is dropped for good
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    await page.click(`${row(E)} .c-dev`); await waitOpen(page, E);
+    res.sv.after_discard = await view();
+    return res;
+  },
   // a ?device= link whose first load fails: the drawer opens after the next successful load
   async deeplinkretry(page, base) {
     const DEV = '02:00:00:00:10:01';
@@ -1378,7 +1462,7 @@ async function runScenario(browser, base, name) {
     // listeners before goto, or the first load's errors are missed
     page.on('console', m => {
       // a scenario that asks for a known 404 (page.__allow) does not fail on Chrome's console line for it
-      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \((Not Found|Service Unavailable|Bad Request)\)/.test(m.text()))) res.console_errors.push(m.text());
+      if (m.type() === 'error' && !(page.__allow && /Failed to load resource.* \((Not Found|Service Unavailable|Bad Request|Internal Server Error)\)/.test(m.text()))) res.console_errors.push(m.text());
       if (/^Refused to|Content Security Policy/.test(m.text())) res.csp_violations.push(`console: ${m.text()}`);
     });
     // the page's own report of anything the CSP blocked, from every document the page loads
