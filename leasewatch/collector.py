@@ -792,75 +792,103 @@ class Collector:
         source, watch = self.cfg.mail_on_source, self.cfg.mail_on_watch
         what = "alert" if source and watch else "source alert" if source else "watch alert"
         try:
-            if not (self.cfg.mail_enabled and (source or watch)):
-                if not self._alert_mark_cleared:
-                    self.db.q("DELETE FROM meta WHERE key=?", (ALERT_MARK,))
-                    self._alert_mark_cleared = True
+            mark = self._alert_mark(source, watch)
+            if mark is None:
                 return
-            self._alert_mark_cleared = False
-            mark = self.db.get_meta(ALERT_MARK, "")
-            if not (mark.isascii() and mark.isdigit()):
-                with self.db.tx() as c:
-                    top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-                    self.db.set_meta(ALERT_MARK, str(top), c)
-                self._alert_started = True  # a fresh mark is no stale one
-                return
-            where, args = [], []
-            if source:
-                where.append(f"kind IN ({','.join('?' * len(ALERT_KINDS))})")
-                args += ALERT_KINDS
-            if watch:  # source events have mac '', which no device row has
-                where.append(f"(kind IN ({','.join('?' * len(WATCH_KINDS))}) "
-                             "AND mac IN (SELECT mac FROM devices WHERE watch=1))")
-                args += WATCH_KINDS
-            with self.db.tx() as c:  # one read: no event written between the two lands behind a moved mark unseen
-                rows = c.execute(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND "
-                                 f"({' OR '.join(where)}) ORDER BY id LIMIT ?", (int(mark), *args, ALERT_BATCH + 1)).fetchall()
-                top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-                # the first pass of a process: more than one batch pending means a stale mark (an older version ran
-                # in between and wrote events without moving it), not a short restart, so they are not sent
-                skipped = 0
-                if not self._alert_started and len(rows) > ALERT_BATCH:
-                    skipped = c.execute(f"SELECT COUNT(*) FROM events WHERE id > ? AND ({' OR '.join(where)})",
-                                        (int(mark), *args)).fetchone()[0]
-                    self.db.set_meta(ALERT_MARK, str(top), c)
-                # more than one batch pending: only up to the last one sent was considered; else every event up to
-                # the newest was, so an event that was no alert then (an unwatched device's) is not sent later
-                full = len(rows) > ALERT_BATCH
-                rows = rows[:ALERT_BATCH]
-                # nothing to send: every event up to the newest was considered, so a device watched later (or a flag
-                # turned on later) gets only what is written after it
-                if not rows and top > int(mark):
-                    self.db.set_meta(ALERT_MARK, str(top), c)
-            self._alert_started = True
+            rows, top, full, skipped = self._alert_pending(mark, source, watch)
             if skipped:
                 log.warning("alerts: skipped %d events written before this start", skipped)
                 return
             if not rows:
                 return
-            names = self._alert_names(rows)
-            src = [r for r in rows if r["kind"] in ALERT_KINDS]
-            msg = notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
-                                     src[-1]["kind"] if src else "watch", self._alert_links(rows))
+            msg = self._alert_message(rows)
         except Exception as e:  # sqlite3.Error or a bug: the mark stays, tried again at the next poll
             log.warning("%s skipped: %s", what, db_error_text(e) if isinstance(e, sqlite3.Error) else type(e).__name__)
             return
+        if self._alert_deliver(msg, rows, what):
+            self._alert_advance(rows, full, top, what)
+
+    def _alert_mark(self, source: bool, watch: bool) -> int | None:
+        """The alert mark, or None when there is nothing to do this poll: alerts off (the mark is removed, once per
+        process) or no valid mark yet (it is set to the newest event). Raises on a DB error."""
+        if not (self.cfg.mail_enabled and (source or watch)):
+            if not self._alert_mark_cleared:
+                self.db.q("DELETE FROM meta WHERE key=?", (ALERT_MARK,))
+                self._alert_mark_cleared = True
+            return None
+        self._alert_mark_cleared = False
+        mark = self.db.get_meta(ALERT_MARK, "")
+        if not (mark.isascii() and mark.isdigit()):
+            with self.db.tx() as c:
+                top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                self.db.set_meta(ALERT_MARK, str(top), c)
+            self._alert_started = True  # a fresh mark is no stale one
+            return None
+        return int(mark)
+
+    def _alert_pending(self, mark: int, source: bool, watch: bool) -> tuple[list, int, bool, int]:
+        """(rows, top, full, skipped): up to ALERT_BATCH alert events after the mark, the newest event id, whether
+        more than one batch is pending, and the count skipped at the first pass (a stale mark). Moves the mark when
+        nothing is sent. Raises on a DB error."""
+        where, args = [], []
+        if source:
+            where.append(f"kind IN ({','.join('?' * len(ALERT_KINDS))})")
+            args += ALERT_KINDS
+        if watch:  # source events have mac '', which no device row has
+            where.append(f"(kind IN ({','.join('?' * len(WATCH_KINDS))}) "
+                         "AND mac IN (SELECT mac FROM devices WHERE watch=1))")
+            args += WATCH_KINDS
+        with self.db.tx() as c:  # one read: no event written between the two lands behind a moved mark unseen
+            rows = c.execute(f"SELECT id, ts, mac, kind, detail FROM events WHERE id > ? AND "
+                             f"({' OR '.join(where)}) ORDER BY id LIMIT ?", (mark, *args, ALERT_BATCH + 1)).fetchall()
+            top = c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+            # the first pass of a process: more than one batch pending means a stale mark (an older version ran
+            # in between and wrote events without moving it), not a short restart, so they are not sent
+            skipped = 0
+            if not self._alert_started and len(rows) > ALERT_BATCH:
+                skipped = c.execute(f"SELECT COUNT(*) FROM events WHERE id > ? AND ({' OR '.join(where)})",
+                                    (mark, *args)).fetchone()[0]
+                self.db.set_meta(ALERT_MARK, str(top), c)
+            # more than one batch pending: only up to the last one sent was considered; else every event up to
+            # the newest was, so an event that was no alert then (an unwatched device's) is not sent later
+            full = len(rows) > ALERT_BATCH
+            rows = rows[:ALERT_BATCH]
+            # nothing to send: every event up to the newest was considered, so a device watched later (or a flag
+            # turned on later) gets only what is written after it
+            if not rows and top > mark:
+                self.db.set_meta(ALERT_MARK, str(top), c)
+        self._alert_started = True
+        return rows, top, full, skipped
+
+    def _alert_message(self, rows: list) -> notify.Message:
+        """The alert message for rows. Raises on a DB error."""
+        names = self._alert_names(rows)
+        src = [r for r in rows if r["kind"] in ALERT_KINDS]
+        return notify.build_alert(self.cfg, self._alert_subject(rows, names), self._alert_lines(rows, names),
+                                  src[-1]["kind"] if src else "watch", self._alert_links(rows))
+
+    def _alert_deliver(self, msg: notify.Message, rows: list, what: str) -> bool:
+        """Send msg; True when a channel delivered (the mark may move). Never raises."""
         try:
             notify.send(self.cfg, msg, self._mail_backoff, what)
         except notify.NotifyDeferred:  # no channel was called: the mark stays
             log.debug("%s deferred (%d event(s)): no channel was tried", what, len(rows))
             self._write_notify_state()
-            return
+            return False
         except Exception as e:  # NotifyError texts name the channel and a code only; another exception by its type
             log.log(logging.DEBUG if self._alert_failing else logging.WARNING, "%s failed (%d event(s)): %s",
                     what, len(rows), e if isinstance(e, notify.NotifyError) else type(e).__name__)
             self._alert_failing = True
             self._write_notify_state()
-            return
+            return False
         if self._alert_failing:
             log.info("%ss deliver again", what)
             self._alert_failing = False
         self._write_notify_state()
+        return True
+
+    def _alert_advance(self, rows: list, full: bool, top: int, what: str) -> None:
+        """Move the mark past the sent rows: to the last one sent when more are pending, else to the newest event."""
         try:
             with self.db.tx() as c:
                 self.db.set_meta(ALERT_MARK, str(rows[-1]["id"] if full else top), c)
