@@ -275,6 +275,8 @@ class Merged:
     # every stable candidate this poll -> its class (prefix, DHCPv6, EUI-64), best first (_settle_ip6_stable)
     ip6_stables: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     macs: tuple[str, ...] = ()  # the device key and its alias MACs (merge_sightings's `aliases`), for the stable address
+    # the /64 prefixes any sighting of this poll carries a valid IPv6 address in (one set shared by every record)
+    live64: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -393,10 +395,29 @@ def _pick_ip6_stable(macs: tuple[str, ...], ss: list[Fw1Sighting]) -> dict[str, 
     return {a: k[:3] for k, a in keys if k[1] == 0 or k[2] == 0}
 
 
+def _prefix64(addr: str) -> str:
+    """The /64 prefix of a valid IPv6 address, as text."""
+    return str(ipaddress.IPv6Network((addr, 64), strict=False))
+
+
+def _live64(sightings: list[Fw1Sighting]) -> frozenset[str]:
+    """The /64 prefixes the sightings carry a valid IPv6 address in, for every device."""
+    out = set()
+    for s in sightings:
+        if s.ip6:
+            try:
+                out.add(_prefix64(s.ip6))
+            except ValueError:
+                continue
+    return frozenset(out)
+
+
 def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
     """The device's stable IPv6 address after this poll. A worse class never replaces the stored one; nothing listed
     keeps it (NDP aged it out); within its class it stays while still listed, so a renumbering that lists the old
-    and the new address side by side changes it only once the old one has left."""
+    and the new address side by side changes it only once the old one has left. An unlisted one is replaced by one of
+    its own class only when its /64 prefix is listed for no device this poll: a renumbering is network-wide, while
+    NDP ages one device's entry for one of two live prefixes out on its own schedule."""
     if not m.ip6_stable or not stored:
         return stored or m.ip6_stable
     best = m.ip6_stables[m.ip6_stable]
@@ -406,6 +427,8 @@ def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
         k = _stable_key(macs, stored, False)
         cls = k[:3] if k[2] == 0 else (k[0], 0, 1)
     if stored in m.ip6_stables and cls == best:
+        return stored
+    if best == cls and _prefix64(stored) in m.live64:
         return stored
     return m.ip6_stable if best <= cls else stored
 
@@ -423,6 +446,7 @@ def merge_sightings(sightings: list[Fw1Sighting], aliases: dict[str, tuple[str, 
     for s in sightings:
         by_mac.setdefault(s.mac, []).append(s)
     out: dict[str, Merged] = {}
+    live64 = _live64(sightings)
     # an empty IP or network sorts last (it cannot be where the device is), a static lease before a dynamic one
     # vendor and iface too: every field the merge takes from a sighting is a key, so ties never depend on row order
     # client_id too: two leases that differ only in it would otherwise give the client-id of the first row
@@ -443,7 +467,7 @@ def merge_sightings(sightings: list[Fw1Sighting], aliases: dict[str, tuple[str, 
         loc = wire or (lease if lease and lease.ip else None) or min(ss, key=lambda s: (
             s.ip == "", s.source != "dhcp", _rank(FALLBACK_KINDS, s.source), s.source, not s.online) + pick(s))
         m = Merged(mac=mac, ip=loc.ip or "", vlan=loc.vlan or "", iface=loc.iface or "",
-                   sources={s.source for s in ss}, online=any(s.online for s in ss))
+                   sources={s.source for s in ss}, online=any(s.online for s in ss), live64=live64)
         if m.sources <= V6_KINDS:  # an NDP/DHCPv6 listing alone does not say where the device is
             m.vlan = m.iface = ""
         m.ip6s = _pick_ip6(mac, ss)
@@ -892,10 +916,15 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
     # sticky, no event or history. The stable address is the one shown while it is among this poll's candidates (a
     # stable address of a worse class than a listed one, such as a DHCPv6 ULA beside an NDP GUA, is not), and also
     # while it is shown already and merely not listed: NDP ages an EUI-64 entry out while a temporary address outlives it,
-    # and picking from what is listed alone would show the temporary now and the stable address again later.
-    # Without a stable address: the stored one stays while still listed in the best class (a temporary address
-    # rotating beside it changes nothing) or while nothing is listed
-    if stable and (stable in m.ip6s or cur["ip6"] == stable):
+    # and picking from what is listed alone would show the temporary now and the stable address again later. That
+    # hold is for an EUI-64 address only: a DHCPv6 address in no lease and no NDP entry is gone, and the rule below
+    # applies to it. Without a stable address: the stored one stays while still listed in the best class (a
+    # temporary address rotating beside it changes nothing) or while nothing is listed
+    # held while unlisted: an EUI-64 address (NDP ages it out while the device is there), or a DHCPv6 address while
+    # everything listed is in a worse prefix class (a global lease is not given up for a unique-local neighbour)
+    held = bool(stable) and cur["ip6"] == stable and (any(eui64_of(x, stable) for x in m.macs or (mac,))
+                                                      or bool(m.ip6) and _ip6_key(mac, m.ip6, False)[0] > _ip6_key(mac, stable, False)[0])
+    if held or stable in m.ip6s:
         ip6 = stable
     else:
         ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
@@ -903,13 +932,13 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
     renumbered = [("ip6", f"{old_stable} -> {stable}")] if old_stable and stable != old_stable else []
     if m.sources <= V6_KINDS:
         # listed by NDP/DHCPv6 alone: enrichment only. ip6, ip6_stable and last_seen move, nothing else: no lease-type
-        # clock (the record has no lease), and online is left to the grace rule in merge(). A renumbering writes
-        # its event and history row; the first stable address is filled silently. sources records what listed it
-        # this poll, except on a split row waiting for its first poll, whose '' must stay so that first full
-        # listing still fills it silently
+        # clock (the record has no lease), and online is left to the grace rule in merge(). A new stable address
+        # writes a history row; a renumbering also its event, the first one ('' before) none. sources records what
+        # listed it this poll, except on a split row waiting for its first poll, whose '' must stay so that first
+        # full listing still fills it silently
         keep = not cur["sources"] and cur.get("split_from")
         changed = 0
-        if renumbered:
+        if stable != old_stable:
             res.events += [(mac, kind, detail) for kind, detail in renumbered]
             res.history.append((mac, {"ip": cur["ip"], "hostname": cur["hostname"], "vlan": cur["vlan"],
                                       "lease_type": cur["lease_type"], "ip6": stable}))

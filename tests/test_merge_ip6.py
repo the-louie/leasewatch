@@ -145,7 +145,9 @@ class Enrichment(Base):
         self.assertEqual(r["last_online"], NOW - 60)
         self.assertEqual(r["online"], 1)  # still within the grace after its last sighting
         self.assertEqual([e for e in res.events if e[0] == A], [])
-        self.assertEqual([h for h in res.history if h[0] == A], [])
+        # the first stable address: one history row with the row's own fields
+        self.assertEqual([h for h in res.history if h[0] == A], [(A, {"ip": "10.0.0.5", "hostname": "laptop",
+                         "vlan": "Clients", "lease_type": "dynamic", "ip6": EUI})])
 
     def test_known_device_listed_only_by_dhcp6_goes_offline_by_the_grace_rule(self):
         old = NOW - 7200
@@ -153,7 +155,8 @@ class Enrichment(Base):
         res = self.merge([prev], [dhcp6(EUI, hostname="laptop.example.lan")])
         self.assertEqual(res.rows[A]["online"], 0)
         self.assertEqual([k for m, k, _ in res.events if m == A], ["offline"])
-        self.assertEqual(res.history, [])
+        self.assertEqual(res.history, [(A, {"ip": "10.0.0.5", "hostname": "laptop", "vlan": "Clients",
+                                            "lease_type": "dynamic", "ip6": EUI})])
 
     def test_split_row_listed_only_by_ndp_keeps_its_marker(self):
         res = self.merge([row(A, sources="", split_from=B)], [ndp(EUI)])

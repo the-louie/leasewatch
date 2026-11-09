@@ -63,11 +63,8 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(t("sv", "no.such.key"), "no.such.key")
 
     def test_sv_value_wins_when_present(self):
-        TEXTS["sv"]["mail.no_hostname"] = "(x)"
-        try:
+        with mock.patch.dict(TEXTS["sv"], {"mail.no_hostname": "(x)"}):  # restores the real value afterwards
             self.assertEqual(t("sv", "mail.no_hostname"), "(x)")
-        finally:
-            del TEXTS["sv"]["mail.no_hostname"]
 
     def test_plurals(self):
         self.assertEqual(t("en", "mail.head", n=1), "1 new device on the network:")

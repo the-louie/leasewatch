@@ -180,13 +180,15 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
   the candidates of the best class, or while no candidate is listed. A change of the shown `ip6` alone writes no
   history row and no event; a change of the stable address (below) writes a history row and, after the first one, an
   `ip6` event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device, and a device listed
-  only by them this poll keeps everything but `ip6` and `last_seen` (no event, no history row). The host reads their
+  only by them this poll keeps everything but `ip6`, `ip6_stable` and `last_seen` (no event and no history row unless
+  the stable address changes: then the history row, and the `ip6` event after the first address). The host reads their
   presence as `False` whatever the connector sends; emit `presence=False` anyway so the record says what it means.
   The host also keeps a stable IPv6 address per device: the EUI-64 address of one of its MACs or the address of a
   DHCPv6 lease, the best by class (global before unique-local before other; DHCPv6 before EUI-64); a temporary address
   is never stored as stable. The host's own fw1 reader skips IA_TA and IA_PD leases; a contrib that emits `dhcp6`
-  sightings must give IA_NA addresses only. The host writes the `ip6` event when the stable address changes, and the
-  shown `ip6` prefers it.
+  sightings must give IA_NA addresses only. The host writes the `ip6` event when the stable address changes (once the
+  old address's /64 prefix is listed for no device any more, so two live prefixes do not make it flap), and the shown
+  `ip6` prefers it while it is among the best class's candidates.
 - **Which kind to use.** A DHCP lease or reservation: `dhcp`, `presence=False` unless the server says the client
   is online. An ARP/neighbour table entry: `arp`, `presence=True`. A device a controller or access point reports as
   connected: `client` (the built-in `unifi` connector also emits `client` sightings with the controller's hostname and

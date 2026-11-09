@@ -10,6 +10,7 @@ EUI1 = "2001:db8:1::ff:fe00:1"  # EUI-64 of A in 2001:db8:1::/64
 EUI2 = "2001:db8:2::ff:fe00:1"  # EUI-64 of A in 2001:db8:2::/64
 ULA_EUI = "fd00::ff:fe00:1"      # EUI-64 of A in fd00::/64
 DHCP = "2001:db8::1:20"          # an IA_NA address
+TEMP1 = "2001:db8:1::abcd"       # a temporary address in 2001:db8:1::/64
 
 
 def ev(res, mac=A):
@@ -112,6 +113,25 @@ class Renumbering(Base):
     def test_new_prefix_lower(self):
         self.renumber(EUI2, EUI1)
 
+    def test_two_live_prefixes_do_not_flap(self):
+        # NDP ages the device's entry for one of two live prefixes out now and then; the stored prefix is still
+        # listed this poll, by the device's own temporary address or by another device
+        for other in ([ndp(TEMP1)], [ndp(TEMP1), ndp(TEMP)], [ndp(EUI_B1, mac=B)]):
+            with self.subTest(other=other):
+                r = row(A, ip6_stable=EUI1)
+                for addr in (EUI2, EUI1, EUI2, EUI1):
+                    res = self.merge([r], [sight(), ndp(addr), *other])
+                    r = res.rows[A]
+                    self.assertEqual((r["ip6_stable"], ev(res)), (EUI1, []))
+
+    def test_old_prefix_on_another_device_keeps_the_stored_one(self):
+        res = self.merge([row(A, ip6_stable=EUI1)], [sight(), ndp(EUI2), ndp(EUI_B1, mac=B)])
+        self.assertEqual((res.rows[A]["ip6_stable"], ev(res), hist(res)), (EUI1, [], []))
+        res = self.merge([res.rows[A]], [sight(), ndp(EUI2), ndp(EUI_B2, mac=B)])
+        self.assertEqual(res.rows[A]["ip6_stable"], EUI2)
+        self.assertEqual(ev(res), [("ip6", f"{EUI1} -> {EUI2}")])
+        self.assertEqual([h["ip6"] for h in hist(res)], [EUI2])
+
 
 class History(Base):
     def test_new_row_takes_the_stable_candidate(self):
@@ -154,10 +174,20 @@ class V6Only(Base):
         self.assertEqual(res.rows[A]["lease_type"], "dynamic")
         self.assertEqual(st["no_lease_since"], {})
 
-    def test_first_stable_address_is_filled_silently(self):
-        res = self.merge([row(A)], [ndp(EUI)])
+    def test_first_stable_address_writes_a_history_row_and_no_event(self):
+        prev = row(A, hostname="laptop", lease_type="dynamic")
+        res = self.merge([prev], [ndp(EUI, network="Other", iface="opt9")])
         self.assertEqual(res.rows[A]["ip6_stable"], EUI)
-        self.assertEqual((ev(res), hist(res), res.stats["changed"]), ([], [], 0))
+        self.assertEqual(ev(res), [])
+        self.assertEqual(hist(res), [{"ip": "10.0.0.5", "hostname": "laptop", "vlan": "Clients", "lease_type": "dynamic",
+                                      "ip6": EUI}])
+        self.assertEqual(res.stats["changed"], 1)
+
+    def test_first_stable_address_then_a_full_poll_is_one_history_row(self):
+        res = self.merge([row(A)], [ndp(EUI)])
+        self.assertEqual([h["ip6"] for h in hist(res)], [EUI])
+        res = self.merge([res.rows[A]], [sight(), ndp(EUI)])
+        self.assertEqual((res.rows[A]["ip6_stable"], ev(res), hist(res), res.stats["changed"]), (EUI, [], [], 0))
 
     def test_no_candidate_keeps_stored(self):
         res = self.merge([row(A, ip6_stable=EUI)], [ndp(TEMP)])
@@ -230,8 +260,14 @@ class Displayed(Base):
         self.assertEqual([r["ip6_stable"] for r in got], [""] * 3)
 
     def test_dhcp6_stable_address_shown_beside_a_ula_eui64(self):
+        # a global DHCPv6 address is held while only a unique-local address is listed (a worse prefix class)
         got = self.polls([dhcp6(DHCP), ndp(ULA_EUI)], [ndp(ULA_EUI)], [dhcp6(DHCP), ndp(ULA_EUI)])
         self.assertEqual([r["ip6"] for r in got], [DHCP] * 3)
+        self.assertEqual([r["ip6_stable"] for r in got], [DHCP] * 3)
+
+    def test_gone_dhcp6_address_gives_way_to_the_listed_eui64(self):
+        got = self.polls([ndp(EUI)], [ndp(EUI)], [ndp(EUI), ndp(TEMP)], prev=[row(A, ip6=DHCP, ip6_stable=DHCP)])
+        self.assertEqual([r["ip6"] for r in got], [EUI] * 3)
         self.assertEqual([r["ip6_stable"] for r in got], [DHCP] * 3)
 
 
