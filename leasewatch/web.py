@@ -691,6 +691,7 @@ class Handler(BaseHTTPRequestHandler):
                 "error": m.get(f"conn.{s.name}.error", ""), "ts": int(m.get(f"conn.{s.name}.ts") or 0) or None,
                 "ms": int(m.get(f"conn.{s.name}.ms") or 0), "count": int(m.get(f"conn.{s.name}.count") or 0),
                 "strategy": m.get(f"conn.{s.name}.strategy", ""),
+                "warnings": [w for w in m.get(f"conn.{s.name}.warnings", "").split(",") if w],
                 "enabled": m.get(f"conn.{s.name}.enabled", "1") == "1"}
 
     # --- POST route ----------------------------------------------------------

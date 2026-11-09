@@ -391,7 +391,8 @@ class StatusTests(Base):
         self.assertEqual(list(body), ["meta", "types", "refused", "broken"])
         conns = body["meta"]["connectors"]
         self.assertEqual([(c["name"], c["type"], c["ok"], c["enabled"]) for c in conns], [("fw1", "opnsense", True, True), ("x", "fake", True, True)])
-        self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "strategy", "enabled"})
+        self.assertEqual(set(conns[0]), {"name", "label", "type", "ok", "error", "ts", "ms", "count", "strategy", "warnings", "enabled"})
+        self.assertEqual(conns[0]["warnings"], [])
         self.assertEqual(conns[0]["count"], 1)
         self.assertFalse({"switch", "unifi"} & body["meta"].keys())  # the 1.0 objects were removed in 1.2
         self.assertNotIn("fw1-key", json.dumps(body))

@@ -47,6 +47,11 @@ ALERT_MARK = "notify.alert_event_id"  # meta: the events up to this id were cons
 ALERT_SUBJECTS = {"source_down": "{name} is down: {text}", "source_up": "{name} is back {text}"}
 
 
+def _positive(v: object) -> bool:
+    """A real int above 0: a bool or a str in a stats dict is not a count."""
+    return type(v) is int and v > 0
+
+
 def outage_text(seconds: int) -> str:
     """An outage in whole minutes: "Ym", "XhYm", or "XdYh" from a day on."""
     m = max(0, seconds) // 60
@@ -471,6 +476,13 @@ class Collector:
         strategy = batch.stats.get("strategy")
         if isinstance(strategy, str):  # the switch's FDB strategy, shown so a per-VLAN fallback is visible
             status[f"conn.{run.name}.strategy"] = strategy
+        # what the connector could not read this poll; "" clears the last one
+        stats = batch.stats
+        warns = sorted(k for k, v in stats.items() if isinstance(k, str) and k.endswith("_unavailable") and _positive(v)
+                       and k != "ssid_unavailable" and not (k == "labels_unavailable" and "names" in run.roles))
+        if _positive(stats.get("dropped")):
+            warns = sorted([*warns, "dropped"])
+        status[f"conn.{run.name}.warnings"] = ",".join(warns)
 
     def _failed(self, run: _Run, res: object, phase: str, out_obj: object, ms: object, baseline_pending: bool,
                 status: dict[str, str]) -> None:
@@ -530,6 +542,9 @@ class Collector:
             # stored one names a walk this poll did not make
             if f"conn.{n}.strategy" not in status and self.db.get_meta(f"conn.{n}.strategy"):
                 status[f"conn.{n}.strategy"] = ""
+            # a failed instance shows its error, not the last warning
+            if f"conn.{n}.warnings" not in status and self.db.get_meta(f"conn.{n}.warnings"):
+                status[f"conn.{n}.warnings"] = ""
             if not run.disabled:
                 self._source_spell(run, ok, error, int(ts), counting)
 

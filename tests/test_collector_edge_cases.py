@@ -200,6 +200,47 @@ class StatusTests(Base):
         self.assertEqual((db.get_meta("conn.sw.ok"), db.get_meta("conn.sw.count"), db.get_meta("conn.sw.strategy")), ("0", "0", ""))
         self.assertEqual(db.get_meta("conn.fw1.strategy", "unset"), "unset")
 
+    def _sw(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw1,sw", **FW1, "LW_CONNECTOR__SW__TYPE": "fake"})
+        return col, db, col._connectors["sw"]
+
+    def test_warnings_written_sorted_and_cleared(self):
+        col, db, sw = self._sw()
+        sw.on_collect = lambda: Batch(stats={"ndp_unavailable": 1, "dropped": 3, "ssid_unavailable": 1, "arp": 2,
+                                             "kea6_unavailable": 0})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings"), "dropped,ndp_unavailable")
+        sw.on_collect = lambda: Batch(stats={"arp": 1})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings", "unset"), "")
+
+    def test_warnings_cleared_after_a_failed_poll(self):
+        col, db, sw = self._sw()
+        sw.on_collect = lambda: Batch(stats={"ndp_unavailable": 1})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings"), "ndp_unavailable")
+
+        def down():
+            raise ConnectorError("timeout")
+        sw.on_collect = down
+        col.run_once()
+        self.assertEqual((db.get_meta("conn.sw.ok"), db.get_meta("conn.sw.warnings")), ("0", ""))
+
+    def test_non_int_values_are_not_warnings(self):
+        col, db, sw = self._sw()
+        sw.on_collect = lambda: Batch(stats={"ndp_unavailable": "1", "kea6_unavailable": True, "dropped": True})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings", "unset"), "")
+
+    def test_labels_unavailable_is_no_warning_for_a_names_connector(self):
+        col, db, sw = self._sw()
+        sw.on_collect = lambda: Batch(stats={"labels_unavailable": 1})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings"), "labels_unavailable")
+        col._runs["sw"].roles = frozenset({"names"})
+        col.run_once()
+        self.assertEqual(db.get_meta("conn.sw.warnings", "unset"), "")
+
     def test_disabled_switch_writes_its_status(self):
         cfg_env = {"LW_CONNECTORS": "fw1,switch", **FW1, "LW_CONNECTOR__SWITCH__TYPE": "snmp_switch"}  # no HOST: disabled
         col, db = self.collector(cfg_env)

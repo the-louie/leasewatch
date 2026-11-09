@@ -844,6 +844,12 @@ class ServerEdgeCaseTests(WebTestCase):
         self.assertEqual([(c["name"], c["label"]) for c in conns],
                          [("fw2", "fw2"), ("swa", "ap-hall-sw"), ("swb", "swb"), ("wifi", "Wi-Fi")])
 
+    def test_connector_warnings(self):
+        self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("swa", "snmp_switch", {})]
+        self.db.set_meta("conn.swa.warnings", "dropped,ndp_unavailable")
+        conns = self.get_json("/api/status")[0]["meta"]["connectors"]
+        self.assertEqual([(c["name"], c["warnings"]) for c in conns], [("fw1", []), ("swa", ["dropped", "ndp_unavailable"])])
+
     def test_connector_strategy(self):
         # the switch's FDB strategy from meta; "" for an instance that reports none
         self.cfg.connector_specs = [InstanceSpec("fw1", "opnsense", {}), InstanceSpec("swa", "snmp_switch", {})]
