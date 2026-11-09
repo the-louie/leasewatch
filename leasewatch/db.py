@@ -1,6 +1,7 @@
 """SQLite storage: devices (one row per MAC), change history, events, meta."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import sqlite3
@@ -30,6 +31,17 @@ def db_error_text(e: sqlite3.Error) -> str:
     if code is not None and (code & 0xFF) in _DB_ERROR_TEXT:
         return _DB_ERROR_TEXT[code & 0xFF]
     return f"database error ({getattr(e, 'sqlite_errorname', None) or type(e).__name__})"
+
+
+def eui64_of(mac: str, addr: str | ipaddress.IPv6Address) -> bool:
+    """True when addr is the EUI-64 address of mac (its interface id is the MAC with ff:fe in the middle)."""
+    try:
+        a = ipaddress.IPv6Address(addr)
+        b = bytes.fromhex(mac.replace(":", "")) if len(mac) == 17 else b""
+    except ValueError:
+        return False
+    return len(b) == 6 and a.packed[8:] == bytes((b[0] ^ 0x02, b[1], b[2], 0xff, 0xfe, b[3], b[4], b[5]))
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -496,9 +508,17 @@ class Database:
             day = time.strftime("%Y-%m-%d", time.localtime(a["merged_ts"]))
             # both rows keep the client-id after a client-id merge; a hostname merge says nothing about it
             cid = c.execute("SELECT client_id FROM devices WHERE mac=?", (key,)).fetchone()["client_id"] if a["reason"] == "client-id" else ""
+            # the IPv6 addresses that are the alias's own EUI-64 address go with it; each one moves on its own
+            v6 = c.execute("SELECT ip6, ip6_stable FROM devices WHERE mac=?", (key,)).fetchone()
+            moved = {k: v6[k] if v6[k] and eui64_of(alias, v6[k]) else "" for k in ("ip6", "ip6_stable")}
             c.execute("DELETE FROM aliases WHERE mac=?", (alias,))
-            c.execute("INSERT INTO devices (mac, first_seen, last_seen, last_online, online, client_id, baseline, acked, split_from) "
-                      "VALUES (?, ?, ?, NULL, 0, ?, 0, 0, ?)", (alias, now, a["last_seen"], cid, key))
+            c.execute("INSERT INTO devices (mac, first_seen, last_seen, last_online, online, client_id, baseline, acked, split_from, "
+                      "ip6, ip6_stable) VALUES (?, ?, ?, NULL, 0, ?, 0, 0, ?, ?, ?)",
+                      (alias, now, a["last_seen"], cid, key, moved["ip6"], moved["ip6_stable"]))
+            if moved["ip6"] or moved["ip6_stable"]:
+                c.execute("UPDATE devices SET ip6=CASE WHEN ip6=? THEN '' ELSE ip6 END, "
+                          "ip6_stable=CASE WHEN ip6_stable=? THEN '' ELSE ip6_stable END WHERE mac=?",
+                          (moved["ip6"], moved["ip6_stable"], key))
             c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)",
                       (now, key, f"{alias} split off (merged by {a['reason']} {a['detail']} on {day}){by}"))
             c.execute("INSERT INTO events (ts, mac, kind, detail) VALUES (?, ?, 'split', ?)", (now, alias, f"split from {key}{by}"))

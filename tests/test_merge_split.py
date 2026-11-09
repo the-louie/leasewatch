@@ -97,6 +97,7 @@ class SplitFromTest(unittest.TestCase):
 
 DEV, AL, AL2 = "02:00:00:00:20:01", "06:00:00:00:20:02", "0a:00:00:00:20:03"
 CID = "ff00000000000002"
+AL_EUI = "2001:db8::400:ff:fe00:2002"  # EUI-64 of AL
 MERGED = 1_700_000_000
 
 
@@ -163,6 +164,37 @@ class SplitAliasTest(unittest.TestCase):
         self.assertIsNone(self.db.split_alias(DEV, "02:00:00:00:99:99"))
         self.assertIsNone(self.db.split_alias("02:00:00:00:99:98", AL))
         self.assertEqual(len(self.db.aliases(other)), 1)
+
+    def v6(self, ip6: str, stable: str) -> tuple[dict, dict]:
+        with self.db.tx() as c:
+            c.execute("UPDATE devices SET ip6=?, ip6_stable=? WHERE mac=?", (ip6, stable, DEV))
+        out = self.db.split_alias(DEV, AL)
+        assert out is not None
+        return out
+
+    def test_alias_eui64_addresses_move_with_the_alias(self) -> None:
+        dev, new = self.v6(AL_EUI, AL_EUI)  # AL = 06:00:00:00:20:02
+        self.assertEqual((dev["ip6"], dev["ip6_stable"], new["ip6"], new["ip6_stable"]), ("", "", AL_EUI, AL_EUI))
+
+    def test_other_addresses_stay_on_the_device(self) -> None:
+        dev, new = self.v6("2001:db8::abcd", "2001:db8::1:20")
+        self.assertEqual((dev["ip6"], dev["ip6_stable"], new["ip6"], new["ip6_stable"]),
+                         ("2001:db8::abcd", "2001:db8::1:20", "", ""))
+
+    def test_only_the_stable_address_moves(self) -> None:
+        dev, new = self.v6("2001:db8::abcd", AL_EUI)
+        self.assertEqual((dev["ip6"], dev["ip6_stable"], new["ip6"], new["ip6_stable"]),
+                         ("2001:db8::abcd", "", "", AL_EUI))
+
+    def test_only_ip6_moves(self) -> None:
+        dev, new = self.v6(AL_EUI, "2001:db8::1:20")
+        self.assertEqual((dev["ip6"], dev["ip6_stable"], new["ip6"], new["ip6_stable"]),
+                         ("", "2001:db8::1:20", AL_EUI, ""))
+
+    def test_ipv4_fields_unchanged_by_the_v6_move(self) -> None:
+        dev, new = self.v6(AL_EUI, AL_EUI)
+        self.assertEqual((dev["ip"], dev["hostname"], dev["client_id"]), ("10.0.0.1", "alex", CID))
+        self.assertEqual((new["ip"], new["hostname"], new["client_id"]), ("", "", CID))
 
     def test_already_a_device(self) -> None:
         with self.db.tx() as c:

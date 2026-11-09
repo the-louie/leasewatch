@@ -59,7 +59,7 @@ import re
 from dataclasses import dataclass, field, replace
 
 from ..config import Config
-from ..db import CONTROL_CHARS
+from ..db import CONTROL_CHARS, eui64_of
 from ..fw1 import Sighting as Fw1Sighting
 from ..fw1 import norm_mac
 from . import Attachment, Batch, Sighting, parse_bool
@@ -274,6 +274,7 @@ class Merged:
     ip6_stable: str = ""  # the best stable IPv6 candidate this poll (EUI-64 of the MAC or a DHCPv6 lease's address)
     # every stable candidate this poll -> its class (prefix, DHCPv6, EUI-64), best first (_settle_ip6_stable)
     ip6_stables: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    macs: tuple[str, ...] = ()  # the device key and its alias MACs (merge_sightings's `aliases`), for the stable address
 
 
 @dataclass(frozen=True)
@@ -352,9 +353,7 @@ def _ip6_key(mac: str, addr: str, dhcp6: bool) -> tuple[int, int, int, int]:
     the MAC (stable) before others (temporary); the lowest numeric value."""
     a = ipaddress.IPv6Address(addr)
     cls = 0 if a in _GUA else 1 if a in _ULA else 2
-    b = bytes.fromhex(mac.replace(":", "")) if len(mac) == 17 else b""
-    eui = len(b) == 6 and a.packed[8:] == bytes((b[0] ^ 0x02, b[1], b[2], 0xff, 0xfe, b[3], b[4], b[5]))
-    return cls, 0 if dhcp6 else 1, 0 if eui else 1, int(a)
+    return cls, 0 if dhcp6 else 1, 0 if eui64_of(mac, a) else 1, int(a)
 
 
 def _pick_ip6(mac: str, ss: list[Fw1Sighting]) -> tuple[str, ...]:
@@ -411,8 +410,11 @@ def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
     return m.ip6_stable if best <= cls else stored
 
 
-def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
+def merge_sightings(sightings: list[Fw1Sighting], aliases: dict[str, tuple[str, ...]] | None = None) -> dict[str, Merged]:
     """One record per MAC, independent of the order the sources return rows in (see RANKING above).
+
+    aliases maps a device key to its alias MACs (their sightings are already re-keyed to the device): the EUI-64
+    address of an alias counts as a stable address of the device.
 
     s.source is the sighting's kind here and s.online its presence claim (to_fw1). The lease whose IP is in the ARP
     table wins; ip/vlan/iface always come from one and the same sighting (what is on the wire), so a device that
@@ -446,7 +448,8 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
             m.vlan = m.iface = ""
         m.ip6s = _pick_ip6(mac, ss)
         m.ip6 = m.ip6s[0] if m.ip6s else ""
-        m.ip6_stables = _pick_ip6_stable((mac,), ss)
+        m.macs = (mac, *(a for a in (aliases or {}).get(mac, ()) if a != mac))
+        m.ip6_stables = _pick_ip6_stable(m.macs, ss)
         m.ip6_stable = next(iter(m.ip6_stables), "")
         if lease:
             m.hostname, m.lease_type, m.client_id = lease.hostname, lease.lease_type, lease.client_id
@@ -670,7 +673,11 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     raw, keys, new_aliases, folds, folded, prev = _decide_keys(ok, prev, state, hold, now)
     held = _held_back(raw, keys, prev, state, hold, now)
     ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
-    merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
+    owned: dict[str, list[str]] = {}  # device key -> its alias MACs: the stored ones and those decided this poll
+    for alias, dev in {**state.aliases, **{m: k for m, k in keys.items() if k != m}}.items():
+        owned.setdefault(dev, []).append(alias)
+    merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings],
+                             {dev: tuple(sorted(a)) for dev, a in owned.items()})
     # enrichment only: a MAC listed by NDP/DHCPv6 alone, or by secondary instances alone (a controller, a name
     # source), gets no row of its own (not new, not present)
     listed = {s.mac for n, b in ok.items() if n not in state.secondary for s in b.sightings if s.kind not in V6_KINDS}
@@ -881,7 +888,7 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
                 lease_blind: bool, grace_s: int, res: MergeResult, label_blind: bool = False) -> int:
     """A known device's row updated in place from this poll's record; returns 1 when it writes a history row."""
     old_stable = cur.get("ip6_stable") or ""
-    stable = _settle_ip6_stable((mac,), old_stable, m)
+    stable = _settle_ip6_stable(m.macs or (mac,), old_stable, m)
     # sticky, no event or history. The stable address is the one shown while it is among this poll's candidates (a
     # stable address of a worse class than a listed one, such as a DHCPv6 ULA beside an NDP GUA, is not), and also
     # while it is shown already and merely not listed: NDP ages an EUI-64 entry out while a temporary address outlives it,

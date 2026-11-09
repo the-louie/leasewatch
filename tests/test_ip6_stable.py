@@ -165,6 +165,42 @@ class V6Only(Base):
         self.assertEqual((ev(res), hist(res)), ([], []))
 
 
+EUI_B1 = "2001:db8:1::ff:fe00:2"  # EUI-64 of B in 2001:db8:1::/64
+EUI_B2 = "2001:db8:2::ff:fe00:2"  # EUI-64 of B in 2001:db8:2::/64
+
+
+class AliasMacs(Base):
+    """A device that owns the alias MAC B: B's EUI-64 address is a stable address of the device."""
+
+    def test_pick_with_and_without_the_alias(self):
+        ss = [Fw1Sighting(mac=A, ip="", hostname="", vendor="", vlan="", iface="", source="ndp", lease_type="",
+                          online=False, ip6=a) for a in (EUI_B1, TEMP)]
+        self.assertEqual(list(_pick_ip6_stable((A, B), ss)), [EUI_B1])
+        self.assertEqual(list(_pick_ip6_stable((A,), ss)), [])
+
+    def test_alias_eui64_is_stable_with_a_history_row_and_no_event(self):
+        res = self.merge([row(A)], [sight(), ndp(EUI_B1, mac=B), ndp(TEMP)], aliases={B: A})
+        self.assertEqual(res.rows[A]["ip6_stable"], EUI_B1)
+        self.assertEqual(ev(res), [])
+        self.assertEqual([h["ip6"] for h in hist(res)], [EUI_B1])
+
+    def test_alias_eui64_renumbered_is_one_event(self):
+        res = self.merge([row(A, ip6_stable=EUI_B1)], [sight(), ndp(EUI_B1, mac=B), ndp(EUI_B2, mac=B)], aliases={B: A})
+        self.assertEqual((res.rows[A]["ip6_stable"], ev(res), hist(res)), (EUI_B1, [], []))
+        res = self.merge([res.rows[A]], [sight(), ndp(EUI_B2, mac=B)], aliases={B: A})
+        self.assertEqual(res.rows[A]["ip6_stable"], EUI_B2)
+        self.assertEqual(ev(res), [("ip6", f"{EUI_B1} -> {EUI_B2}")])
+        self.assertEqual([h["ip6"] for h in hist(res)], [EUI_B2])
+
+    def test_alias_eui64_not_listed_keeps_the_stored_one(self):
+        res = self.merge([row(A, ip6_stable=EUI_B1)], [sight(), ndp(TEMP)], aliases={B: A})
+        self.assertEqual((res.rows[A]["ip6_stable"], ev(res)), (EUI_B1, []))
+
+    def test_alias_eui64_of_a_non_alias_is_no_stable_address(self):
+        res = self.merge([row(A)], [sight(), ndp(EUI_B1, mac=A)])
+        self.assertEqual(res.rows[A]["ip6_stable"], "")
+
+
 class Displayed(Base):
     def polls(self, *polls, prev=None):
         """Merge the polls in turn, each on the rows of the one before; the A row after each."""

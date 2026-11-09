@@ -2,6 +2,7 @@
 the older device with its DHCP hostname, once that device is off the wire. Synthetic data only: the universally
 administered MAC is from the documentation range 00:00:5e:00:53:xx (RFC 7042)."""
 import unittest
+from dataclasses import replace
 
 from _case import EnvTmpCase
 from test_merge import NOW, arp, row
@@ -108,6 +109,13 @@ class FoldTests(EnvTmpCase):
                 res = self.run_merge(prev, sightings)
                 self.assertEqual(res.folds, [])
                 self.assertEqual(res.aliases, [])
+
+    def test_folded_mac_eui64_is_a_stable_address_of_the_device(self):
+        eui = "2001:db8::400:ff:fe00:1002"  # EUI-64 of NEWP (06:00:00:00:10:02)
+        ndp = replace(lease(NEWP, "", presence=False), kind="ndp", ip6=eui)
+        res = self.run_merge([target(), cand()], [lease(NEWP, host=HOST), ndp])
+        self.assertFolded(res)
+        self.assertEqual(res.rows[DEV]["ip6_stable"], eui)
 
     def test_candidate_with_aliases(self):
         # a fold never re-points a chain
