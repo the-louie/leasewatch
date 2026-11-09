@@ -614,6 +614,21 @@ class Config:
         return any(ip.version == n.version and ip in n for n in parse_networks(self.write_allow)[0])
 
     def validate(self) -> list[str]:
+        problems = self._flag_problems()
+        problems += self._url_problems()
+        problems += self._range_problems()
+        problems += self._auth_problems()
+        problems += self._notify_problems()
+        problems += self.connector_problems
+        for spec in self.connector_specs:
+            problems += instance_problems(spec)
+        # without the list at all, "LW_CONNECTORS is not set" already says it
+        if self.connectors_listed and not any("sighting" in cls.describe().produces for sp in self.connector_specs
+                                              for cls in (registry().get(sp.type),) if cls):
+            problems.append("LW_CONNECTORS: at least one connector must produce sightings (e.g. type opnsense)")
+        return problems
+
+    def _flag_problems(self) -> list[str]:
         problems = []
         if parse_bool(self.read_only) is None:
             problems.append("READ_ONLY must be 1 or 0")
@@ -621,6 +636,10 @@ class Config:
             problems.append("MAIL_ON_SOURCE must be 1 or 0")
         if parse_bool(self.mail_on_watch_raw) is None:
             problems.append("MAIL_ON_WATCH must be 1 or 0")
+        return problems
+
+    def _url_problems(self) -> list[str]:
+        problems = []
         nets, bad = parse_networks(self.write_allow)
         problems += [f"WRITE_ALLOW: not an address or network: {b}" for b in bad]
         # web.Server listens on IPv4 only, so an IPv6 entry could never match
@@ -645,66 +664,47 @@ class Config:
         for name, url in (("PUBLIC_URL", self.public_url), ("MAILGUN_API_BASE", self.mailgun_api_base)):
             if url_has_credentials(url):
                 problems.append(f"{name} must not contain credentials")
-        if not 1 <= self.listen_port <= 65535:
-            problems.append("LISTEN_PORT must be 1-65535")
-        if self.new_days < 1:
-            problems.append("NEW_DAYS must be at least 1")
-        if self.new_days > 3650:
-            problems.append("NEW_DAYS must be at most 3650")
+        return problems
+
+    def _range_problems(self) -> list[str]:
+        """The integer settings outside their range. A row is (name, value, lowest, highest, text below, text above,
+        whole): with whole, a value as written that is not a whole number is the problem (the default replaced it)."""
+        def check(*rows: tuple) -> list[str]:
+            out = []
+            for name, value, lo, hi, low, high, whole in rows:
+                raw = _env(name) if whole else ""
+                if raw and not re.fullmatch(r"[+-]?\d+", raw):
+                    out.append(f"{name} must be a whole number")
+                elif value < lo:
+                    out.append(f"{name} {low}")
+                elif value > hi:
+                    out.append(f"{name} {high}")
+            return out
+
+        neg, max_days = "must not be negative", "must be at most 3650"
+        problems = check(("LISTEN_PORT", self.listen_port, 1, 65535, "must be 1-65535", "must be 1-65535", False),
+                         ("NEW_DAYS", self.new_days, 1, 3650, "must be at least 1", max_days, False))
         if "" in self.allowed_hosts:
             problems.append("ALLOWED_HOSTS: an entry has no host name")
-        if self.online_grace_minutes < 0:
-            problems.append("ONLINE_GRACE_MINUTES must not be negative")
-        if self.online_grace_minutes > 10080:
-            problems.append("ONLINE_GRACE_MINUTES must be at most 10080")
-        if self.prune_days < 0:
-            problems.append("PRUNE_DAYS must not be negative")
-        if self.prune_days > 3650:
-            problems.append("PRUNE_DAYS must be at most 3650")
-        raw_private = _env("PRUNE_PRIVATE_DAYS")
-        if raw_private and not re.fullmatch(r"[+-]?\d+", raw_private):
-            problems.append("PRUNE_PRIVATE_DAYS must be a whole number")
-        elif self.prune_private_days < 0 or self.prune_private_days == 1:
-            problems.append("PRUNE_PRIVATE_DAYS must be at least 2 (0 = use PRUNE_DAYS)")
-        elif self.prune_private_days > 3650:
-            problems.append("PRUNE_PRIVATE_DAYS must be at most 3650")
-        raw_purge = _env("PURGE_DAYS")
-        if raw_purge and not re.fullmatch(r"[+-]?\d+", raw_purge):
-            problems.append("PURGE_DAYS must be a whole number")
-        elif self.purge_days < 0:
-            problems.append("PURGE_DAYS must not be negative")
-        elif self.purge_days > 3650:
-            problems.append("PURGE_DAYS must be at most 3650")
-        raw_wifi = _env("WIFI_PRESENCE_DAYS")
-        if raw_wifi and not re.fullmatch(r"[+-]?\d+", raw_wifi):
-            problems.append("WIFI_PRESENCE_DAYS must be a whole number")
-        elif self.wifi_presence_days < 0:
-            problems.append("WIFI_PRESENCE_DAYS must not be negative")
-        elif self.wifi_presence_days > 3650:
-            problems.append("WIFI_PRESENCE_DAYS must be at most 3650")
-        raw_events = _env("EVENT_DAYS")
-        if raw_events and not re.fullmatch(r"[+-]?\d+", raw_events):
-            problems.append("EVENT_DAYS must be a whole number")
-        elif self.event_days < 1:
-            problems.append("EVENT_DAYS must be at least 1")
-        elif self.event_days > 3650:
-            problems.append("EVENT_DAYS must be at most 3650")
-        raw_hist = _env("HISTORY_PER_DEVICE")
-        if raw_hist and not re.fullmatch(r"[+-]?\d+", raw_hist):
-            problems.append("HISTORY_PER_DEVICE must be a whole number")
-        elif not 10 <= self.history_per_device <= 1000:
-            problems.append("HISTORY_PER_DEVICE must be 10-1000")
-        raw_keep = _env("BACKUP_KEEP")
-        if raw_keep and not re.fullmatch(r"[+-]?\d+", raw_keep):
-            problems.append("BACKUP_KEEP must be a whole number")
-        elif not 0 <= self.backup_keep <= 1000:
-            problems.append("BACKUP_KEEP must be 0-1000")
+        problems += check(
+            ("ONLINE_GRACE_MINUTES", self.online_grace_minutes, 0, 10080, neg, "must be at most 10080", False),
+            ("PRUNE_DAYS", self.prune_days, 0, 3650, neg, max_days, False),
+            # 0 = use PRUNE_DAYS, so only 1 and a negative value are too small
+            ("PRUNE_PRIVATE_DAYS", self.prune_private_days or 2, 2, 3650, "must be at least 2 (0 = use PRUNE_DAYS)",
+             max_days, True),
+            ("PURGE_DAYS", self.purge_days, 0, 3650, neg, max_days, True),
+            ("WIFI_PRESENCE_DAYS", self.wifi_presence_days, 0, 3650, neg, max_days, True),
+            ("EVENT_DAYS", self.event_days, 1, 3650, "must be at least 1", max_days, True),
+            ("HISTORY_PER_DEVICE", self.history_per_device, 10, 1000, "must be 10-1000", "must be 10-1000", True),
+            ("BACKUP_KEEP", self.backup_keep, 0, 1000, "must be 0-1000", "must be 0-1000", True))
         if self.lease_type_mode not in ("keep", "grace", "immediate"):
             problems.append("LEASE_TYPE_MODE must be keep, grace or immediate")
-        if self.poll_seconds < 15:
-            problems.append("POLL_SECONDS below 15 is unreasonable for the firewall")
-        if self.poll_seconds > 86400:
-            problems.append("POLL_SECONDS must be at most 86400")
+        problems += check(("POLL_SECONDS", self.poll_seconds, 15, 86400, "below 15 is unreasonable for the firewall",
+                           "must be at most 86400", False))
+        return problems
+
+    def _auth_problems(self) -> list[str]:
+        problems = []
         # never echo the values: the hash is a secret
         if bool(self.auth_user) != bool(self.auth_password_hash):
             problems.append("AUTH_USER and AUTH_PASSWORD_HASH must be set together")
@@ -727,12 +727,4 @@ class Config:
             main, ro = parse_hash(self.auth_password_hash), parse_hash(self.auth_ro_password_hash)
             if main and ro and main[0] != ro[0]:
                 problems.append("AUTH_RO_PASSWORD_HASH must use the same iteration count as AUTH_PASSWORD_HASH")
-        problems += self._notify_problems()
-        problems += self.connector_problems
-        for spec in self.connector_specs:
-            problems += instance_problems(spec)
-        # without the list at all, "LW_CONNECTORS is not set" already says it
-        if self.connectors_listed and not any("sighting" in cls.describe().produces for sp in self.connector_specs
-                                              for cls in (registry().get(sp.type),) if cls):
-            problems.append("LW_CONNECTORS: at least one connector must produce sightings (e.g. type opnsense)")
         return problems
