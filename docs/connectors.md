@@ -12,7 +12,7 @@ Three complete connectors serve as worked examples:
 - [contrib/leasewatch-mikrotik](../contrib/leasewatch-mikrotik/): talks HTTPS to a device with a password,
   `dhcp` and `arp` sightings, host masking and secret redaction.
 - [contrib/leasewatch-mdns](../contrib/leasewatch-mdns/): listens to multicast on the LAN and attributes names by
-  address; needs host networking.
+  address, and with `SSDP=1` also reads SSDP announcements for a product label; needs host networking.
 
 Contents: [1 What a connector is](#1-what-a-connector-is) ·
 [2 Records](#2-records) · [3 Settings](#3-settings) · [4 Errors and secrets](#4-errors-and-secrets) ·

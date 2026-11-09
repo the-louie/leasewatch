@@ -10,6 +10,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Bulk tagging from the Select bar: a tag input with Add and Remove for the selected devices; a device that would pass 8 tags is found before anything is sent and named in a confirm, and left out when you continue; the banner afterwards counts the devices changed.
 - Per-connector `warnings` in `/api/status` and in the status tooltip (`ndp_unavailable`, `kea6_unavailable`, `labels_unavailable`, `dropped`).
 - `MAIL_LANG=en|sv` (default `en`): the texts of mails, ntfy/discord messages, the `json` webhook's `title`/`message` and the MQTT event body in Swedish; event details, JSON keys and connector texts stay English.
+- The mDNS connector's `SSDP=1` setting (default `0`): it also listens to SSDP announcements on UDP 1900, and the product named in the `SERVER:` header (`Sonos/70.3-35220` from `Linux/4.9 UPnP/1.0 Sonos/70.3-35220`) becomes the device's label when mDNS gives none. Unicast announcements, announcements whose `LOCATION` names another address, and those of generic UPnP stacks are ignored. The connector still never sends a packet and never fetches `LOCATION`.
 
 ### Changed
 - The bulk route's refusal text is now `bulk takes acked, archived, tags_add or tags_remove`.

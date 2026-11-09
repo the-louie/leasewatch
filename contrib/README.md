@@ -13,7 +13,7 @@ The leasewatch image does not contain `contrib/`, and nothing under `leasewatch/
 
 - [leasewatch-dnsmasq](leasewatch-dnsmasq/README.md): reads a dnsmasq leases file.
 - [leasewatch-mikrotik](leasewatch-mikrotik/README.md): reads a MikroTik router through the RouterOS REST API.
-- [leasewatch-mdns](leasewatch-mdns/README.md): listen-only names from mDNS; needs host networking and leasewatch 1.5.
+- [leasewatch-mdns](leasewatch-mdns/README.md): listen-only names from mDNS and, with `SSDP=1`, product labels from SSDP announcements; needs host networking and leasewatch 1.5.
 
 ## Layout
 
