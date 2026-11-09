@@ -160,11 +160,13 @@ def dnsmasq_leases(rows: list[dict], now: float, ipv6: bool = False) -> list[dic
 def kea_leases6(rows: list[dict]) -> list[dict]:
     """Kea DHCPv6 rows (/api/kea/leases6/search) in the shape dnsmasq_leases gives IPv6 leases: the address in "ip6",
     "address" empty, so IPv4 code never sees it. State and type as in kea_leases. Skipped: a lease that is not active,
-    an IA_PD row (a delegated prefix is not an address) and a row whose "hwaddr" is not a MAC (Kea knows it only when
-    one of its mac-sources finds one). "client_id" is the DUID, else the row's client_id."""
+    an IA_PD row (a delegated prefix is not an address), an IA_TA row (a temporary address, so a dhcp6 sighting is
+    always a stable IA_NA one) and a row whose "hwaddr" is not a MAC (Kea knows it only when one of its mac-sources
+    finds one). "client_id" is the DUID, else the row's client_id."""
     out = []
     for l in rows:
-        if not isinstance(l, dict) or _s(l.get("type")).upper() == "IA_PD" or not norm_mac(_s(l.get("hwaddr"))):
+        if (not isinstance(l, dict) or _s(l.get("type")).upper() in ("IA_PD", "IA_TA")
+                or not norm_mac(_s(l.get("hwaddr")))):
             continue
         for r in kea_leases([l]):
             if ":" not in r["address"]:

@@ -456,7 +456,7 @@ class MergeTableTests(EnvTmpCase):
     def test_stats_and_history_values(self):
         res = self.run_merge([row(A, hostname="pc", lease_type="dynamic")], {"fw1": fw1(S(A, "10.0.0.6", "pc"), arp(A, "10.0.0.6"), arp(B, "10.0.0.9"))})
         self.assertEqual(res.stats, {"devices": 2, "new": 1, "changed": 1})
-        self.assertEqual(res.history[0], (A, {"ip": "10.0.0.6", "hostname": "pc", "vlan": "Clients", "lease_type": "dynamic"}))
+        self.assertEqual(res.history[0], (A, {"ip": "10.0.0.6", "hostname": "pc", "vlan": "Clients", "lease_type": "dynamic", "ip6": ""}))
 
     def test_user_fields_are_never_written(self):
         res = self.run_merge([row(A, name="Kitchen TV", note="n", acked=1)], {"fw1": fw1(arp(A, "10.0.0.6"))})

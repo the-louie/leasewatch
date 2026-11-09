@@ -134,6 +134,11 @@ class Kea6Tests(unittest.TestCase):
         self.assertNotIn("kea6_unavailable", stats)
         self.assertIn(KEA6, c.paths)
 
+    def test_ia_ta_row_is_skipped(self):
+        out, stats = Kea6Stub([{**V6, "address": "2001:db8:1::abcd", "type": "IA_TA"}, V6]).sightings((), ipv6=True)
+        self.assertEqual([(s.source, s.ip6) for s in out], [("dhcp", ""), ("dhcp6", "2001:db8:1::20")])
+        self.assertEqual(stats["leases6"], 1)
+
     def test_static_type_follows_the_row(self):
         out, _ = Kea6Stub([{**V6, "is_reserved": "1"}]).sightings((), ipv6=True)
         self.assertEqual(out[1].lease_type, "static")

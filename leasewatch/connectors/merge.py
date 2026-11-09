@@ -271,6 +271,9 @@ class Merged:
     label: str = ""  # see merge_sightings
     ip6: str = ""  # the best IPv6 candidate this poll (_ip6_key)
     ip6s: tuple[str, ...] = ()  # candidates in ip6's class (prefix, DHCPv6, EUI-64), best first: a stored one kept if listed
+    ip6_stable: str = ""  # the best stable IPv6 candidate this poll (EUI-64 of the MAC or a DHCPv6 lease's address)
+    # every stable candidate this poll -> its class (prefix, DHCPv6, EUI-64), best first (_settle_ip6_stable)
+    ip6_stables: dict[str, tuple[int, int, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -316,7 +319,7 @@ class MergeResult:
     rows: dict[str, dict] = field(default_factory=dict)       # mac -> full row, every merged or changed device
     new: list[str] = field(default_factory=list)              # new devices to announce (none on the first run)
     events: list[tuple[str, str, str]] = field(default_factory=list)  # (mac, kind, detail)
-    history: list[tuple[str, dict]] = field(default_factory=list)     # (mac, {ip, hostname, vlan, lease_type})
+    history: list[tuple[str, dict]] = field(default_factory=list)     # (mac, {ip, hostname, vlan, lease_type, ip6})
     stats: dict[str, int] = field(default_factory=dict)       # devices, new, changed
     # (mac, instance, last_seen, last_present or None): the instance listed the MAC this poll; last_present only when
     # one of its sightings asserted presence or one of its attachments is present (the writer keeps the stored
@@ -371,6 +374,43 @@ def _pick_ip6(mac: str, ss: list[Fw1Sighting]) -> tuple[str, ...]:
     return tuple(a for k, a in keys if k[:3] == keys[0][0][:3])
 
 
+def _stable_key(macs: tuple[str, ...], addr: str, dhcp6: bool) -> tuple[int, int, int, int]:
+    """_ip6_key of a stable candidate for a device with these MACs: EUI-64 when it is the address of any of them."""
+    return min(_ip6_key(mac, addr, dhcp6) for mac in macs)
+
+
+def _pick_ip6_stable(macs: tuple[str, ...], ss: list[Fw1Sighting]) -> dict[str, tuple[int, int, int]]:
+    """The stable IPv6 candidates of a device (the EUI-64 address of one of its MACs, or one a DHCPv6 lease carries)
+    -> their class (prefix, DHCPv6, EUI-64), best first by _ip6_key. A temporary address is never one."""
+    found: dict[str, bool] = {}  # address -> carried by a dhcp6 sighting
+    for s in ss:
+        if s.ip6:
+            try:
+                ipaddress.IPv6Address(s.ip6)
+            except ValueError:
+                continue
+            found[s.ip6] = found.get(s.ip6, False) or s.source == "dhcp6"
+    keys = sorted((_stable_key(macs, a, d), a) for a, d in found.items())
+    return {a: k[:3] for k, a in keys if k[1] == 0 or k[2] == 0}
+
+
+def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
+    """The device's stable IPv6 address after this poll. A worse class never replaces the stored one; nothing listed
+    keeps it (NDP aged it out); within its class it stays while still listed, so a renumbering that lists the old
+    and the new address side by side changes it only once the old one has left."""
+    if not m.ip6_stable or not stored:
+        return stored or m.ip6_stable
+    best = m.ip6_stables[m.ip6_stable]
+    if stored in m.ip6_stables:
+        cls = m.ip6_stables[stored]
+    else:  # not listed: a stored address that is no EUI-64 one came from a DHCPv6 lease
+        k = _stable_key(macs, stored, False)
+        cls = k[:3] if k[2] == 0 else (k[0], 0, 1)
+    if stored in m.ip6_stables and cls == best:
+        return stored
+    return m.ip6_stable if best <= cls else stored
+
+
 def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
     """One record per MAC, independent of the order the sources return rows in (see RANKING above).
 
@@ -406,6 +446,8 @@ def merge_sightings(sightings: list[Fw1Sighting]) -> dict[str, Merged]:
             m.vlan = m.iface = ""
         m.ip6s = _pick_ip6(mac, ss)
         m.ip6 = m.ip6s[0] if m.ip6s else ""
+        m.ip6_stables = _pick_ip6_stable((mac,), ss)
+        m.ip6_stable = next(iter(m.ip6_stables), "")
         if lease:
             m.hostname, m.lease_type, m.client_id = lease.hostname, lease.lease_type, lease.client_id
             m.lease_hostname = lease.hostname
@@ -742,8 +784,9 @@ def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, 
             rows[mac] = {**ROW_DEFAULTS, "mac": mac, "first_seen": now, "baseline": int(state.first_run), "last_seen": now,
                          "last_online": now if m.online else None, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor,
                          "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online),
-                         "client_id": m.client_id, "label": m.label, "ip6": m.ip6, "ip6_stable": ""}
-            res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type}))
+                         "client_id": m.client_id, "label": m.label, "ip6": m.ip6, "ip6_stable": m.ip6_stable}
+            res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type,
+                                      "ip6": m.ip6_stable}))
             if not state.first_run:
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
                 res.new.append(mac)
@@ -840,16 +883,28 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
     # sticky, no event or history: the stored address stays while still listed in the best class (a temporary
     # address rotating beside it changes nothing) or while nothing is listed (NDP aged it out)
     ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
+    old_stable = cur.get("ip6_stable") or ""
+    stable = _settle_ip6_stable((mac,), old_stable, m)
+    # a stable address replaced by another one is a renumbering; the first one ('' before) is no event
+    renumbered = [("ip6", f"{old_stable} -> {stable}")] if old_stable and stable != old_stable else []
     if m.sources <= V6_KINDS:
-        # listed by NDP/DHCPv6 alone: enrichment only. ip6 and last_seen move, nothing else: no event, no history
-        # row, no lease-type clock (the record has no lease), and online is left to the grace rule in merge().
-        # sources records what listed it this poll, except on a split row waiting for its first poll, whose ''
-        # must stay so that first full listing still fills it silently
+        # listed by NDP/DHCPv6 alone: enrichment only. ip6, ip6_stable and last_seen move, nothing else: no lease-type
+        # clock (the record has no lease), and online is left to the grace rule in merge(). A renumbering writes
+        # its event and history row; the first stable address is filled silently. sources records what listed it
+        # this poll, except on a split row waiting for its first poll, whose '' must stay so that first full
+        # listing still fills it silently
         keep = not cur["sources"] and cur.get("split_from")
-        cur.update(ip6=ip6, last_seen=now, sources=cur["sources"] if keep else sources)
-        return 0
+        changed = 0
+        if renumbered:
+            res.events += [(mac, kind, detail) for kind, detail in renumbered]
+            res.history.append((mac, {"ip": cur["ip"], "hostname": cur["hostname"], "vlan": cur["vlan"],
+                                      "lease_type": cur["lease_type"], "ip6": stable}))
+            changed = 1
+        cur.update(ip6=ip6, ip6_stable=stable, last_seen=now, sources=cur["sources"] if keep else sources)
+        return changed
     ev = _change_events(cur, m)
     lease_type = _settle_lease_type(mac, cur, m, cfg, state, now, lease_blind, grace_s, ev)
+    ev += renumbered
     # a row made by a split has sources '' and split_from set until a poll lists it: its first listing fills the
     # empty fields and writes the history row, but the fill is no change worth an event. Sources '' alone is no
     # marker: a connector that emits kind "" is stored that way for good
@@ -867,13 +922,13 @@ def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state
     ip = m.ip if moved else m.ip or cur["ip"]
     vlan, iface = (m.vlan, m.iface) if moved else (m.vlan or cur["vlan"], m.iface or cur["iface"])
     changed = 0
-    if fields_changed or any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
+    if fields_changed or stable != old_stable or any(k in ("ip", "hostname", "vlan", "lease_type") for k, _ in ev):
         res.history.append((mac, {"ip": ip, "hostname": m.hostname or cur["hostname"],
-                                  "vlan": vlan, "lease_type": lease_type}))
+                                  "vlan": vlan, "lease_type": lease_type, "ip6": stable}))
         changed = 1
     # not on the wire right now: stays online until the grace period after its last sighting has passed
     online = m.online or bool(cur["online"] and (cur["last_online"] or 0) >= now - grace_s)
-    cur.update(ip6=ip6, last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
+    cur.update(ip6=ip6, ip6_stable=stable, last_seen=now, last_online=now if m.online else cur["last_online"], ip=ip,
                hostname=m.hostname or cur["hostname"], vendor=m.vendor or cur["vendor"], vlan=vlan,
                iface=iface, lease_type=lease_type, sources=sources, online=int(online),
                client_id=m.client_id or cur["client_id"],
@@ -934,7 +989,8 @@ def _assemble(res: MergeResult, rows: dict[str, dict], before: dict[str, dict], 
         # that takes the baseline writes one row per device with its complete values
         res.events = []
         res.history = [] if state.held_back else [
-            (mac, {k: row[k] for k in ("ip", "hostname", "vlan", "lease_type")}) for mac, row in rows.items()]
+            (mac, {**{k: row[k] for k in ("ip", "hostname", "vlan", "lease_type")}, "ip6": row.get("ip6_stable") or ""})
+            for mac, row in rows.items()]
     res.rows = {mac: row for mac, row in rows.items()
                 if mac in merged or any(row[k] != before[mac][k] for k in UPDATE_COLUMNS)}
     # what the first run counted is no change (no event, no history row of its own), so it is not reported as one
