@@ -263,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
     db: Database
     app_version: str
     verifier: auth.Verifier | None = None  # None when auth is off
-    role: str = "rw"  # per request, set by _auth_ok(): "ro" for the AUTH_RO_USER login
+    role: str = "rw"  # per request, set by _auth_ok(): "ro" for the AUTH_RO_USER login and an AUTH_TOKENS token
     started: float = 0.0  # process start, for the collector check before the first poll attempt
     boot: str = ""  # per make_handler(): the version counter starts again at 0 after a restart, an old ETag must not match
     write_refusals: _WriteRefusals  # per make_handler(): one log throttle per server
@@ -843,7 +843,7 @@ def make_handler(cfg: Config, db: Database, version: str) -> type[BaseHTTPReques
             if parsed_ro is None:
                 raise ValueError("AUTH_RO_PASSWORD_HASH is not a valid hash")
             ro = (cfg.auth_ro_user, parsed_ro)
-        verifier = auth.Verifier(cfg.auth_user, parsed, ro)
+        verifier = auth.Verifier(cfg.auth_user, parsed, ro, cfg.auth_token_entries)
     # a subclass per call: two servers in one process (the tests) do not share settings
     return type("Handler", (Handler,), {"cfg": cfg, "db": db, "app_version": version, "verifier": verifier, "started": time.time(),
                                         "boot": secrets.token_hex(4), "write_refusals": _WriteRefusals()})

@@ -13,7 +13,7 @@ from encodings.idna import nameprep
 from typing import Mapping
 from urllib.parse import urlparse
 
-from .auth import parse_hash
+from .auth import TOKEN_HASH_RE, TOKEN_NAME_RE, parse_hash
 from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_problems, load_problems, parse_bool, registry,
                          secret_keys, url_has_credentials, url_problems)
 
@@ -317,6 +317,9 @@ class Config:
     # optional second login that can read but not change anything; needs AUTH_USER/AUTH_PASSWORD_HASH
     auth_ro_user: str = field(default_factory=lambda: _env("AUTH_RO_USER"))
     auth_ro_password_hash: str = field(default_factory=lambda: _env("AUTH_RO_PASSWORD_HASH"), repr=False)
+    # read-only API tokens (Authorization: Bearer): comma list of name:sha256hex (python -m leasewatch make-token);
+    # needs AUTH_USER/AUTH_PASSWORD_HASH
+    auth_tokens: str = field(default_factory=lambda: _env("AUTH_TOKENS"), repr=False)
     # no changes through the API (every POST refused); an empty value means the default (off)
     read_only: str = field(default_factory=lambda: _env("READ_ONLY", "0") or "0")
     # addresses and networks (comma list) that may change data; empty = everyone. An empty list is the default, so
@@ -407,6 +410,16 @@ class Config:
     @property
     def auth_ro_enabled(self) -> bool:
         return self.auth_enabled and bool(self.auth_ro_user and self.auth_ro_password_hash)
+
+    @property
+    def auth_token_entries(self) -> list[tuple[str, str]]:
+        """(name, SHA-256 hex) of each AUTH_TOKENS entry with a ':'; blank entries are skipped."""
+        out = []
+        for item in self.auth_tokens.split(","):
+            name, sep, digest = item.strip().partition(":")
+            if sep:
+                out.append((name.strip(), digest.strip()))
+        return out
 
     @property
     def mail_channels(self) -> list[str]:
@@ -727,4 +740,28 @@ class Config:
             main, ro = parse_hash(self.auth_password_hash), parse_hash(self.auth_ro_password_hash)
             if main and ro and main[0] != ro[0]:
                 problems.append("AUTH_RO_PASSWORD_HASH must use the same iteration count as AUTH_PASSWORD_HASH")
+        return problems + self._token_problems()
+
+    def _token_problems(self) -> list[str]:
+        problems = []
+        # entries by position: a bad entry may be a pasted token or hash, so it is never echoed
+        items = [x.strip() for x in self.auth_tokens.split(",") if x.strip()]
+        if items and not self.auth_enabled:
+            problems.append("AUTH_TOKENS needs AUTH_USER")
+        seen = set()
+        for i, item in enumerate(items, 1):
+            name, sep, digest = item.partition(":")
+            name, digest = name.strip(), digest.strip()
+            if not sep:
+                problems.append(f"AUTH_TOKENS entry {i} has no ':' (name:hash from python -m leasewatch make-token)")
+                continue
+            if not TOKEN_NAME_RE.fullmatch(name):
+                problems.append(f"AUTH_TOKENS entry {i}: the name must be 1-32 characters of a-z, 0-9, _ and -")
+                continue
+            if name in seen:
+                problems.append(f"AUTH_TOKENS: the name {name} is used more than once")
+            seen.add(name)
+            if not TOKEN_HASH_RE.fullmatch(digest):
+                problems.append(f"AUTH_TOKENS entry {name} is not a valid hash (64 lowercase hex characters; make one "
+                                "with python -m leasewatch make-token)")
         return problems

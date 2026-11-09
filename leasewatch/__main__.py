@@ -9,6 +9,7 @@ validate()/check() result;
 would merge it;
 `python -m leasewatch hash-password [--iterations N]` reads a password (prompt on a terminal, else one line from stdin)
 and prints the AUTH_PASSWORD_HASH value;
+`python -m leasewatch make-token NAME` prints a new read-only API token (stdout) and its AUTH_TOKENS entry (stderr);
 `python -m leasewatch backup [--to PATH] [--keep N]` writes a consistent copy of the database (safe while the service
 runs) and rotates DATA_DIR/backups/;
 `python -m leasewatch vacuum` rebuilds the database file (stop the service first);
@@ -37,7 +38,7 @@ from .db import Database
 from .web import serve
 
 
-SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect", "hash-password", "backup", "vacuum",
+SUBCOMMANDS = ("snmp-detect", "snmp-profiles", "check", "collect", "hash-password", "make-token", "backup", "vacuum",
                "reset-baseline", "import-csv")
 NO_PYSNMP = "pysnmp not installed: the SNMP switch connector and snmp-detect need it (pip install pysnmp)"
 
@@ -545,6 +546,9 @@ def startup_line(cfg: Config, version: str) -> str:
     if cfg.mqtt_on:
         discovery = "discovery" if cfg.mqtt_discovery_on else "no discovery"
         line += f"; mqtt on ({mqtt_target(cfg)}, {discovery}, {cfg.mqtt_devices})"
+    tokens = len(cfg.auth_token_entries) if cfg.auth_enabled else 0
+    if tokens:  # the count only, never the names
+        line += f"; auth tokens: {tokens}"
     if cfg.read_only_on:  # READ_ONLY wins over WRITE_ALLOW
         return line + "; writes off"
     nets = [str(n.network_address) if n.prefixlen == n.max_prefixlen else str(n) for n in parse_networks(cfg.write_allow)[0]]
@@ -586,6 +590,27 @@ def hash_password_cmd(argv: list[str]) -> int:
     if len(password) < 12:
         sys.stderr.write("warning: a password shorter than 12 characters is easy to guess\n")
     _out(auth.make_hash(password, args.iterations))
+    return 0
+
+
+def make_token_cmd(argv: list[str]) -> int:
+    import argparse
+    import hashlib
+    import secrets
+    from . import auth
+    ap = argparse.ArgumentParser(prog="python -m leasewatch make-token",
+                                 description="Print a new read-only API token (stdout, shown only this once) and its "
+                                             "AUTH_TOKENS entry (stderr).")
+    ap.add_argument("name", help="a name for the token: 1-32 characters of a-z, 0-9, _ and -")
+    args = ap.parse_args(argv)
+    if not auth.TOKEN_NAME_RE.fullmatch(args.name):
+        sys.stderr.write("NAME must be 1-32 characters of a-z, 0-9, _ and -\n")
+        return 1
+    token = secrets.token_urlsafe(32)
+    _out(token)
+    sys.stderr.write(f"AUTH_TOKENS entry: {args.name}:{hashlib.sha256(token.encode('ascii')).hexdigest()}\n"
+                     "append it to AUTH_TOKENS (comma-separated) and restart; send the token as "
+                     "'Authorization: Bearer <token>'\n")
     return 0
 
 
@@ -634,7 +659,7 @@ def _run_subcommand(argv: list[str]) -> int | None:
     try:
         try:
             rc = {"snmp-detect": snmp_detect_cmd, "snmp-profiles": snmp_profiles_cmd, "check": check_cmd,
-                  "collect": collect_cmd, "hash-password": hash_password_cmd,
+                  "collect": collect_cmd, "hash-password": hash_password_cmd, "make-token": make_token_cmd,
                   "backup": lambda a: maintenance.backup_cmd(a, _out),
                   "vacuum": lambda a: maintenance.vacuum_cmd(a, _out),
                   "reset-baseline": lambda a: maintenance.reset_baseline_cmd(a, _out),

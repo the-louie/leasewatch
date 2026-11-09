@@ -1,4 +1,5 @@
-"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH, and a read-only AUTH_RO_USER): the PBKDF2 hash format and the per-request check."""
+"""Optional HTTP basic auth (AUTH_USER + AUTH_PASSWORD_HASH, and a read-only AUTH_RO_USER), and read-only Bearer
+tokens (AUTH_TOKENS): the PBKDF2 hash format and the per-request check."""
 from __future__ import annotations
 
 import base64
@@ -24,6 +25,9 @@ CACHE_MAX = 32
 BUSY_TIMEOUT = 10.0  # seconds a request waits for a PBKDF2 slot before it gets 503
 FAIL_LOG_EVERY = 60.0
 _B64URL = re.compile(r"[A-Za-z0-9_-]+")
+# AUTH_TOKENS entries: name:<SHA-256 of the token, lowercase hex>
+TOKEN_NAME_RE = re.compile(r"[a-z0-9_-]{1,32}")
+TOKEN_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class Busy(Exception):
@@ -86,14 +90,18 @@ def parse_basic(header: str | None) -> tuple[str, str] | None:
 
 class Verifier:
     """Checks the Authorization header of a request against AUTH_USER and the parsed AUTH_PASSWORD_HASH, and the
-    optional read-only pair AUTH_RO_USER and AUTH_RO_PASSWORD_HASH. Both pairs share one CPU cap and one cache."""
+    optional read-only pair AUTH_RO_USER and AUTH_RO_PASSWORD_HASH. Both pairs share one CPU cap and one cache.
+    A Bearer token (AUTH_TOKENS, read-only) costs one SHA-256 and uses neither."""
 
     def __init__(self, user: str, parsed_hash: tuple[int, bytes, bytes],
-                 ro: tuple[str, tuple[int, bytes, bytes]] | None = None) -> None:
+                 ro: tuple[str, tuple[int, bytes, bytes]] | None = None,
+                 tokens: list[tuple[str, str]] | tuple = ()) -> None:
         # (user, iterations, salt, derived key, role); the read-write pair first
         self._entries = [(user.encode("utf-8"), *parsed_hash, "rw")]
         if ro is not None:
             self._entries.append((ro[0].encode("utf-8"), *ro[1], "ro"))
+        # (name, SHA-256 of the token); validate() checked the hex
+        self._tokens = [(name, bytes.fromhex(digest)) for name, digest in tokens]
         # CPU cap: a password-guessing burst must not pin every core with PBKDF2
         self._sem = threading.BoundedSemaphore(2)
         # success cache, state of this verifier (one per server): HMAC of the header under a key of this process ->
@@ -110,6 +118,8 @@ class Verifier:
 
     def check(self, header: str | None, client: str = "") -> str | None:
         """The role of the login in the header ("rw" or "ro"), else None. Raises Busy when no PBKDF2 slot frees up."""
+        if header and header[:7].lower() == "bearer ":
+            return self._check_token(header[7:], client)
         creds = parse_basic(header)
         if creds is None:
             if header:
@@ -147,6 +157,20 @@ class Verifier:
             while len(self._cache) > CACHE_MAX:
                 self._cache.popitem(last=False)
         return role
+
+    def _check_token(self, token: str, client: str) -> str | None:
+        # a random 32-byte token needs no slow hash: one SHA-256 per request, so no cache and no CPU cap
+        if not token or len(token) > MAX_HEADER or not token.isascii():
+            self._failed(client)
+            return None
+        digest = hashlib.sha256(token.encode("ascii")).digest()
+        ok = False
+        for _, want in self._tokens:  # every entry (no early exit): the answer time says nothing about which matched
+            ok = hmac.compare_digest(digest, want) | ok
+        if not ok:
+            self._failed(client)
+            return None
+        return "ro"
 
     def _failed(self, client: str) -> None:
         # no lockout (anyone could lock the owner out); the address only, never the user name or password

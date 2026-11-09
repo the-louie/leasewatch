@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- Read-only API tokens: `AUTH_TOKENS` (comma list of `name:sha256hex`, needs `AUTH_USER`) accepts `Authorization: Bearer <token>` with the rights of the read-only login; `python -m leasewatch make-token NAME` prints a new token once and its entry; the start line counts them (`auth tokens: N`).
 - UniFi, session mode: the connector (version 1.3) also reports each client's controller hostname and vendor (OUI) as `client` sightings with `presence=False` and no IP, so they fill a device's name and vendor after the lease's. `HOSTNAMES=1` (default; `0` turns it off); key mode has neither.
 - For connector authors: `HostContext.device_ips()` maps an address (IPv4 or IPv6) to the device's MAC, merged addresses included; the kind `scan` now covers passive discovery too (its rank is unchanged).
 - New contrib connector `leasewatch-mdns` (type `mdns`): listen-only, it joins the mDNS group (224.0.0.251, UDP 5353) and never sends. It turns the announcements it hears into `scan` sightings with `hostname` and `label` (name and model), `presence=False`, no IP. Needs host networking.
