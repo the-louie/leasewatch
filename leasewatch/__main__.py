@@ -627,47 +627,50 @@ def _log_setup(level: str, fmt: str) -> bool:
     return known
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in SUBCOMMANDS:
-        logging.basicConfig(level="WARNING", format="%(levelname)s %(name)s: %(message)s")
-        rc = None
+def _run_subcommand(argv: list[str]) -> int | None:
+    """Run the one-shot command named by argv[0] (one of SUBCOMMANDS) and return its exit code."""
+    logging.basicConfig(level="WARNING", format="%(levelname)s %(name)s: %(message)s")
+    rc = None
+    try:
         try:
+            rc = {"snmp-detect": snmp_detect_cmd, "snmp-profiles": snmp_profiles_cmd, "check": check_cmd,
+                  "collect": collect_cmd, "hash-password": hash_password_cmd,
+                  "backup": lambda a: maintenance.backup_cmd(a, _out),
+                  "vacuum": lambda a: maintenance.vacuum_cmd(a, _out),
+                  "reset-baseline": lambda a: maintenance.reset_baseline_cmd(a, _out),
+                  "import-csv": lambda a: importer.import_csv_cmd(a, _out)}[argv[0]](argv[1:])
+        except SystemExit as e:  # argparse's --help or usage error: its output is flushed below like any other
+            rc = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
+        sys.stdout.flush()  # here, not at exit: a reader that has gone away is caught below
+        return rc
+    except BrokenPipeError:
+        # `... | head` closed the pipe: the operator has what they wanted. stdout goes to /dev/null so the
+        # interpreter's flush at exit does not raise again (sys.stdout's file descriptor 1 is replaced)
+        try:
+            fd = sys.stdout.fileno()  # before os.open: a stdout without a descriptor must not leak /dev/null
+            devnull = os.open(os.devnull, os.O_WRONLY)
             try:
-                rc = {"snmp-detect": snmp_detect_cmd, "snmp-profiles": snmp_profiles_cmd, "check": check_cmd,
-                      "collect": collect_cmd, "hash-password": hash_password_cmd,
-                      "backup": lambda a: maintenance.backup_cmd(a, _out),
-                      "vacuum": lambda a: maintenance.vacuum_cmd(a, _out),
-                      "reset-baseline": lambda a: maintenance.reset_baseline_cmd(a, _out),
-                      "import-csv": lambda a: importer.import_csv_cmd(a, _out)}[argv[0]](argv[1:])
-            except SystemExit as e:  # argparse's --help or usage error: its output is flushed below like any other
-                rc = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
-            sys.stdout.flush()  # here, not at exit: a reader that has gone away is caught below
-            return rc
-        except BrokenPipeError:
-            # `... | head` closed the pipe: the operator has what they wanted. stdout goes to /dev/null so the
-            # interpreter's flush at exit does not raise again (sys.stdout's file descriptor 1 is replaced)
-            try:
-                fd = sys.stdout.fileno()  # before os.open: a stdout without a descriptor must not leak /dev/null
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                try:
-                    os.dup2(devnull, fd)
-                finally:
-                    os.close(devnull)
-            except (OSError, ValueError, AttributeError):  # io.UnsupportedOperation is an OSError and ValueError
-                pass
-            # a failed run stays failed (set -o pipefail); one that broke off mid-output had nothing left to report
-            return 0 if rc is None else rc
-        except AttributeError:
-            if sys.stdout is not None:
-                raise
-            # started with stdout closed (>&-): nowhere to write the output; a code the command set stays
-            # (backup, vacuum, reset-baseline and import-csv have done their work by then: their code stays, 0 included;
-            # an import-csv --dry-run is not exempt, its only result is the report)
-            done = ("backup", "vacuum", "reset-baseline") + (("import-csv",) if "--dry-run" not in argv else ())
-            return 1 if not rc and argv[0] not in done else rc
-        except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
-            return 130  # 128 + SIGINT, as the shell reports an interrupted command
+                os.dup2(devnull, fd)
+            finally:
+                os.close(devnull)
+        except (OSError, ValueError, AttributeError):  # io.UnsupportedOperation is an OSError and ValueError
+            pass
+        # a failed run stays failed (set -o pipefail); one that broke off mid-output had nothing left to report
+        return 0 if rc is None else rc
+    except AttributeError:
+        if sys.stdout is not None:
+            raise
+        # started with stdout closed (>&-): nowhere to write the output; a code the command set stays
+        # (backup, vacuum, reset-baseline and import-csv have done their work by then: their code stays, 0 included;
+        # an import-csv --dry-run is not exempt, its only result is the report)
+        done = ("backup", "vacuum", "reset-baseline") + (("import-csv",) if "--dry-run" not in argv else ())
+        return 1 if not rc and argv[0] not in done else rc
+    except KeyboardInterrupt:  # Ctrl-C while a switch is slow to answer: the operator stopped it, no traceback
+        return 130  # 128 + SIGINT, as the shell reports an interrupted command
+
+
+def _setup_logging() -> logging.Logger:
+    """Configure logging from LOG_LEVEL and LOG_FORMAT, warn about values it does not know, return the service logger."""
     level = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
     known = isinstance(logging.getLevelName(level), int)
     fmt = (os.environ.get("LOG_FORMAT") or "auto").strip().lower()
@@ -677,18 +680,24 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("LOG_FORMAT=%r is not plain, json or auto; using plain", fmt)
     if not known:
         log.warning("LOG_LEVEL=%r is not a log level, using INFO", level)
-    cfg = Config()
-    problems = cfg.validate()
-    if problems:
-        for p in problems:
-            log.error("config: %s", p)
-        return 2
+    return log
+
+
+def _open_db(cfg: Config, log: logging.Logger) -> Database | None:
+    """Create the data directory and open the database; None (the error logged) when that fails."""
     try:
         os.makedirs(cfg.data_dir, exist_ok=True)
-        db = Database(cfg.db_path)
+        return Database(cfg.db_path)
     except (OSError, sqlite3.Error) as e:
         log.error("cannot open %s: %s", cfg.db_path, e)
-        return 2
+        return None
+
+
+def _serve(cfg: Config, db: Database, log: logging.Logger):
+    """Bind the web server, start the collector and install the signal handlers.
+
+    Returns (server, collector thread, collector), or None (the error logged) when the port cannot be bound.
+    """
     stop = threading.Event()
     collector = Collector(cfg, db)
     t = threading.Thread(target=collector.loop, args=(stop,), name="collector", daemon=True)
@@ -696,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
         srv = serve(cfg, db, __version__)
     except OSError as e:
         log.error("cannot listen on %s:%d: %s", cfg.listen_host, cfg.listen_port, e)
-        return 2
+        return None
     t.start()  # only once the port is ours: a failed bind must not leave a poller running (and mailing) without a UI
 
     def shutdown(*_):
@@ -706,9 +715,11 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    log.info("%s", startup_line(cfg, __version__))
-    log.info("%s", types_line())
-    srv.serve_forever()
+    return srv, t, collector
+
+
+def _shutdown(srv, t: threading.Thread, collector: Collector, db: Database, log: logging.Logger) -> None:
+    """Close the server, wait for a poll in flight, then close the collector and the database, in that order."""
     srv.server_close()
     verifier = getattr(srv.RequestHandlerClass, "verifier", None)
     if verifier is not None:  # failed logins still held back for the next log line
@@ -718,6 +729,30 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("collector still busy after 10 s; closing the database anyway")
     collector.close()  # a connector may be logging out of its device, which the poll in flight could still use
     db.close()  # last: merges the WAL into the main file
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in SUBCOMMANDS:
+        return _run_subcommand(argv)
+    log = _setup_logging()
+    cfg = Config()
+    problems = cfg.validate()
+    if problems:
+        for p in problems:
+            log.error("config: %s", p)
+        return 2
+    db = _open_db(cfg, log)
+    if db is None:
+        return 2
+    served = _serve(cfg, db, log)
+    if served is None:
+        return 2
+    srv, t, collector = served
+    log.info("%s", startup_line(cfg, __version__))
+    log.info("%s", types_line())
+    srv.serve_forever()
+    _shutdown(srv, t, collector, db, log)
     return 0
 
 
