@@ -154,7 +154,7 @@ class SettingsTest(Base):
         self.assertEqual(info.produces, frozenset({"sighting"}))
         self.assertEqual(info.roles, frozenset({"names"}))
         self.assertEqual({s.key: s.default for s in info.settings},
-                         {"interface": "", "max_age_days": "7", "max_entries": "4096"})
+                         {"interface": "", "max_age_days": "7", "max_entries": "4096", "relays": ""})
 
     def test_needs_device_ips(self) -> None:
         old_host = types.SimpleNamespace(now=lambda: NOW)  # a host older than 1.5: no device_ips
@@ -190,6 +190,16 @@ class SettingsTest(Base):
                 problems = self.conn(interface=v).validate()
                 self.assertEqual(len(problems), 1, problems)
                 self.assertIn("interface", problems[0])
+
+    def test_relays(self) -> None:
+        for v in ("", "10.0.0.1", "10.0.0.1,", " 10.0.0.1 , 10.0.0.2,10.0.0.1"):
+            with self.subTest(value=v):
+                self.assertEqual(self.conn(relays=v).validate(), [])
+        for v, pos in (("foo", "1"), ("10.0.0.1,foo,bar", "2"), ("fe80::1", "1"), ("10.0.0", "1")):
+            with self.subTest(value=v):
+                problems = self.conn(relays=v).validate()
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("relays entry " + pos, problems[0])
 
     def test_one_problem_each(self) -> None:
         for key, value in (("max_age_days", "0"), ("max_age_days", "91"), ("max_entries", "10"),
@@ -233,8 +243,8 @@ class LifecycleTest(Base):
         self.assertEqual(len(self.factory.sockets), 1)
         self.assertEqual(batch.sightings, [])
         self.assertEqual(batch.stats, {"names": 0, "joined": 0, "packets": 0, "malformed": 0, "unmapped": 0,
-                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "dropped_rate": 0, "errors": 0,
-                                       "labels_unavailable": 1})
+                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "relayed": 0,
+                                       "dropped_rate": 0, "errors": 0, "labels_unavailable": 1})
 
     def test_cold_cache_keeps_labels(self) -> None:
         c = self.conn()
@@ -449,10 +459,54 @@ class PacketPathTest(Base):
         ttl = (socket.IPPROTO_IP, socket.IP_TTL, struct.pack("=i", 255))
         info = (socket.IPPROTO_IP, mc.IP_PKTINFO, struct.pack("=i4s4s", 2, socket.inet_aton("10.0.0.2"),
                                                               socket.inet_aton(mc.MDNS_GROUP)))
-        self.assertEqual(mc._link_reject([ttl, info]), "")
-        self.assertEqual(mc._link_reject([info]), "off_link")  # no TTL: rejected
-        self.assertEqual(mc._link_reject([ttl]), "unicast")  # no destination: rejected
-        self.assertEqual(mc._link_reject([(socket.IPPROTO_IP, socket.IP_TTL, b"\xff"), info]), "")  # one byte
+        self.assertEqual(mc._link_reject([ttl, info]), (True, True))
+        self.assertEqual(mc._link_reject([info]), (False, True))  # no TTL: not ok
+        self.assertEqual(mc._link_reject([ttl]), (True, False))  # no destination: not ok
+        self.assertEqual(mc._link_reject([(socket.IPPROTO_IP, socket.IP_TTL, b"\xff"), info]), (True, True))  # 1 byte
+        self.assertEqual(mc._link_reject([(socket.IPPROTO_IP, socket.IP_TTL, b"\x01"), info]), (False, True))
+
+    def test_relay_accepted_at_any_ttl(self) -> None:
+        c = self.conn(relays="10.0.0.9, 10.0.0.1,")
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))):
+            c.check()
+            s = self.factory.sockets[0]
+            s.deliver(src="10.0.0.9", ttl=1)
+            self.assertTrue(wait_until(lambda: MAC_A in c._cache))
+        stats = c.collect().stats
+        self.assertEqual((stats["packets"], stats["relayed"], stats["off_link"], stats["unicast"]), (1, 1, 0, 0))
+        self.assertEqual(c.collect().stats["relayed"], 0)  # reset per poll
+
+    def test_relay_unicast_still_rejected(self) -> None:
+        c = self.conn(relays="10.0.0.9")
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))) as parse:
+            c.check()
+            s = self.factory.sockets[0]
+            s.deliver(src="10.0.0.9", ttl=1, dst="10.0.0.2")
+            s.deliver(src="10.0.0.9", ttl=255, dst="10.0.0.2")
+            self.assertTrue(wait_until(lambda: c._counts["unicast"] == 2))
+            self.assertEqual(parse.call_count, 0)
+            self.assertEqual(c._cache, {})
+        self.assertEqual(c.collect().stats["relayed"], 0)
+
+    def test_unlisted_source_off_link(self) -> None:
+        c = self.conn(relays="10.0.0.9")
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))) as parse:
+            c.check()
+            s = self.factory.sockets[0]
+            s.deliver(src="10.0.0.8", ttl=1)
+            self.assertTrue(wait_until(lambda: c._counts["off_link"] == 1))
+            self.assertEqual(parse.call_count, 0)
+            self.assertEqual(c._cache, {})
+        self.assertEqual(c.collect().stats["relayed"], 0)
+
+    def test_relay_at_ttl_255_not_counted(self) -> None:
+        c = self.conn(relays="10.0.0.9")
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))):
+            c.check()
+            self.factory.sockets[0].deliver(src="10.0.0.9", ttl=255)
+            self.assertTrue(wait_until(lambda: MAC_A in c._cache))
+        stats = c.collect().stats
+        self.assertEqual((stats["relayed"], stats["off_link"]), (0, 0))
 
     def test_link_options_refused_falls_back(self) -> None:
         self.factory.link_options = False

@@ -75,9 +75,24 @@ def _errno_text(e: OSError) -> str:
     return e.strerror or str(e) or type(e).__name__
 
 
-def _link_reject(ancdata: Any) -> str:
-    """The stats key a packet with these control messages is rejected under, or "" to accept it: "off_link" when
-    its IP TTL is not 255 (or missing), "unicast" when its destination is not the group (or missing)."""
+def _relay_set(value: str) -> tuple[frozenset[str], int]:
+    """The valid IPv4 addresses in a comma-separated list (blank entries ignored), and the 1-based position of the
+    first entry that is not one (0 when all are)."""
+    found: set[str] = set()
+    bad = 0
+    for i, part in enumerate(p.strip() for p in value.split(",")):
+        if not part:
+            continue
+        try:
+            found.add(str(ipaddress.IPv4Address(part)))
+        except ValueError:
+            bad = bad or i + 1
+    return frozenset(found), bad
+
+
+def _link_reject(ancdata: Any) -> tuple[bool, bool]:
+    """(ttl_ok, dest_ok) for a packet with these control messages: the IP TTL is 255, and the destination is the
+    group. A TTL or destination that is missing is not ok."""
     ttl = dst = None
     for level, kind, data in ancdata:
         if level != socket.IPPROTO_IP:
@@ -89,11 +104,7 @@ def _link_reject(ancdata: Any) -> str:
                 ttl = data[0]
         elif kind == IP_PKTINFO and len(data) >= 12:
             dst = socket.inet_ntoa(data[8:12])
-    if ttl != LINK_TTL:
-        return "off_link"
-    if dst != MDNS_GROUP:
-        return "unicast"
-    return ""
+    return ttl == LINK_TTL, dst == MDNS_GROUP
 
 
 class MdnsConnector(SettingsMixin):
@@ -108,6 +119,8 @@ class MdnsConnector(SettingsMixin):
                     help="days a name heard is kept without being heard again"),
             Setting("max_entries", default="4096", kind="int", min=64, max=65536,
                     help="names kept at most; the oldest heard goes first"),
+            Setting("relays", default="",
+                    help="comma-separated IPv4 addresses of mDNS repeaters whose packets are accepted at any TTL"),
         ),
     )
 
@@ -117,13 +130,14 @@ class MdnsConnector(SettingsMixin):
         self.interface = self.settings["interface"].strip()
         self.max_age_days = _int(self.settings["max_age_days"], "7")
         self.max_entries = _int(self.settings["max_entries"], "4096")
+        self.relays = _relay_set(self.settings["relays"])[0]
         self._socket_factory = socket_factory or self._default_socket
         self._clock: Callable[[], float] = time.monotonic  # the rate budget and the warning interval
         self._lock = threading.Lock()  # the cache, its IP index and the counters
         self._cache: dict[str, _Entry] = {}  # mac -> entry, in the order last heard (oldest first)
         self._by_ip: dict[str, str] = {}  # ip -> the mac whose entry holds it
         self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "wrong_port", "off_link", "unicast",
-                                      "dropped_rate", "errors"), 0)
+                                      "relayed", "dropped_rate", "errors"), 0)
         self._joined = 0  # interfaces the group was joined on by the current socket
         self._window = -1  # the second the rate budget counts in
         self._in_window = 0
@@ -142,6 +156,9 @@ class MdnsConnector(SettingsMixin):
         problems = self._generic_problems()
         if not hasattr(self.ctx, "device_ips"):
             problems.append(NEEDS_HOST)
+        bad = _relay_set(self.settings["relays"])[1]
+        if bad:
+            problems.append(f"relays entry {bad} is not an IPv4 address")
         v = self.interface
         if v:
             try:
@@ -253,6 +270,16 @@ class MdnsConnector(SettingsMixin):
         with self._lock:
             self._counts[key] += 1
 
+    def _verdict(self, ancdata: Any, addr: Any) -> str:
+        """"" to accept a packet, "off_link" or "unicast" to reject it, "relayed" to accept one with a TTL other than
+        255 from a listed repeater. A destination other than the group is always "unicast"."""
+        ttl_ok, dest_ok = _link_reject(ancdata)
+        if not dest_ok:
+            return "unicast"
+        if ttl_ok:
+            return ""
+        return "relayed" if isinstance(addr, tuple) and addr and addr[0] in self.relays else "off_link"
+
     def _run(self, sock: Any, stop: threading.Event, checked: bool = False) -> None:
         """The listener: receive until stopped. No exception ends it; each one is counted in "errors". With
         `checked`, each packet comes with its TTL and destination, and one from off the link or sent unicast is
@@ -261,7 +288,7 @@ class MdnsConnector(SettingsMixin):
             try:
                 if checked:
                     data, ancdata, _flags, addr = sock.recvmsg(RECV_SIZE, ANC_SIZE)
-                    reject = _link_reject(ancdata)
+                    reject = self._verdict(ancdata, addr)
                 else:
                     data, addr = sock.recvfrom(RECV_SIZE)
                     reject = ""
@@ -285,14 +312,15 @@ class MdnsConnector(SettingsMixin):
     # --- what is heard -----------------------------------------------------------------------------------------
 
     def _handle(self, data: bytes, addr: Any, reject: str = "") -> None:
-        """One received packet: the link checks (`reject` names the one it failed), the rate budget, the parse,
+        """One received packet: the link checks (`reject` names the one it failed, or "relayed"), the rate budget, the parse,
         then every name it carries."""
         second = int(self._clock())
         with self._lock:
             self._counts["packets"] += 1
             if reject:
                 self._counts[reject] += 1
-                return
+                if reject != "relayed":
+                    return
             if not (isinstance(addr, tuple) and len(addr) > 1 and addr[1] == MDNS_PORT):
                 self._counts["wrong_port"] += 1  # RFC 6762 6: a response not from port 5353 is not mDNS
                 return

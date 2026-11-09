@@ -2,6 +2,15 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+### Changed
+
+### Fixed
+- The mDNS connector accepts packets from a listed repeater (`RELAYS`) at any TTL: the OPNsense os-mdns-repeater package sends with TTL 1, which 1.5 refused as off-link.
+
 ## 1.5.0 (2026-11-09)
 
 ### Added

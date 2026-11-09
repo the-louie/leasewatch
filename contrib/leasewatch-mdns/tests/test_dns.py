@@ -264,7 +264,8 @@ class ListenerPathTest(unittest.TestCase):
             Sighting(mac=MAC_PRINTER, source="mdns1", kind="scan", presence=False, observed_at=NOW,
                      hostname="BRW020000000030", label="Brother HL-L2350DW series")])
         self.assertEqual(batch.stats, {"names": 2, "joined": 0, "packets": 2, "malformed": 0, "unmapped": 0,
-                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "dropped_rate": 0, "errors": 0})
+                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "relayed": 0,
+                                       "dropped_rate": 0, "errors": 0})
 
     def test_unmapped_address(self) -> None:
         self.feed((fx.GOODBYE, "10.0.0.50"))  # 10.0.0.50 is not in device_ips

@@ -25,6 +25,7 @@ counted as `unmapped` and dropped. The record it produces has no address and no 
 | `INTERFACE` | no | empty | Join the group on this interface only, given as its IPv4 address or its name (e.g. `eth0`). Empty joins on every non-loopback interface, by index. With avahi on the host, set it to hear one segment only |
 | `MAX_AGE_DAYS` | no | `7` | How long a heard name is kept per device, 1 to 90 days |
 | `MAX_ENTRIES` | no | `4096` | The most devices kept in the cache, 64 to 65536 |
+| `RELAYS` | no | empty | Comma-separated IPv4 addresses of mDNS repeaters. A packet sent to the group from one of them is accepted at any TTL and counted as `relayed`. See "Running in a container" |
 
 `TYPE` and `TIMEOUT` are host keys, as for every connector.
 
@@ -43,7 +44,9 @@ mDNS (RFC 6762 section 6) and is counted as `wrong_port` without being read.
 
 As RFC 6762 section 11 asks, the listener reads each packet's IP TTL and destination address (`IP_RECVTTL` and
 `IP_PKTINFO`). It accepts only a packet sent to 224.0.0.251 with TTL 255, so a host off the link (a router lowers
-the TTL) or a unicast packet to this host cannot name a device; these are counted as `off_link` and `unicast`. If
+the TTL) or a unicast packet to this host cannot name a device; these are counted as `off_link` and `unicast`. A
+packet with another destination is always `unicast`; one with another TTL is accepted only from an address in
+`RELAYS`. If
 the OS refuses the two options, the connector logs "mdns: cannot check the sender's link; accepting any source"
 once and accepts any source.
 
@@ -59,7 +62,9 @@ connector would hear nothing. Use one of these instead:
 
 Only the VLANs the host is attached to are heard. mDNS does not cross a router, so for devices on other VLANs (for
 example an IoT VLAN) run an mDNS repeater on the firewall, such as os-mdns-repeater on OPNsense, and make sure the
-repeated traffic reaches the VLAN the host is on.
+repeated traffic reaches the VLAN the host is on. os-mdns-repeater 1.11 as packaged by OPNsense sends with the
+system default TTL (1 on FreeBSD), so its repeated packets are refused as `off_link` unless the firewall's address
+on that VLAN is listed in `RELAYS`; the upstream mdns-repeater and avahi's reflector send TTL 255 and need no entry.
 
 ## What it sees
 
@@ -78,7 +83,8 @@ device's entry. A goodbye (TTL 0) does not remove the name: the name is kept for
 
 The listener thread starts at the first `check()` or `collect()` and parses at most 200 packets a second; the rest
 are counted as `dropped_rate`. The status counts, reset each poll, are `names`, `packets`, `malformed`,
-`unmapped`, `wrong_port`, `off_link`, `unicast`, `dropped_rate` and `errors`; `joined` is the number of interfaces
+`unmapped`, `wrong_port`, `off_link`, `unicast`, `relayed` (accepted at a TTL other than 255 from a listed repeater),
+`dropped_rate` and `errors`; `joined` is the number of interfaces
 the group is joined on.
 
 A malformed packet is logged as a WARNING at most once an hour per source address, and at most 10 times an hour in
@@ -98,7 +104,8 @@ The names and models of the devices on your LAN are stored like a DHCP hostname 
 - No SSDP/UPnP and no active probes: it never asks a device anything.
 - A device whose address leasewatch does not know is counted as `unmapped`.
 - Only what reaches the host's network segment is heard (see "Running in a container"), and only multicast
-  packets with TTL 255: a repeater that re-sends with a lower TTL is not heard.
+  packets with TTL 255, or from a repeater listed in `RELAYS`: a repeater that re-sends with a lower TTL and is
+  not listed is not heard.
 
 ## Installing
 
