@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 from . import snmp_profiles
 
 if TYPE_CHECKING:  # only for the annotation: connectors.snmp_switch imports this module
+    from collections.abc import Callable
+
     from .connectors.snmp_switch import _SnmpCfg
 
 log = logging.getLogger("leasewatch.switch")
@@ -183,39 +185,22 @@ def _bp_map(baseport: list[tuple[str, int]]) -> dict[int, int]:
     return bp2if
 
 
-def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], ifname: list[tuple[str, str]],
-                   lldp: list[tuple[str, str]], locports: list[tuple[str, str]] | None = None, profile: dict | None = None,
-                   fdb_status: list[tuple[str, int]] | None = None, fdb_address: list[tuple[str, str]] | None = None,
-                   warn: bool = True, name: str = "switch") -> SwitchSnapshot:
-    """Pure function over raw (index, value) walks, so it can be unit-tested without a switch.
-
-    `fdb` rows are (vlan.<mac part>, bridge port); the client prefixes VLAN 0 (bridge) or the context's VLAN
-    (cisco_per_vlan) so every strategy arrives in the Q-BRIDGE index form. `profile` (None = 1.0 behaviour) sets
-    fdb.index_fix and fdb.keep_status (applied when `fdb_status` rows, same index as `fdb`, are given; a row the status
-    walk does not list is kept), bridge_port_map, lldp.local_port, port_name.short and uplink. `fdb_address` is
-    dot1dTpFdbAddress as (vlan.row, "aa:bb:..") for index_fix row_number. `warn` False skips the missing-baseport
-    warning (the client logs it once, not every poll); `name` (the connector instance) starts that warning's line.
-
-    lldpRemSysName is indexed by lldpLocPortNum, which is only the ifIndex on some vendors (Comware). With
-    lldp.local_port "auto", `locports` (lldpLocPortId / lldpLocPortDesc rows: lldpLocPortNum -> text) maps a port number
-    to the interface whose ifName matches; a number without a match is taken as an ifIndex. "ifindex" skips the
-    name step (RouterOS)."""
-    prof = profile if profile is not None else _default_profile()
-    fdb_p, bpm, short = prof["fdb"], prof["bridge_port_map"], prof["port_name"]["short"]
-    bp2if = _bp_map(baseport)
+def _port_names(ifname: list[tuple[str, str]], short: dict) -> tuple[dict[int, str], dict[str, int]]:
+    """ifName rows as ifIndex -> name, plus the reverse map name (full and short form) -> ifIndex."""
     names: dict[int, str] = {}
     for k, v in ifname:
         try:
             names[int(k)] = str(v).strip()
         except ValueError:
             continue
-    private = fdb_p["strategy"] == "private"  # fdb_decoder gives the ifIndex itself: no bridge port to translate
-    use_bp_map = bpm["strategy"] == "dot1dBasePortIfIndex" and not private
-    if fdb and use_bp_map and not bp2if and warn:
-        log.warning("%s: no dot1dBasePortIfIndex rows: bridge ports mapped by offset/name_match, else %s",
-                    name, "used as ifIndex" if bpm["fallback"] == "identity" else "dropped")
     by_name = {v: k for k, v in names.items()}
     by_name.update({short_ifname(v, short): k for k, v in names.items()})
+    return names, by_name
+
+
+def _neighbors(lldp: list[tuple[str, str]], locports: list[tuple[str, str]] | None, by_name: dict[str, int],
+               prof: dict) -> dict[int, str]:
+    """lldpRemSysName rows as ifIndex -> neighbour name; lldpLocPortNum goes through `locports` when local_port is auto."""
     loc2if: dict[int, int] = {}
     for num, text in (locports or []) if prof["lldp"]["local_port"] == "auto" else []:
         try:
@@ -233,9 +218,20 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
                 neighbors[loc2if.get(n, n)] = str(name)
             except ValueError:
                 pass
-    snap = SwitchSnapshot(short=short, strategy=fdb_p["strategy"])
-    for ifindex, name in names.items():
-        snap.ports[ifindex] = PortInfo(ifindex=ifindex, name=name, neighbor=neighbors.get(ifindex, ""))
+    return neighbors
+
+
+def _uses_bp_map(prof: dict) -> bool:
+    """Whether bridge ports go through dot1dBasePortIfIndex (never for a private fdb_decoder, which gives ifIndex)."""
+    return prof["bridge_port_map"]["strategy"] == "dot1dBasePortIfIndex" and prof["fdb"]["strategy"] != "private"
+
+
+def _ifindex_mapper(prof: dict, bp2if: dict[int, int], names: dict[int, str],
+                    by_name: dict[str, int]) -> Callable[[int], int | None]:
+    """A function from a forwarding-table bridge port to its ifIndex (None = dropped), per bridge_port_map."""
+    bpm = prof["bridge_port_map"]
+    private = prof["fdb"]["strategy"] == "private"  # fdb_decoder gives the ifIndex itself: no bridge port to translate
+    use_bp_map = _uses_bp_map(prof)
 
     def to_ifindex(port: int) -> int | None:
         if private:
@@ -251,7 +247,12 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
                 return hit
         return cand if bpm["fallback"] == "identity" else None
 
-    keep = set(fdb_p["keep_status"])
+    return to_ifindex
+
+
+def _status_and_addresses(fdb_status: list[tuple[str, int]] | None,
+                          fdb_address: list[tuple[str, str]] | None) -> tuple[dict[str, int], dict[str, str]]:
+    """Forwarding-table status rows as index -> status, and dot1dTpFdbAddress rows as row -> MAC."""
     status: dict[str, int] = {}
     for k, v in fdb_status or []:
         try:
@@ -259,6 +260,13 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
         except ValueError:
             continue
     addresses = {str(k).split(".", 1)[1] if "." in str(k) else str(k): str(v) for k, v in fdb_address or []}
+    return status, addresses
+
+
+def _learned(fdb: list[tuple[str, int]], fdb_p: dict, status: dict[str, int], addresses: dict[str, str],
+             to_ifindex: Callable[[int], int | None]) -> tuple[dict[str, list[tuple[int, int]]], dict[int, set]]:
+    """Forwarding-table rows as mac -> [(ifindex, vlan)] and ifindex -> distinct MACs, unusable rows skipped."""
+    keep = set(fdb_p["keep_status"])
     macs_on: dict[int, set] = {}  # distinct MACs: one MAC learned in several VLANs is still one device
     seen: dict[str, list[tuple[int, int]]] = {}  # mac -> every (ifindex, vlan) it was learned on
     for idx, port in fdb:
@@ -278,21 +286,70 @@ def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], 
             continue
         seen.setdefault(mac, []).append((ifindex, vlan))
         macs_on.setdefault(ifindex, set()).add(mac)
+    return seen, macs_on
+
+
+def _fill_ports(snap: SwitchSnapshot, names: dict[int, str], neighbors: dict[int, str],
+                macs_on: dict[int, set]) -> None:
+    """snap.ports from ifName rows plus ports only in the forwarding table, each with its neighbour and MAC count."""
+    for ifindex, name in names.items():
+        snap.ports[ifindex] = PortInfo(ifindex=ifindex, name=name, neighbor=neighbors.get(ifindex, ""))
     for ifindex, macs in macs_on.items():
         # a port only in the FDB still carries its LLDP neighbour, so it can be an uplink by LLDP
         p = snap.ports.setdefault(ifindex, PortInfo(ifindex=ifindex, name=f"port {ifindex}", neighbor=neighbors.get(ifindex, "")))
         p.macs = len(macs)
+
+
+def _uplinks(snap: SwitchSnapshot, prof: dict) -> None:
+    """Port neighbour and MAC count -> PortInfo.uplink, per the profile's uplink rules."""
     min_macs, lldp_uplink = prof["uplink"]["min_macs"], prof["uplink"]["lldp_neighbor"]
     for p in snap.ports.values():
         if p.neighbor and lldp_uplink:
             p.uplink = True
         elif p.macs >= min_macs:  # many MACs on one port without LLDP: an unmanaged switch or AP hangs there
             p.uplink = True
+
+
+def _pick_edge(snap: SwitchSnapshot, seen: dict[str, list[tuple[int, int]]]) -> None:
+    """mac -> every (ifindex, vlan) it was learned on, as snap.by_mac: mac -> the one (ifindex, vlan) of its edge port."""
     for mac, hits in seen.items():
         # learned on several ports (different VLANs): the edge port is where the device is, an uplink only relays it;
         # among equals the last row wins, as before
         edge = [h for h in hits if not snap.ports[h[0]].uplink]
         snap.by_mac[mac] = (edge or hits)[-1]
+
+
+def build_snapshot(fdb: list[tuple[str, int]], baseport: list[tuple[str, int]], ifname: list[tuple[str, str]],
+                   lldp: list[tuple[str, str]], locports: list[tuple[str, str]] | None = None, profile: dict | None = None,
+                   fdb_status: list[tuple[str, int]] | None = None, fdb_address: list[tuple[str, str]] | None = None,
+                   warn: bool = True, name: str = "switch") -> SwitchSnapshot:
+    """Pure function over raw (index, value) walks, so it can be unit-tested without a switch.
+
+    `fdb` rows are (vlan.<mac part>, bridge port); the client prefixes VLAN 0 (bridge) or the context's VLAN
+    (cisco_per_vlan) so every strategy arrives in the Q-BRIDGE index form. `profile` (None = 1.0 behaviour) sets
+    fdb.index_fix and fdb.keep_status (applied when `fdb_status` rows, same index as `fdb`, are given; a row the status
+    walk does not list is kept), bridge_port_map, lldp.local_port, port_name.short and uplink. `fdb_address` is
+    dot1dTpFdbAddress as (vlan.row, "aa:bb:..") for index_fix row_number. `warn` False skips the missing-baseport
+    warning (the client logs it once, not every poll); `name` (the connector instance) starts that warning's line.
+
+    lldpRemSysName is indexed by lldpLocPortNum, which is only the ifIndex on some vendors (Comware). With
+    lldp.local_port "auto", `locports` (lldpLocPortId / lldpLocPortDesc rows: lldpLocPortNum -> text) maps a port number
+    to the interface whose ifName matches; a number without a match is taken as an ifIndex. "ifindex" skips the
+    name step (RouterOS)."""
+    prof = profile if profile is not None else _default_profile()
+    fdb_p, short = prof["fdb"], prof["port_name"]["short"]
+    bp2if = _bp_map(baseport)
+    names, by_name = _port_names(ifname, short)
+    if fdb and _uses_bp_map(prof) and not bp2if and warn:
+        log.warning("%s: no dot1dBasePortIfIndex rows: bridge ports mapped by offset/name_match, else %s", name,
+                    "used as ifIndex" if prof["bridge_port_map"]["fallback"] == "identity" else "dropped")
+    neighbors = _neighbors(lldp, locports, by_name, prof)
+    status, addresses = _status_and_addresses(fdb_status, fdb_address)
+    seen, macs_on = _learned(fdb, fdb_p, status, addresses, _ifindex_mapper(prof, bp2if, names, by_name))
+    snap = SwitchSnapshot(short=short, strategy=fdb_p["strategy"])
+    _fill_ports(snap, names, neighbors, macs_on)
+    _uplinks(snap, prof)
+    _pick_edge(snap, seen)
     return snap
 
 
