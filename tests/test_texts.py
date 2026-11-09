@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from _env import CONFIG_VARS
 from leasewatch import collector, notify
@@ -13,7 +14,7 @@ DEV = {"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": "
 class EnglishTableTests(unittest.TestCase):
     def test_key_list(self):
         self.assertEqual(len(TEXTS["en"]), 21)
-        self.assertEqual(TEXTS["sv"], {})
+        self.assertEqual(set(TEXTS["sv"]), set(TEXTS["en"]))
 
     def test_alert_subjects_equal_the_collector_templates(self):
         # the subject templates the collector used before the table replaced them, kept here as the en reference
@@ -55,7 +56,8 @@ class EnglishTableTests(unittest.TestCase):
 
 class LookupTests(unittest.TestCase):
     def test_fallback_chain(self):
-        self.assertEqual(t("sv", "mail.no_hostname"), "(no hostname)")
+        with mock.patch.dict(TEXTS["sv"], {}, clear=True):  # a language without the key falls back to en
+            self.assertEqual(t("sv", "mail.no_hostname"), "(no hostname)")
         self.assertEqual(t("xx", "mail.no_hostname"), "(no hostname)")
         self.assertEqual(t("en", "no.such.key", n=1), "no.such.key")
         self.assertEqual(t("sv", "no.such.key"), "no.such.key")

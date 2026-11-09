@@ -1,5 +1,5 @@
 """The alert subject and lines in MAIL_LANG: the keys of leasewatch/texts.py, the raw kind when a kind has no key, the
-80-character cut after translation. The sv table is patched to a few made-up keys here."""
+80-character cut after translation. The sv table is replaced by a few made-up keys here."""
 from __future__ import annotations
 
 import unittest
@@ -27,7 +27,7 @@ DEV = {"ts": 0, "mac": "m", "kind": "offline", "detail": ""}
 
 class SwedishSubjectTests(unittest.TestCase):
     def setUp(self):
-        p = mock.patch.dict(TEXTS["sv"], SV)
+        p = mock.patch.dict(TEXTS["sv"], SV, clear=True)
         p.start()
         self.addCleanup(p.stop)
 
@@ -49,7 +49,7 @@ class SwedishSubjectTests(unittest.TestCase):
 
     def test_kind_without_a_key_is_the_raw_kind(self):
         self.assertEqual(self.subject([dict(DEV, kind="wobble")]), "printer: wobble")
-        self.assertEqual(self.subject([dict(DEV, kind="ip")]), "printer: ip")  # en key, no sv key
+        self.assertEqual(self.subject([dict(DEV, kind="ip")]), "printer: ip")  # en key, no key in the patched sv table
         self.assertEqual(Collector._alert_subject([dict(SRC, kind="wobble", detail="fw1: x")], {}, "sv"), "fw1: wobble")
 
     def test_counts(self):
