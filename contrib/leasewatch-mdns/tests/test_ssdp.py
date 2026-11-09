@@ -50,6 +50,11 @@ class FixtureTest(unittest.TestCase):
         self.assertEqual(ssdp.product_label(n.server), "")
         self.assertTrue(ssdp.is_generic(n.server))
 
+    def test_dlnadoc_is_not_the_product(self) -> None:
+        n = self.alive(fx.LG_DLNA)
+        self.assertEqual(ssdp.product_label(n.server), "LGE_DLNA_SDK/1.6.0")
+        self.assertFalse(ssdp.is_generic(n.server))
+
     def test_byebye(self) -> None:
         self.refused(fx.BYEBYE, "byebye")
 
@@ -133,6 +138,10 @@ class RuleTest(unittest.TestCase):
             "http://sonos-kitchen.example.lan:1400/desc.xml": "sonos-kitchen.example.lan",
             "http://[2001:db8::40]:1400/desc.xml": "2001:db8::40",
             "http://[2001:db8::40]/": "2001:db8::40",
+            "http://10.0.0.99:/desc.xml": "10.0.0.99",
+            "http://[2001:db8::1]:/x": "2001:db8::1",
+            "http://[2001:db8::1]:١٢/": "",
+            "http://10.0.0.99:١٢/": "",
             "http://[not-v6]:1400/": "",
             "http://[2001:db8::40:1400/": "",
             "http://10.0.0.40:port/": "",
@@ -158,6 +167,10 @@ class LabelTest(unittest.TestCase):
             "Linux/4.9 UPnP/1.0": "",
             "Linux/4.9 upnp/1.1 Roku/9.4  Tv/1": "Roku/9.4 Tv/1",
             "Linux UPnP/1.0 DLNADOC/1.50 Platinum/1.0.5.13": "",
+            "UPnP/1.0 DLNADOC/1.50 Kodi": "Kodi",
+            "Linux/2.6 UPnP/1.0 DLNADOC/1.50 LGE_DLNA_SDK/1.6.0": "LGE_DLNA_SDK/1.6.0",
+            "Linux UPnP/1.0 Kodi/20 dlnadoc/1.50": "Kodi/20",
+            "UPnP/1.0 DLNADOC/1.50": "",
             "Microsoft-Windows/10.0 UPnP/1.0 UPnP-Device-Host/1.0": "",
             "Linux UPnP/1.0 Sonos/70.3 UPnP/2.0 Extra/1": "Sonos/70.3 UPnP/2.0 Extra/1",
             "": "",
@@ -173,8 +186,15 @@ class LabelTest(unittest.TestCase):
                 self.assertTrue(ssdp.is_generic("Linux UPnP/1.0 " + product))
                 self.assertEqual(ssdp.product_label("Linux UPnP/1.0 " + product), "")
 
+    def test_dlnadoc_only_or_before_generic_is_generic(self) -> None:
+        for server in ("UPnP/1.0 DLNADOC/1.50", "UPnP/1.0 DLNADOC/1.50 Platinum/1.0.5.13"):
+            with self.subTest(server=server):
+                self.assertTrue(ssdp.is_generic(server))
+                self.assertEqual(ssdp.product_label(server), "")
+
     def test_not_generic(self) -> None:
-        for server in ("Linux UPnP/1.0 Sonos/70.3", "Linux UPnP/1.0 libupnpx/1", "Linux UPnP/1.0 Portable/1",
+        for server in ("UPnP/1.0 DLNADOC/1.50 Kodi", "Linux/2.6 UPnP/1.0 DLNADOC/1.50 LGE_DLNA_SDK/1.6.0",
+                       "Linux UPnP/1.0 Sonos/70.3", "Linux UPnP/1.0 libupnpx/1", "Linux UPnP/1.0 Portable/1",
                        "Linux UPnP/1.0 Samsung TV/1", "Sonos/70.3", "Linux UPnP/1.0", ""):
             with self.subTest(server=server):
                 self.assertFalse(ssdp.is_generic(server))

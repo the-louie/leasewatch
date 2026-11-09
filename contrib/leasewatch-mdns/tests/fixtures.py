@@ -166,6 +166,7 @@ HUE = notify("FreeRTOS/10.4.3, UPnP/1.0, IpBridge/1.65.0", location="http://10.0
 GENERIC_LIBUPNP = notify("Linux/3.14 UPnP/1.0 libupnp/1.6.18", location="http://10.0.0.42:49152/desc.xml")
 PORTABLE_SDK = notify("Windows/10.0 UPnP/1.0 Portable SDK for UPnP devices/1.6.18",
                       location="http://10.0.0.43:49152/desc.xml")
+LG_DLNA = notify("Linux/2.6 UPnP/1.0 DLNADOC/1.50 LGE_DLNA_SDK/1.6.0", location="http://10.0.0.44:1400/desc.xml")
 BYEBYE = notify(SONOS_SERVER, nts="ssdp:byebye")
 # a query from another host
 MSEARCH = (b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
@@ -186,6 +187,6 @@ CASE = (b"NOTIFY * HTTP/1.0\r\nhost: 239.255.255.250:1900\r\nlocation: http://10
         b"nts: ssdp:alive\r\nserver: " + SONOS_SERVER.encode() + b"\r\nusn: uuid:0000-0000::upnp:rootdevice\r\n\r\n")
 
 SSDP_ALL = {"SONOS": SONOS, "HUE": HUE, "GENERIC_LIBUPNP": GENERIC_LIBUPNP, "PORTABLE_SDK": PORTABLE_SDK,
-            "BYEBYE": BYEBYE, "MSEARCH": MSEARCH, "HTTP_RESPONSE": HTTP_RESPONSE, "MALFORMED": MALFORMED,
+            "LG_DLNA": LG_DLNA, "BYEBYE": BYEBYE, "MSEARCH": MSEARCH, "HTTP_RESPONSE": HTTP_RESPONSE, "MALFORMED": MALFORMED,
             "OVERSIZED": OVERSIZED, "MISMATCH": MISMATCH, "LOCATION_NAME": LOCATION_NAME,
             "LOCATION_V6": LOCATION_V6, "LF_ONLY": LF_ONLY, "CASE": CASE}

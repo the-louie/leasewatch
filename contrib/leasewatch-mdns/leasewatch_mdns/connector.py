@@ -416,17 +416,17 @@ class MdnsConnector(SettingsMixin):
 
     def _handle_ssdp(self, data: bytes, addr: Any, ancdata: Any) -> None:
         """One packet from the SSDP socket, with its control messages (None when the OS cannot give them: then the
-        link checks are skipped). The rate budget, the link rule (a multicast destination, an interface the group
-        was joined on; the TTL is only counted), the NOTIFY parse, one parse per source per SSDP_REPARSE, the
-        source's MAC, the LOCATION host check, then the product label. Each step that fails is counted and ends it."""
+        link checks are skipped). The link rule (a multicast destination, an interface the group was joined on),
+        the rate budget (only a packet that passed the link rule uses it), the TTL count, the NOTIFY parse, the
+        repeat check (a source whose label was stored less than SSDP_REPARSE ago), the source's MAC, the LOCATION
+        host check, then the product label. Each step that fails is counted and ends it. The repeat window starts
+        only when a label is stored, so a NOTIFY that gives none does not hide the same host's next one."""
         second = int(self._clock())
         now_clock = self._clock()
         source = addr[0] if isinstance(addr, tuple) and addr else "?"
         with self._lock:
             self._counts["ssdp_packets"] += 1
-            if not self._ssdp_window.take(second):
-                self._counts["ssdp_dropped_rate"] += 1
-                return
+            info = None
             if ancdata is not None:
                 info = _link_info(ancdata)
                 if info.dst != SSDP_GROUP:  # a unicast NOTIFY is the only way an off-link host reaches the port
@@ -435,6 +435,10 @@ class MdnsConnector(SettingsMixin):
                 if (self.interface and self._ssdp_joined_idx and info.ifindex not in self._ssdp_joined_idx):
                     self._counts["ssdp_wrong_if"] += 1
                     return
+            if not self._ssdp_window.take(second):  # only a packet that passed the link rule uses the budget
+                self._counts["ssdp_dropped_rate"] += 1
+                return
+            if info is not None:
                 if info.ttl is not None and info.ttl > SSDP_MAX_TTL:
                     self._counts["ssdp_ttl_gt4"] += 1
         notify, reason = parse_notify(bytes(data))
@@ -446,9 +450,6 @@ class MdnsConnector(SettingsMixin):
             if last is not None and now_clock - last < SSDP_REPARSE:
                 self._counts["ssdp_repeat"] += 1
                 return
-            if len(self._ssdp_seen) >= MAX_WARNED:
-                self._ssdp_seen.clear()
-            self._ssdp_seen[source] = now_clock
         mac = self.ctx.device_ips().get(source)
         with self._lock:
             if not mac:
@@ -461,6 +462,9 @@ class MdnsConnector(SettingsMixin):
             if not label:
                 self._counts["ssdp_generic" if is_generic(notify.server) else "ssdp_no_label"] += 1
                 return
+            if len(self._ssdp_seen) >= MAX_WARNED:
+                self._ssdp_seen.clear()
+            self._ssdp_seen[source] = now_clock  # the window starts only when a label is stored
             self._hear_ssdp(mac, source, label, self.ctx.now())
 
     @staticmethod

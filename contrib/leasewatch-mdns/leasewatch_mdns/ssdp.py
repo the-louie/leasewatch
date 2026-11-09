@@ -10,6 +10,7 @@ LOCATION is read for its host text only and is never fetched: the module makes n
 
 product_label() turns SERVER ("OS/version UPnP/1.0 product/version") into a label: the tokens after the "UPnP/"
 token, unless the product is a generic UPnP stack (GENERIC), which names the software library, not the device.
+"DLNADOC/x" tokens (a DLNA capability marker) are dropped from those tokens wherever they stand.
 """
 from __future__ import annotations
 
@@ -49,14 +50,14 @@ def _host(location: str) -> str:
     authority = authority.rpartition("@")[2]
     if authority.startswith("["):
         inside, close, port = authority[1:].partition("]")
-        if not close or (port and not (port.startswith(":") and port[1:].isdigit())):
+        if not close or (port and not (port.startswith(":") and (not port[1:] or (port[1:].isascii() and port[1:].isdigit())))):
             return ""
         try:
             return str(ipaddress.IPv6Address(inside))
         except ValueError:
             return ""
     host, colon, port = authority.partition(":")
-    if colon and not (port.isascii() and port.isdigit()):
+    if colon and port and not (port.isascii() and port.isdigit()):
         return ""
     return host if _HOST.fullmatch(host) else ""
 
@@ -104,7 +105,15 @@ def _tail(server: str) -> list[str] | None:
     return None
 
 
+def _product(tail: list[str]) -> list[str]:
+    """The tail without its "DLNADOC/x" tokens: a DLNA capability marker, not a product, wherever it stands."""
+    return [t for t in tail if t.split("/", 1)[0].lower() != "dlnadoc"]
+
+
 def _generic(tail: list[str]) -> bool:
+    """True when `tail` (from _product) is empty or starts with a generic UPnP stack."""
+    if not tail:
+        return True
     if tail[0].split("/", 1)[0].lower() in GENERIC:
         return True
     joined = " ".join(tail).lower()  # a generic name with spaces in it spans several tokens
@@ -114,13 +123,16 @@ def _generic(tail: list[str]) -> bool:
 def is_generic(server: str) -> bool:
     """True when SERVER has a "UPnP/" token and the product after it is a generic UPnP stack."""
     tail = _tail(server)
-    return bool(tail) and _generic(tail)
+    return bool(tail) and _generic(_product(tail))
 
 
 def product_label(server: str) -> str:
     """The product text after the "UPnP/" token of SERVER, cleaned and cut to 64 characters; "" when there is no
     "UPnP/" token, nothing after it, or the product is generic."""
     tail = _tail(server)
-    if not tail or _generic(tail):
+    if not tail:
+        return ""
+    tail = _product(tail)
+    if _generic(tail):
         return ""
     return _clean(" ".join(tail))

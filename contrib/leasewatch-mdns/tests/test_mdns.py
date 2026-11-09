@@ -998,8 +998,57 @@ class SsdpPathTest(Base):
         c = self.ssdp()
         with mock.patch.object(mc, "MAX_WARNED", 3):
             for n in range(10):
-                self.send(c, src=f"10.0.1.{n}")
+                self.ips[f"10.0.1.{n}"] = f"02:00:00:00:01:{n:02x}"
+                self.send(c, fx.notify(fx.SONOS_SERVER, location=f"http://10.0.1.{n}:1400/d.xml"), src=f"10.0.1.{n}")
+        self.assertEqual(c.collect().stats["ssdp_labels"], 10)
         self.assertLessEqual(len(c._ssdp_seen), 3)
+
+    def test_unicast_flood_does_not_use_the_budget(self) -> None:
+        c = self.ssdp()
+        for _ in range(300):
+            self.send(c, ancdata=anc(dst="10.0.0.25"), src="10.9.9.9")
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_unicast"], stats["ssdp_dropped_rate"], stats["ssdp_labels"]), (300, 0, 1))
+
+    def test_wrong_interface_flood_does_not_use_the_budget(self) -> None:
+        c = self.ssdp(interface="eth0")
+        c._ssdp_joined_idx = frozenset({2})
+        for _ in range(300):
+            self.send(c, ancdata=anc(ifindex=9))
+        self.send(c, ancdata=anc(ifindex=2))
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_wrong_if"], stats["ssdp_dropped_rate"], stats["ssdp_labels"]), (300, 0, 1))
+
+    def test_generic_then_product_stack_from_one_source(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.notify("Linux/4.9 UPnP/1.0 Samsung UPnP SDK/1.0"))
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_generic"], stats["ssdp_repeat"], stats["ssdp_labels"]), (1, 0, 1))
+
+    def test_label_then_label_is_a_repeat(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_repeat"], stats["ssdp_labels"]), (1, 1))
+
+    def test_unmapped_does_not_start_the_window(self) -> None:
+        c = self.ssdp()
+        del self.ips[SONOS_IP]
+        self.send(c)
+        self.ips[SONOS_IP] = SONOS_MAC
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_unmapped"], stats["ssdp_repeat"], stats["ssdp_labels"]), (1, 0, 1))
+
+    def test_mismatch_does_not_start_the_window(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.MISMATCH)
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_mismatch"], stats["ssdp_repeat"], stats["ssdp_labels"]), (1, 0, 1))
 
     def test_unmapped(self) -> None:
         c = self.ssdp()

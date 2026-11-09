@@ -94,20 +94,23 @@ the group is joined on.
 
 SSDP is how UPnP devices announce themselves: every few minutes a device sends a NOTIFY to 239.255.255.250:1900.
 Its `SERVER:` header names the OS, `UPnP/1.0` and the product, for example `Linux/4.9 UPnP/1.0 Sonos/70.3-35220`,
-which gives the label `Sonos/70.3-35220`. The label is the tokens after `UPnP/`. There is no label when they name a
-UPnP library rather than a device; these ten names are generic: `Portable SDK for UPnP devices`,
-`UPnP-Device-Host`, `MiniUPnPd`, `Platinum`, `Cling`, `DLNADOC`, `Samsung UPnP SDK`, `libupnp`, `IntelUpnp` and
-`WindowsMediaPlayer`. The device is the one that holds the NOTIFY's source address, found as for mDNS.
+which gives the label `Sonos/70.3-35220`. The label is the tokens after `UPnP/`; a `DLNADOC/1.50` token (the DLNA
+capability marker, not a product) is left out wherever it stands. There is no label when the first remaining token
+names a UPnP library rather than a device; these names are generic: `Portable SDK for UPnP devices`,
+`UPnP-Device-Host`, `MiniUPnPd`, `Platinum`, `Cling`, `Samsung UPnP SDK`, `libupnp`, `IntelUpnp` and
+`WindowsMediaPlayer` (and `DLNADOC` when nothing follows it). The device is the one that holds the NOTIFY's source
+address, found as for mDNS.
 
 The mDNS label wins: SSDP fills the label only when mDNS gave none. A device known by SSDP alone gets a sighting
-with a label and no hostname, because an SSDP announcement carries no host name. One NOTIFY per source address is
-read every 10 minutes; the others are counted as `ssdp_repeat`. SSDP has its own cache, with the same
+with a label and no hostname, because an SSDP announcement carries no host name. Once a label is stored for a source address, its
+NOTIFYs are not read again for 10 minutes (`ssdp_repeat`), so a device's bursts cost one parse. SSDP has its own cache, with the same
 `MAX_AGE_DAYS` and `MAX_ENTRIES`, and its own rate budget of 200 packets a second.
 
 The SSDP status counts, reset each poll, are all there when `SSDP=1` and absent otherwise:
 `ssdp_packets` (every datagram on the SSDP socket), `ssdp_dropped_rate` (over the rate budget), `ssdp_errors`
-(receive failures), `ssdp_unicast`, `ssdp_wrong_if`, `ssdp_ttl_gt4` (counted, not dropped), `ssdp_not_notify` (an
-M-SEARCH or a response), `ssdp_byebye`, `ssdp_malformed`, `ssdp_oversized` (over 2048 bytes), `ssdp_repeat`,
+(receive failures and packets the handler could not process), `ssdp_unicast`, `ssdp_wrong_if`, `ssdp_ttl_gt4`
+(counted, not dropped), `ssdp_not_notify` (an M-SEARCH, a response, or a NOTIFY that is neither `ssdp:alive` nor
+`ssdp:byebye`, such as `ssdp:update`), `ssdp_byebye`, `ssdp_malformed`, `ssdp_oversized` (over 2048 bytes), `ssdp_repeat`,
 `ssdp_unmapped` (no known device holds the address), `ssdp_mismatch`, `ssdp_generic` (a generic UPnP stack),
 `ssdp_no_label` (no product after `UPnP/`); `ssdp_joined` is the number of interfaces the SSDP group is joined on,
 and `ssdp_labels` the number of devices that hold an SSDP label.
@@ -131,8 +134,11 @@ never fetches the `LOCATION` URL of a NOTIFY; it reads the host in it and nothin
 - Responses only; the parser reads `A`, `PTR`, `SRV` and `TXT` records. Queries from other hosts are ignored.
 - No active probes: it never asks a device anything, with or without SSDP.
 - SSDP: a unicast NOTIFY is dropped (`ssdp_unicast`). A NOTIFY whose `LOCATION` names another IPv4 address than its
-  source is dropped (`ssdp_mismatch`): a relay re-sent it, and the label would land on the relay. With `INTERFACE`
-  set, a packet from another interface is dropped (`ssdp_wrong_if`). The TTL is counted (`ssdp_ttl_gt4`), not
+  source is dropped (`ssdp_mismatch`): a relay re-sent it, and the label would land on the relay; a `LOCATION` with
+  a name or an IPv6 address is not checked. With `INTERFACE` set to an interface name, a packet from another
+  interface is dropped (`ssdp_wrong_if`); given as an address, the kernel picks the interface and that check is
+  skipped (on Linux the socket still receives only the joined interface's group traffic). The TTL is counted
+  (`ssdp_ttl_gt4`), not
   checked. More than 200 packets a second are dropped (`ssdp_dropped_rate`). SSDP labels are often generic, which
   is why the list of ten library names exists.
 - A device whose address leasewatch does not know is counted as `unmapped`.
