@@ -639,7 +639,8 @@ class Collector:
             c.executemany("UPDATE devices SET mail_queued=? WHERE mac=?",
                           [(now, mac) for mac in res.new if not is_private_mac(mac)])
         for mac, h in res.history:
-            c.execute("INSERT INTO history(mac,ts,ip,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?)", (mac, now, h["ip"], h["hostname"], h["vlan"], h["lease_type"]))
+            c.execute("INSERT INTO history(mac,ts,ip,ip6,hostname,vlan,lease_type) VALUES(?,?,?,?,?,?,?)",
+                      (mac, now, h["ip"], h.get("ip6", ""), h["hostname"], h["vlan"], h["lease_type"]))
         c.executemany("INSERT INTO aliases(mac,device,reason,detail,merged_ts,last_seen) VALUES(?,?,?,?,?,?)",
                       [(alias, dev, reason, detail, now, now) for alias, dev, reason, detail in res.aliases])
         c.executemany("UPDATE aliases SET last_seen=? WHERE mac=?", [(now, mac) for mac in res.alias_seen])

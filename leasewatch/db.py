@@ -88,6 +88,10 @@ MIGRATIONS = [
     ("devices", "tags", "TEXT NOT NULL DEFAULT ''"),
     # the device's preferred IPv6 address (compressed form; '' = none seen): enrichment from ndp/dhcp6 sightings
     ("devices", "ip6", "TEXT NOT NULL DEFAULT ''"),
+    # the stable IPv6 address (EUI-64 or DHCPv6; '' = none): the one an event is written for
+    ("devices", "ip6_stable", "TEXT NOT NULL DEFAULT ''"),
+    # the IPv6 address the device had at that history row ('' = none)
+    ("history", "ip6", "TEXT NOT NULL DEFAULT ''"),
 ]
 # meta.schema_version: the steps below run in order on open for every version below SCHEMA_VERSION. A DB without the
 # key predates the versioning and is version 1 (the 1.0 tables plus the columns above)
@@ -191,7 +195,7 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)  # executescript commits by itself; keep it outside tx()
-        have = {(t, r[1]) for t in ("devices",) for r in self._conn.execute(f"PRAGMA table_info({t})")}
+        have = {(t, r[1]) for t in ("devices", "history") for r in self._conn.execute(f"PRAGMA table_info({t})")}
         for table, col, decl in MIGRATIONS:
             if (table, col) not in have:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -424,7 +428,7 @@ class Database:
 
     def history(self, mac: str, limit: int | None = None) -> list[dict]:
         limit = self.history_cap if limit is None else limit
-        return [dict(r) for r in self.q("SELECT ts, ip, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]
+        return [dict(r) for r in self.q("SELECT ts, ip, ip6, hostname, vlan, lease_type FROM history WHERE mac=? ORDER BY ts DESC, id DESC LIMIT ?", (mac, limit))]
 
     def events(self, mac: str | None = None, limit: int = 200, kinds: list[str] | None = None, since: int | None = None,
                until: int | None = None, before: int | None = None) -> list[dict]:

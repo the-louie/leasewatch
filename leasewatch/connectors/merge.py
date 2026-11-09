@@ -247,12 +247,12 @@ def _rank(order: tuple[str, ...], kind: str) -> int:
 # row are never written
 UPDATE_COLUMNS = ("last_seen", "last_online", "ip", "hostname", "vendor", "vlan", "iface", "lease_type", "sources", "online",
                   "sw_port", "sw_via", "wifi_ssid", "wifi_ap", "wifi_signal", "wifi_radio", "wifi_alias", "link", "loc_source",
-                  "client_id", "archived_ts", "label", "watch_online", "ip6")
+                  "client_id", "archived_ts", "label", "watch_online", "ip6", "ip6_stable")
 INSERT_COLUMNS = ("mac", "first_seen", "baseline") + UPDATE_COLUMNS
 # the database defaults of the columns added after 1.0.0, for a new row and for a prev row given without them
 ROW_DEFAULTS = {"sw_port": "", "sw_via": "", "wifi_ssid": "", "wifi_ap": "", "wifi_signal": None, "wifi_radio": "",
                 "wifi_alias": "", "link": "", "loc_source": "", "client_id": "",
-                "archived_ts": None, "label": "", "watch_online": None, "ip6": ""}
+                "archived_ts": None, "label": "", "watch_online": None, "ip6": "", "ip6_stable": ""}
 
 
 @dataclass
@@ -742,7 +742,7 @@ def _update_rows(rows: dict[str, dict], merged: dict[str, Merged], cfg: Config, 
             rows[mac] = {**ROW_DEFAULTS, "mac": mac, "first_seen": now, "baseline": int(state.first_run), "last_seen": now,
                          "last_online": now if m.online else None, "ip": m.ip, "hostname": m.hostname, "vendor": m.vendor,
                          "vlan": m.vlan, "iface": m.iface, "lease_type": m.lease_type, "sources": sources, "online": int(m.online),
-                         "client_id": m.client_id, "label": m.label, "ip6": m.ip6}
+                         "client_id": m.client_id, "label": m.label, "ip6": m.ip6, "ip6_stable": ""}
             res.history.append((mac, {"ip": m.ip, "hostname": m.hostname, "vlan": m.vlan, "lease_type": m.lease_type}))
             if not state.first_run:
                 res.events.append((mac, "new", " ".join(filter(None, [m.ip, m.hostname, m.vendor])) + (f" ({m.vlan})" if m.vlan else "")))
