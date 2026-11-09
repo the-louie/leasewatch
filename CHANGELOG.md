@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.5.0 (2026-11-09)
 
 ### Added
 - Read-only API tokens: `AUTH_TOKENS` (comma list of `name:sha256hex`, needs `AUTH_USER`) accepts `Authorization: Bearer <token>` with the rights of the read-only login; `python -m leasewatch make-token NAME` prints a new token once and its entry; the start line counts them (`auth tokens: N`).

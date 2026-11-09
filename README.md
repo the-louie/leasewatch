@@ -6,6 +6,8 @@ What changed between releases: [CHANGELOG.md](CHANGELOG.md).
 
 ![screenshot](docs/screenshot.png)
 
+The same page in Swedish (`?lang=sv`, or a Swedish browser): [docs/screenshot-sv.png](docs/screenshot-sv.png).
+
 - One row per MAC with vendor, IP, hostname, network (VLAN), lease type, first seen / last online, a history of address changes and an event log. The events list under the table shows 60 at a time ("Load more" adds the next 60), can be filtered by kind and by a From / To day (kept in the address as `ek`, `es`, `eu`), and has an "Export CSV" link for the same filter.
 - **Newest first**, a "not yet known" review queue, name + note per device, CSV export, search, filters, light/dark, phone layout.
 - Optional **"Connected via"**: switch port over SNMPv3 (Q-BRIDGE / IF / LLDP MIBs — any managed switch; uplink ports are named after the AP or switch behind them; tested on Comware, LLDP port numbers are mapped through `lldpLocPortId`) and Wi-Fi SSID / AP / signal from a UniFi Network controller.
