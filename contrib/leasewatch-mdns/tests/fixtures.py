@@ -146,3 +146,46 @@ QUADRATIC = _pointer_chains()
 
 ALL = {"APPLE": APPLE, "APPLE_NO_SRV": APPLE_NO_SRV, "PRINTER": PRINTER, "CHROMECAST": CHROMECAST, "GOODBYE": GOODBYE, "QUERY": QUERY,
        "TRUNCATED": TRUNCATED, "POINTER_LOOP": POINTER_LOOP, "TWO_IPS": TWO_IPS, "TOO_MANY": TOO_MANY}
+
+
+# SSDP: handcrafted announcement texts for the ssdp parser tests
+
+def notify(server: str, location: str = "http://10.0.0.40:1400/desc.xml", nts: str = "ssdp:alive",
+           usn: str = "uuid:0000-0000::upnp:rootdevice", extra=()) -> bytes:
+    """A NOTIFY request with CRLF line ends; `extra` header lines go after the usual ones."""
+    lines = ["NOTIFY * HTTP/1.1", "HOST: 239.255.255.250:1900", "CACHE-CONTROL: max-age=1800",
+             f"LOCATION: {location}", "NT: upnp:rootdevice", f"NTS: {nts}", f"SERVER: {server}", f"USN: {usn}",
+             *extra]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
+SONOS_SERVER = "Linux/4.9 UPnP/1.0 Sonos/70.3-35220"
+SONOS = notify(SONOS_SERVER, location="http://10.0.0.40:1400/xml/device_description.xml")
+# a Hue bridge: the tokens are separated by commas
+HUE = notify("FreeRTOS/10.4.3, UPnP/1.0, IpBridge/1.65.0", location="http://10.0.0.41:80/description.xml")
+GENERIC_LIBUPNP = notify("Linux/3.14 UPnP/1.0 libupnp/1.6.18", location="http://10.0.0.42:49152/desc.xml")
+PORTABLE_SDK = notify("Windows/10.0 UPnP/1.0 Portable SDK for UPnP devices/1.6.18",
+                      location="http://10.0.0.43:49152/desc.xml")
+BYEBYE = notify(SONOS_SERVER, nts="ssdp:byebye")
+# a query from another host
+MSEARCH = (b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
+           b"ST: ssdp:all\r\n\r\n")
+# an answer to an M-SEARCH
+HTTP_RESPONSE = (b"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n"
+                 b"LOCATION: http://10.0.0.40:1400/desc.xml\r\nSERVER: " + SONOS_SERVER.encode()
+                 + b"\r\nST: upnp:rootdevice\r\nUSN: uuid:0000-0000::upnp:rootdevice\r\n\r\n")
+MALFORMED = notify(SONOS_SERVER, extra=("A HEADER LINE WITHOUT A COLON",))
+OVERSIZED = notify(SONOS_SERVER, extra=("X-PAD: " + "a" * 3000,))
+# a Sonos SERVER from a source whose LOCATION names another address (a relay re-sent it)
+MISMATCH = notify(SONOS_SERVER, location="http://10.0.0.99:1400/desc.xml")
+LOCATION_NAME = notify(SONOS_SERVER, location="http://sonos-kitchen.example.lan:1400/desc.xml")
+LOCATION_V6 = notify(SONOS_SERVER, location="http://[2001:db8::40]:1400/desc.xml")
+LF_ONLY = SONOS.replace(b"\r\n", b"\n")
+# lower-case header names and HTTP/1.0
+CASE = (b"NOTIFY * HTTP/1.0\r\nhost: 239.255.255.250:1900\r\nlocation: http://10.0.0.40:1400/desc.xml\r\n"
+        b"nts: ssdp:alive\r\nserver: " + SONOS_SERVER.encode() + b"\r\nusn: uuid:0000-0000::upnp:rootdevice\r\n\r\n")
+
+SSDP_ALL = {"SONOS": SONOS, "HUE": HUE, "GENERIC_LIBUPNP": GENERIC_LIBUPNP, "PORTABLE_SDK": PORTABLE_SDK,
+            "BYEBYE": BYEBYE, "MSEARCH": MSEARCH, "HTTP_RESPONSE": HTTP_RESPONSE, "MALFORMED": MALFORMED,
+            "OVERSIZED": OVERSIZED, "MISMATCH": MISMATCH, "LOCATION_NAME": LOCATION_NAME,
+            "LOCATION_V6": LOCATION_V6, "LF_ONLY": LF_ONLY, "CASE": CASE}
