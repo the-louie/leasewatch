@@ -26,6 +26,7 @@ from . import __version__
 from .config import Config
 from .connectors import build_opener, make_redactor, parse_bool
 from .mqtt import Client, MqttError
+from .texts import t
 
 log = logging.getLogger("leasewatch.notify")
 # hostnames come from DHCP clients: a CR/LF (or other control char) in the subject would inject mail headers
@@ -83,30 +84,32 @@ class Channel(Protocol):
         """Deliver `msg`; raise the channel's own NotifyError subclass on failure."""
 
 
-def _device_line(d: dict) -> str:
+def _device_line(d: dict, lang: str = "en") -> str:
     # empty network or lease type: leave the part out, as the "new" event does
     tags = ", ".join(filter(None, [d["vlan"], d["lease_type"]]))
-    line = f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or '(no hostname)':28}  {d['vendor'] or '?'}" + (f"  [{tags}]" if tags else "")
+    line = f"  {d['ip']:15}  {d['mac']}  {d['hostname'] or t(lang, 'mail.no_hostname'):28}  {d['vendor'] or '?'}" + (f"  [{tags}]" if tags else "")
     # a CR/LF in a DHCP hostname would forge whole lines of the body (e.g. a fake review link)
     return _LINE_UNSAFE.sub(" ", line)
 
 
 def build_message(cfg: Config, devices: list[dict]) -> Message:
-    n = len(devices)
-    lines = [f"{n} new device{'s' if n != 1 else ''} on the network:", ""]
+    n, lang = len(devices), cfg.mail_lang
+    lines = [t(lang, "mail.head", n=n), ""]
     base = cfg.public_url.rstrip("/")  # a trailing slash must not give "//?device="
     # the MAC is stored normalised (hex pairs and colons): it needs no quoting
     links = [f"{base}/?device={d['mac']}" for d in devices] if base else []
-    blocks = [_device_line(d) + (f"\n    {_LINE_UNSAFE.sub(' ', links[i])}" if links else "") for i, d in enumerate(devices)]
+    blocks = [_device_line(d, lang) + (f"\n    {_LINE_UNSAFE.sub(' ', links[i])}" if links else "")
+              for i, d in enumerate(devices)]
     lines += blocks
     url = f"{base}/?filter=unacked" if base else ""
     if url:
-        lines += ["", f"Review and acknowledge: {url}"]
+        lines += ["", t(lang, "mail.review_link", url=url)]
     first = devices[0]
     who = first["hostname"] or first["vendor"] or first["mac"]
     where = ", ".join(filter(None, [first["ip"], first["vlan"]]))
     # no IP and no network: no "()" either
-    subject = (f"New device: {who}" + (f" ({where})" if where else "")) if n == 1 else f"{n} new devices on the network"
+    subject = (t(lang, "mail.new_subject_where", who=who, where=where) if where else t(lang, "mail.new_subject", who=who)) \
+        if n == 1 else t(lang, "mail.new_subject_many", n=n)
     return Message(_LINE_UNSAFE.sub(" ", subject), "\n".join(lines), list(devices), url, links, blocks)
 
 
@@ -253,7 +256,7 @@ class SmtpChannel:
                 smtp.close()
 
 
-def _fit_lines(lines: list[str], budget: int, size: Callable[[str], int]) -> list[str]:
+def _fit_lines(lines: list[str], budget: int, size: Callable[[str], int], lang: str = "en") -> list[str]:
     """The first lines that fit in `budget` (each measured by `size`, plus its newline), then "… and N more"."""
     shown: list[str] = []
     used = 0
@@ -263,7 +266,7 @@ def _fit_lines(lines: list[str], budget: int, size: Callable[[str], int]) -> lis
         shown.append(ln)
         used += size(ln) + 1
     if len(shown) < len(lines):
-        shown.append(f"  … and {len(lines) - len(shown)} more")
+        shown.append(t(lang, "mail.more", n=len(lines) - len(shown)))
     return shown
 
 
@@ -301,7 +304,7 @@ class WebhookChannel:
             root, _, topic = parts.path.rstrip("/").rpartition("/")
             text = msg.text
             if len(text.encode()) >= NTFY_MAX and not msg.blocks:  # a message without devices: whole lines only
-                text = "\n".join(_fit_lines(text.split("\n"), NTFY_MAX - 40, lambda s: len(s.encode())))
+                text = "\n".join(_fit_lines(text.split("\n"), NTFY_MAX - 40, lambda s: len(s.encode()), cfg.mail_lang))
             elif len(text.encode()) >= NTFY_MAX:  # ntfy takes a body that reaches the limit as an attachment
                 # build_message's layout: two head lines, one block per device (its line, then its link line), then
                 # the review link (if any). A block is kept or cut whole, so no link is left without its device line
@@ -309,7 +312,7 @@ class WebhookChannel:
                 k = 2 + sum(b.count("\n") + 1 for b in msg.blocks)
                 head, tail = rows[:2], rows[k:]
                 budget = NTFY_MAX - len("\n".join(head + tail).encode()) - 40  # the newlines and the "more" line
-                text = "\n".join(head + _fit_lines(msg.blocks, budget, lambda s: len(s.encode())) + tail)
+                text = "\n".join(head + _fit_lines(msg.blocks, budget, lambda s: len(s.encode()), cfg.mail_lang) + tail)
             body = {"topic": topic, "title": msg.subject, "message": text}
             # one new device: tapping the notification opens that device, else the list of unchecked ones
             click = msg.links[0] if len(msg.links) == 1 else msg.url
@@ -322,7 +325,7 @@ class WebhookChannel:
             # a message without devices: each device page it names (build_alert's links), after the code block, in at
             # most half the message
             link = msg.links[0] if len(msg.links) == 1 else msg.url
-            tail = "".join(f"\n{ln}" for ln in _fit_lines(msg.links, DISCORD_MAX // 2, len)) \
+            tail = "".join(f"\n{ln}" for ln in _fit_lines(msg.links, DISCORD_MAX // 2, len, cfg.mail_lang)) \
                 if not msg.devices and len(msg.links) > 1 else f"\n{link}" if link else ""
             # a code block keeps the columns and shows hostnames as plain text; a backtick cannot close it
             # a message without devices shows its text lines in the code block instead, without build_alert's link
@@ -330,9 +333,10 @@ class WebhookChannel:
             rows = msg.text.split("\n")
             if not msg.devices and msg.links:
                 rows = rows[:-len(msg.links) - 1]
-            lines = [_device_line(d).replace("`", "'") for d in msg.devices] if msg.devices else \
+            lines = [_device_line(d, cfg.mail_lang).replace("`", "'") for d in msg.devices] if msg.devices else \
                 [ln.replace("`", "'") for ln in rows]
-            shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len)  # the fences and the "more" line
+            # the fences and the "more" line
+            shown = _fit_lines(lines, DISCORD_MAX - len(head) - len(tail) - 40, len, cfg.mail_lang)
             content = head + "\n```\n" + "\n".join(shown) + "\n```" + tail
             return url, {"content": content[:DISCORD_MAX], "allowed_mentions": {"parse": []}}
         return url, _event_payload(cfg, msg)
