@@ -5,6 +5,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- The stable IPv6 address of a device (the EUI-64 address of one of its MACs or a DHCPv6 address): `ip6_stable` in the JSON, the `ip6` event (`old -> new`, only when it changes from one address to another), the `history.ip6` column and the IPv6 address under the IPv4 in the History rows of the device panel, `/api/events?kind=ip6` (event kinds may hold digits) and `ip6` in the events filter. Migration at the first start; the schema stays 4.
 - Bulk tagging: `POST /api/devices` takes `tags_add` and `tags_remove` (comma lists), alone or with `acked` or `archived`. Each device keeps its own tags minus the removed ones and gains the added ones; one `tags` event per changed device, as from the single POST. All or nothing: a device that would get more than 8 tags fails the request with 400 `{"error": "at most 8 tags", "full": [mac, ...]}`; a tag in both lists is a 400.
 - Bulk tagging from the Select bar: a tag input with Add and Remove for the selected devices; a device that would pass 8 tags is found before anything is sent and named in a confirm, and left out when you continue; the banner afterwards counts the devices changed.
 - Per-connector `warnings` in `/api/status` and in the status tooltip (`ndp_unavailable`, `kea6_unavailable`, `labels_unavailable`, `dropped`).
@@ -12,8 +13,10 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Changed
 - The bulk route's refusal text is now `bulk takes acked, archived, tags_add or tags_remove`.
+- Kea IA_TA leases are skipped like IA_PD ones.
 
 ### Fixed
+- The shown IPv6 address no longer flips to a temporary one when the NDP table ages the EUI-64 entry out for a poll; the MQTT attributes are not republished by such a poll.
 - Text typed in the device panel is no longer lost when a save fails after the panel was closed: the next open restores it as a draft.
 - The mDNS connector accepts packets from a listed repeater (`RELAYS`) at any TTL: the OPNsense os-mdns-repeater package sends with TTL 1, which 1.5 refused as off-link.
 - A plugin directory entry name is cut to one line before it appears in a problem text or a log line.

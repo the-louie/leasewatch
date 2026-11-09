@@ -177,10 +177,16 @@ The full rules are in the docstring of `leasewatch/connectors/merge.py`. The par
 - **`ip6`.** Every sighting of any kind may carry one. The candidates of a MAC rank: global (2000::/3) before
   unique-local (fc00::/7) before the rest; one a `dhcp6` sighting carries before one that is not; the MAC's own
   EUI-64 address before others; the lowest value last. The stored address is sticky: it stays while it is still among
-  the candidates of the best class, or while no candidate is listed. An `ip6` change writes no history row and no
-  event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device, and a device listed
+  the candidates of the best class, or while no candidate is listed. A change of the shown `ip6` alone writes no
+  history row and no event; a change of the stable address (below) writes a history row and, after the first one, an
+  `ip6` event. Sightings of kind `ndp` and `dhcp6` only enrich: a MAC they list alone gets no device, and a device listed
   only by them this poll keeps everything but `ip6` and `last_seen` (no event, no history row). The host reads their
   presence as `False` whatever the connector sends; emit `presence=False` anyway so the record says what it means.
+  The host also keeps a stable IPv6 address per device: the EUI-64 address of one of its MACs or the address of a
+  DHCPv6 lease, the best by class (global before unique-local before other; DHCPv6 before EUI-64); a temporary address
+  is never stored as stable. The host's own fw1 reader skips IA_TA and IA_PD leases; a contrib that emits `dhcp6`
+  sightings must give IA_NA addresses only. The host writes the `ip6` event when the stable address changes, and the
+  shown `ip6` prefers it.
 - **Which kind to use.** A DHCP lease or reservation: `dhcp`, `presence=False` unless the server says the client
   is online. An ARP/neighbour table entry: `arp`, `presence=True`. A device a controller or access point reports as
   connected: `client` (the built-in `unifi` connector also emits `client` sightings with the controller's hostname and
