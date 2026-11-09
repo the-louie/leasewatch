@@ -251,6 +251,7 @@ def _dir_decls(raw: str, res: LoadResult, other: dict[str, str]) -> list[_Decl]:
         # packages only: a loose .py file (or a hidden or "_" entry) is never run
         if entry.startswith((".", "_")) or not os.path.isdir(base) or not os.path.isfile(pyproject):
             continue
+        entry = _one_line(entry)  # from here only shown (problems, logs, Origin.label()): no forged line
         bad = f"LW_CONNECTORS_DIR {entry}: pyproject.toml cannot be read"
         try:
             with open(pyproject, "rb") as f:

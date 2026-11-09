@@ -221,76 +221,103 @@ class Publisher:
 
     def publish_poll(self, rows: list[dict], stats: dict) -> None:
         client = self._require()
-        b = self.base
-        sent = removed = 0
         before = set(self.published)
-        moved = False  # the old node's configs were cleared: the stored node changes
+        old_node = self.stored_node  # changed when the old node's configs were cleared: stored again
         try:
             with self._closing_on_error():
-                birth = f"{self.cfg.mqtt_discovery_prefix}/status"
-                for topic, payload in client.poll_incoming():
-                    if topic == birth and payload == b"online":
-                        self.birth_seen = True
-                if self.birth_seen:  # Home Assistant (re)started: send everything again
-                    self.full = True
-                    self.birth_seen = False
+                self._check_birth(client)
                 discovery = self.cfg.mqtt_discovery_on
-                prefix, node = self.cfg.mqtt_discovery_prefix, node_id(self.cfg)
-                config_base = f"{prefix}/device_tracker/{node}"
-                if self.full and self.stored_node != node:  # SITE_NAME changed: the old node's configs go
-                    old = self.stored_node
-                    for i in sorted(self.published):
-                        client.publish(f"{prefix}/device_tracker/{old}/{i}/config", b"", qos=1, retain=True)
-                    for key in SENSORS:
-                        client.publish(f"{prefix}/sensor/{old}/{key}/config", b"", qos=1, retain=True)
-                    self.stored_node = node
-                    moved = True
-                want: dict[str, dict] = {device_id(r["mac"]): r for r in self.selected(rows)}
-                cleared = self.db.get_meta(META_CLEARED, "0") == "1" if self.full else True
-                if self.full and not discovery and not cleared:
-                    for i in sorted(self.published & set(want)):
-                        client.publish(f"{config_base}/{i}/config", b"", qos=1, retain=True)
-                    for key in SENSORS:
-                        client.publish(self._sensor_topic(key), b"", qos=1, retain=True)
-                for i, r in want.items():
-                    state = "home" if r.get("online") else "not_home"
-                    attrs = self._attributes(r, last_online=False)
-                    conf = self._device_config(r, i) if discovery else ""
-                    prev = None if self.full else self.last.get(i)
-                    if prev is not None and prev == (state, attrs, conf):
-                        continue
-                    self.published.add(i)
-                    if conf and (prev is None or prev[2] != conf):
-                        client.publish(f"{config_base}/{i}/config", conf, qos=1, retain=True)
-                    if prev is None or prev[0] != state:
-                        client.publish(f"{b}/device/{i}/state", state, qos=1, retain=True)
-                    if prev is None or prev[0] != state or prev[1] != attrs:  # with the current last_online
-                        client.publish(f"{b}/device/{i}/attributes", self._attributes(r), qos=1, retain=True)
-                    self.last[i] = (state, attrs, conf)
-                    sent += 1
+                config_base = f"{self.cfg.mqtt_discovery_prefix}/device_tracker/{node_id(self.cfg)}"
+                want, gone = self._selection(rows)
+                cleared = self._clear_discovery(client, set(want), discovery, config_base)
+                sent = self._publish_devices(client, want, discovery, config_base)
                 if self.full and discovery:
                     for key in SENSORS:
                         client.publish(self._sensor_topic(key), self._sensor_config(key), qos=1, retain=True)
-                for i in sorted((self.published | set(self.last)) - set(want)):
-                    for topic in (f"{b}/device/{i}/state", f"{b}/device/{i}/attributes", f"{config_base}/{i}/config"):
-                        client.publish(topic, b"", qos=1, retain=True)
-                    self.last.pop(i, None)
-                    self.published.discard(i)
-                    removed += 1
-                client.publish(f"{b}/stats", _json({
-                    "devices": stats.get("total", 0), "online": stats.get("online", 0),
-                    "unacked": stats.get("unacked", 0), "new": stats.get("new", 0),
-                }), qos=1, retain=True)
-                if self.full and discovery == cleared:  # off and not yet cleared, or on after a cleared run
-                    self.db.set_meta(META_CLEARED, "0" if discovery else "1")
+                self._publish_removals(client, gone, config_base)
+                self._publish_stats(client, stats, discovery, cleared)
         finally:
-            if self.published != before or moved:
-                try:
-                    self.db.set_meta(META_PUBLISHED, _json({"node": self.stored_node, "ids": sorted(self.published)}))
-                except sqlite3.Error as e:
-                    log.warning("mqtt: could not store the published devices (%s)", e)
+            self._store_published(before, old_node)
         self.full = False
-        log.debug("mqtt: poll published %d device(s), removed %d", sent, removed)
+        log.debug("mqtt: poll published %d device(s), removed %d", sent, len(gone))
+
+    def _check_birth(self, client: Client) -> None:
+        birth = f"{self.cfg.mqtt_discovery_prefix}/status"
+        for topic, payload in client.poll_incoming():
+            if topic == birth and payload == b"online":
+                self.birth_seen = True
+        if self.birth_seen:  # Home Assistant (re)started: send everything again
+            self.full = True
+            self.birth_seen = False
+
+    def _selection(self, rows: list[dict]) -> tuple[dict[str, dict], list[str]]:
+        """id -> row of the selected devices, and the ids with retained messages that left the selection."""
+        want: dict[str, dict] = {device_id(r["mac"]): r for r in self.selected(rows)}
+        return want, sorted((self.published | set(self.last)) - set(want))
+
+    def _clear_discovery(self, client: Client, want: set[str], discovery: bool, config_base: str) -> bool:
+        """Clears the old node's configs and, with discovery off, this node's; whether the clear-up was done before."""
+        prefix, node = self.cfg.mqtt_discovery_prefix, node_id(self.cfg)
+        if self.full and self.stored_node != node:  # SITE_NAME changed: the old node's configs go
+            old = self.stored_node
+            for i in sorted(self.published):
+                client.publish(f"{prefix}/device_tracker/{old}/{i}/config", b"", qos=1, retain=True)
+            for key in SENSORS:
+                client.publish(f"{prefix}/sensor/{old}/{key}/config", b"", qos=1, retain=True)
+            self.stored_node = node
+        cleared = self.db.get_meta(META_CLEARED, "0") == "1" if self.full else True
+        if self.full and not discovery and not cleared:
+            for i in sorted(self.published & want):
+                client.publish(f"{config_base}/{i}/config", b"", qos=1, retain=True)
+            for key in SENSORS:
+                client.publish(self._sensor_topic(key), b"", qos=1, retain=True)
+        return cleared
+
+    def _publish_devices(self, client: Client, want: dict[str, dict], discovery: bool, config_base: str) -> int:
+        """Config, state and attributes of each selected device, only what changed unless full; the number sent."""
+        b = self.base
+        sent = 0
+        for i, r in want.items():
+            state = "home" if r.get("online") else "not_home"
+            attrs = self._attributes(r, last_online=False)
+            conf = self._device_config(r, i) if discovery else ""
+            prev = None if self.full else self.last.get(i)
+            if prev is not None and prev == (state, attrs, conf):
+                continue
+            self.published.add(i)
+            if conf and (prev is None or prev[2] != conf):
+                client.publish(f"{config_base}/{i}/config", conf, qos=1, retain=True)
+            if prev is None or prev[0] != state:
+                client.publish(f"{b}/device/{i}/state", state, qos=1, retain=True)
+            if prev is None or prev[0] != state or prev[1] != attrs:  # with the current last_online
+                client.publish(f"{b}/device/{i}/attributes", self._attributes(r), qos=1, retain=True)
+            self.last[i] = (state, attrs, conf)
+            sent += 1
+        return sent
+
+    def _publish_removals(self, client: Client, gone: list[str], config_base: str) -> None:
+        b = self.base
+        for i in gone:
+            for topic in (f"{b}/device/{i}/state", f"{b}/device/{i}/attributes", f"{config_base}/{i}/config"):
+                client.publish(topic, b"", qos=1, retain=True)
+            self.last.pop(i, None)
+            self.published.discard(i)
+
+    def _publish_stats(self, client: Client, stats: dict, discovery: bool, cleared: bool) -> None:
+        client.publish(f"{self.base}/stats", _json({
+            "devices": stats.get("total", 0), "online": stats.get("online", 0),
+            "unacked": stats.get("unacked", 0), "new": stats.get("new", 0),
+        }), qos=1, retain=True)
+        if self.full and discovery == cleared:  # off and not yet cleared, or on after a cleared run
+            self.db.set_meta(META_CLEARED, "0" if discovery else "1")
+
+    def _store_published(self, before: set[str], old_node: str) -> None:
+        """Stores the ids with retained messages and their node when either changed; never raises sqlite3.Error."""
+        if self.published != before or self.stored_node != old_node:
+            try:
+                self.db.set_meta(META_PUBLISHED, _json({"node": self.stored_node, "ids": sorted(self.published)}))
+            except sqlite3.Error as e:
+                log.warning("mqtt: could not store the published devices (%s)", e)
 
     def publish_status(self, online: bool) -> None:
         client = self._require()

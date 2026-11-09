@@ -426,7 +426,7 @@ def _safe_str(x: object) -> str:
 def _stat_value(v: object) -> object:
     if isinstance(v, int):
         try:
-            v = int(v)  # a plain int: an int subclass's own __str__/__format__ is never called by the output
+            v = int.__int__(v)  # a plain int: an int subclass's own __int__/__str__/__format__ is never called
             str(v)  # more than 4300 digits: int-to-text raises ValueError, in json.dumps and the human line alike
             return v
         except Exception:
