@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.6.0 (2026-11-09)
 
 ### Added
 - The stable IPv6 address of a device (the EUI-64 address of one of its MACs or a DHCPv6 address): `ip6_stable` in the JSON, the `ip6` event (`old -> new`, only when it changes from one address to another), the `history.ip6` column and the IPv6 address under the IPv4 in the History rows of the device panel, `/api/events?kind=ip6` (event kinds may hold digits) and `ip6` in the events filter. Migration at the first start; the schema stays 4. A split takes the alias's own EUI-64 address (`ip6` and `ip6_stable`, each on its own) to the new device.

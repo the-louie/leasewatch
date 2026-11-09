@@ -4,7 +4,7 @@
 services:
   leasewatch:
     build: .
-    # to run the published image (once published): replace the image line below with "image: ghcr.io/the-louie/leasewatch:1.5.0" and remove the "build: ." line
+    # to run the published image (once published): replace the image line below with "image: ghcr.io/the-louie/leasewatch:1.6.0" and remove the "build: ." line
     image: leasewatch:local
     container_name: leasewatch
     restart: unless-stopped

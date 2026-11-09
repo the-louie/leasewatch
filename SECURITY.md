@@ -10,10 +10,10 @@ Include the leasewatch version, how it is deployed (container or `pip`, reverse 
 
 | Version | Supported |
 |---|---|
-| 1.5.x | yes |
+| 1.6.x | yes |
 | older | no |
 
-Fixes go into the latest 1.5 release only.
+Fixes go into the latest 1.6 release only.
 
 ## Security stance
 
