@@ -173,6 +173,8 @@ tr.row.is-private td:last-child { box-shadow: inset -1px 0 0 var(--priv), inset 
 .selbar { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 10; width: min(1232px, 100%); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; background: var(--bg2); border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; box-shadow: 0 -4px 16px rgba(0,0,0,.12); }
 .selcount { font-weight: 600; margin-right: auto; font-variant-numeric: tabular-nums; }
 main.has-selbar { padding-bottom: 96px; }
+.seltags { flex: 1 1 140px; min-width: 0; max-width: 260px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg2); color: var(--text); font: inherit; }
+@media (max-width: 640px) { main.has-selbar { padding-bottom: 190px; } }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 .empty p { margin: 0 0 12px; }
 

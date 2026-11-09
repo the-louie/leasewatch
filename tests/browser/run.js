@@ -779,6 +779,68 @@ const scenarios = {
     }
     return res;
   },
+  // tags from the Select bar: three rows tagged and untagged at once, a row already holding eight tags left out after a
+  // confirm, the bar at phone width and its Swedish labels
+  async sel_tags(page, base) {
+    const P = '02:00:00:00:60:01', Q = '02:00:00:00:60:02', R = '02:00:00:00:60:03', F = '02:00:00:00:60:04';
+    const dialogs = [];
+    page.on('dialog', async d => { dialogs.push(d.message()); await d.accept(); });
+    const badges = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#rows tr')].map(t =>
+      [t.dataset.mac, [...t.querySelectorAll('.dev-tags .badge.tag')].map(b => b.dataset.tag)])));
+    const chip = () => page.evaluate(() => { const c = document.querySelector('#tags .chip[data-tag="iot"]');
+      return c ? c.querySelector('.tg').textContent + ' ' + c.querySelector('.n').textContent : null; });
+    const tick = async macs => { for (const m of macs) await page.click(`${row(m)} .c-sel input`); };
+    const server = async () => Object.fromEntries(await Promise.all([P, Q, R, F].map(async m => [m, (await serverDevice(page, m)).tags])));
+    const res = {};
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.click('#selBtn');
+    await tick([P, Q, R]);
+    res.ph = await page.$eval('#selTags', e => e.placeholder);
+    res.maxlength = await page.$eval('#selTags', e => e.maxLength);
+    res.empty_add = await (async () => { await page.click('#selTagAdd'); return { server: await server(), dialogs: dialogs.length }; })();
+    await page.type('#selTags', 'iot');
+    await page.click('#selTagAdd');
+    await page.waitForFunction(() => document.querySelectorAll('#rows .badge.tag[data-tag="iot"]').length === 3);
+    res.added = { badges: await badges(), chip: await chip(), banner: await page.$eval('#banner', b => b.textContent), server: await server() };
+    await page.click('#selBtn'); await page.click('#selBtn'); // leave and enter: the ticks were cleared by the request
+    await tick([P, Q, R]);
+    await page.click('#selTagRemove');
+    await page.waitForFunction(() => document.querySelectorAll('#rows .badge.tag[data-tag="iot"]').length === 0);
+    res.removed = { badges: await badges(), chip: await chip(), banner: await page.$eval('#banner', b => b.textContent), server: await server() };
+    // F holds eight tags: the confirm names it, it keeps eight, the others get the tag
+    await page.evaluate(async m => { await fetch(`/api/devices/${m}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags: 'a1,a2,a3,a4,a5,a6,a7,a8' }) }); }, F);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(`${row(F)} .dev-tags .badge.tag`);
+    await page.click('#selBtn');
+    await tick([P, Q, F]);
+    await page.type('#selTags', 'iot');
+    await page.click('#selTagAdd');
+    await page.waitForFunction(() => document.querySelectorAll('#rows .badge.tag[data-tag="iot"]').length === 2);
+    res.full = { dialogs: [...dialogs], server: await server(), chip: await chip() };
+    // phone width: the bar wraps, nothing scrolls sideways, and the last row can be scrolled clear of the bar
+    await page.click('#selBtn'); await page.click('#selBtn');
+    await tick([P]);
+    res.narrow = {};
+    for (const width of [400, 360]) {
+      await page.setViewport({ width, height: 700 });
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      res.narrow[width] = await page.evaluate(() => {
+        const bar = document.querySelector('#selbar').getBoundingClientRect(), rows = document.querySelectorAll('#rows tr'),
+              last = rows[rows.length - 1].getBoundingClientRect(), de = document.documentElement;
+        return { page_scroll: de.scrollWidth - de.clientWidth, bar_left: bar.left, bar_right: bar.right, vw: de.clientWidth,
+                 bar_h: bar.height, last_clear: last.bottom <= bar.top + 0.5,
+                 btns: [...document.querySelectorAll('#selbar > *:not(.hidden)')].filter(e => e.getBoundingClientRect().right > bar.right + 0.5).length };
+      });
+    }
+    await page.goto(`${base}?lang=sv`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(`${row(P)}`);
+    await page.click('#selBtn');
+    await tick([P]);
+    res.sv = await page.evaluate(() => ({ add: document.querySelector('#selTagAdd').textContent, remove: document.querySelector('#selTagRemove').textContent,
+      ph: document.querySelector('#selTags').placeholder, label: document.querySelector('#selTags').getAttribute('aria-label') }));
+    return res;
+  },
   // a ?device= link whose first load fails: the drawer opens after the next successful load
   async deeplinkretry(page, base) {
     const DEV = '02:00:00:00:10:01';

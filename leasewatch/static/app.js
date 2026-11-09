@@ -866,16 +866,16 @@
   // all or nothing. At the first failure the rest stay as they are and the banner says how far it got
   const BULK_MAX = 200;
   // partial: the banner text when only some requests went through, from {done, total, msg}
-  async function bulkSet(fields, partial) {
-    if (state.bulkBusy || !state.sel.size) return;
+  // macs: the rows to send (default: all ticked); ok: the banner text after success, from the count of changed devices
+  async function bulkSet(fields, partial, { macs = [...state.sel], ok = null } = {}) {
+    if (state.bulkBusy || !state.sel.size || !macs.length) return;
     state.bulkBusy = true;
-    const macs = [...state.sel];
-    let done = 0, err = null;
+    let done = 0, changed = 0, err = null;
     try {
       for (let i = 0; i < macs.length; i += BULK_MAX) {
         const part = macs.slice(i, i + BULK_MAX);
-        await api("/api/devices", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ macs: part, ...fields }) });
-        done += part.length;
+        const r = await api("/api/devices", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ macs: part, ...fields }) });
+        done += part.length; changed += Number(r?.changed) || 0;
       }
       state.sel.clear();
     } catch (e) { err = e; }
@@ -883,6 +883,27 @@
     await load();
     // after the load: its status line would clear a banner shown before it
     if (err) showBanner(done ? partial({ done, total: macs.length, msg: err.message }) : t("err.save_failed", { msg: err.message }));
+    else if (ok) showBanner(ok({ n: changed }));
+  }
+
+  // the tags typed in the Select bar, as the server normalises them: lower case, trimmed, no empty ones, no repeats
+  const barTags = () => [...new Set($("#selTags").value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean))];
+  function bulkTags(adding) {
+    const tags = barTags();
+    if (!tags.length || state.bulkBusy) return;
+    let macs = [...state.sel];
+    if (adding) {
+      const full = state.devices.filter(d => state.sel.has(d.mac) && new Set([...tagsOf(d), ...tags]).size > 8);
+      if (full.length) {
+        const names = full.map(d => d.name || d.hostname || d.ip || d.mac).join(", ");
+        if (!confirm(t("sel.tags_full", { n: full.length, names }))) return;
+        const skip = new Set(full.map(d => d.mac));
+        macs = macs.filter(m => !skip.has(m));
+      }
+    }
+    const field = adding ? "tags_add" : "tags_remove";
+    const say = adding ? p => t("err.bulk_tagged", p) : p => t("err.bulk_untagged", p);
+    bulkSet({ [field]: tags.join(",") }, p => say({ n: p.done }) + ": " + p.msg, { macs, ok: say });
   }
 
   // ---------- url state ----------
@@ -956,7 +977,10 @@
   $("#selBtn").onclick = () => { state.selecting = !state.selecting; state.sel.clear(); renderTable(); };
   $("#selAll").onchange = e => { state.sel = new Set(e.target.checked ? filtered().map(d => d.mac) : []); renderTable(); };
   $("#selClear").onclick = () => { state.sel.clear(); renderTable(); };
-  $("#selAck").onclick = () => bulkSet({ acked: true }, p => t("err.bulk_marked", p));
+  $("#selTagAdd").onclick = () => bulkTags(true);
+  $("#selTagRemove").onclick = () => bulkTags(false);
+  $("#selTags").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); bulkTags(true); } };
+  $("#selAck").onclick =() => bulkSet({ acked: true }, p => t("err.bulk_marked", p));
   $("#selArchive").onclick = () => bulkSet({ archived: true }, p => t("err.bulk_archived", p));
   $("#selRestore").onclick = () => bulkSet({ archived: false }, p => t("err.bulk_restored", p));
   $("#dClose").onclick = closeDrawer; $("#scrim").onclick = closeDrawer;

@@ -1454,6 +1454,60 @@ class BrowserSelectNarrowTest(_BrowserCase):
         self.assertNotIn("c-first", d["1024"]["shown"])
 
 
+class BrowserSelectTagsTest(_BrowserCase):
+    """Tags from the Select bar: added to and removed from three rows at once, a row with eight tags left out after a
+    confirm, the bar at phone widths, and the Swedish labels."""
+    P, Q, R, F = "02:00:00:00:60:01", "02:00:00:00:60:02", "02:00:00:00:60:03", "02:00:00:00:60:04"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str) -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type="dynamic", online=True)
+        base, _db = start(cls, [s(cls.P, 60, "plug"), s(cls.Q, 61, "lamp"), s(cls.R, 62, "fan"), s(cls.F, 63, "hub")])
+        cls.run_scenarios(base, ("sel_tags",))
+
+    def test_empty_input_does_nothing(self) -> None:
+        d = self.result("sel_tags")
+        self.assertEqual((d["ph"], d["maxlength"]), ("iot, owner:alex", 232))
+        self.assertEqual(d["empty_add"], {"server": {self.P: "", self.Q: "", self.R: "", self.F: ""}, "dialogs": 0})
+
+    def test_add_then_remove_on_three_rows(self) -> None:
+        d = self.result("sel_tags")
+        for m in (self.P, self.Q, self.R):
+            self.assertEqual(d["added"]["badges"][m], ["iot"])
+            self.assertEqual(d["added"]["server"][m], "iot")
+            self.assertEqual(d["removed"]["badges"][m], [])
+            self.assertEqual(d["removed"]["server"][m], "")
+        self.assertEqual(d["added"]["chip"], "iot 3/3")
+        self.assertEqual(d["added"]["banner"], "3 devices tagged")
+        self.assertIsNone(d["removed"]["chip"])
+        self.assertEqual(d["removed"]["banner"], "3 devices untagged")
+
+    def test_full_row_is_left_out_after_a_confirm(self) -> None:
+        d = self.result("sel_tags")["full"]
+        self.assertEqual(len(d["dialogs"]), 1, d)
+        self.assertEqual(d["dialogs"][0], "1 device already has 8 tags and is left out: hub. Continue?")
+        self.assertEqual(d["server"][self.F], "a1,a2,a3,a4,a5,a6,a7,a8")
+        self.assertEqual((d["server"][self.P], d["server"][self.Q]), ("iot", "iot"))
+        self.assertEqual(d["chip"], "iot 2/2")
+
+    def test_bar_wraps_at_phone_width(self) -> None:
+        for width, m in self.result("sel_tags")["narrow"].items():
+            with self.subTest(width=width):
+                self.assertLessEqual(m["page_scroll"], 0, m)
+                self.assertGreaterEqual(m["bar_left"], 0, m)
+                self.assertLessEqual(m["bar_right"], m["vw"] + 0.5, m)
+                self.assertEqual(m["btns"], 0, m)
+                self.assertTrue(m["last_clear"], m)
+
+    def test_swedish_labels(self) -> None:
+        self.assertEqual(self.result("sel_tags")["sv"], {"add": "Lägg till tagg", "remove": "Ta bort tagg",
+                                                          "ph": "iot, owner:alex", "label": "Taggar"})
+
+
 class BrowserAuthTest(_BrowserCase):
     """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
 
