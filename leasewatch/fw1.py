@@ -472,7 +472,22 @@ class Fw1Client:
     def _sightings(self, leases: list, arp: list, skip, reservations: list | None = None,
                    ndp: list | None = None, ipv6: bool = False,
                    leases6: list | None = None) -> tuple[list[Sighting], dict]:
-        out: list[Sighting] = []
+        lease_rows, lease6 = self._lease_rows(leases, leases6, ipv6)
+        out = self._lease_sightings(lease_rows, skip, reservations, arp)
+        out6, kept6 = self._v6_sightings(lease6, skip)
+        out_arp, own = self._arp_sightings(arp, skip)
+        out_ndp, kept = self._ndp_sightings(ndp, skip, own)
+        stats = {"leases": len(leases), "arp": len(arp)}
+        if reservations is not None:
+            stats["reservations"] = len(reservations)
+        if ipv6 and (self.dhcp_backend == "dnsmasq" or (self.dhcp_backend == "kea" and leases6 is not None)):
+            stats["leases6"] = kept6
+        if ndp is not None:
+            stats["ndp"] = kept
+        return out + out6 + out_arp + out_ndp, stats
+
+    def _lease_rows(self, leases: list, leases6: list | None, ipv6: bool) -> tuple[list[dict], list[dict]]:
+        """Maps the backend's lease rows (and the Kea DHCPv6 leases) to common-shape rows: (IPv4 rows, rows with ip6)."""
         if self.dhcp_backend == "dnsmasq":
             lease_rows = dnsmasq_leases(leases, time.time(), ipv6=ipv6)  # the clock read here keeps the parser pure
         else:
@@ -482,6 +497,11 @@ class Fw1Client:
         lease6 = [l for l in lease_rows if l.get("ip6")]  # dnsmasq IPv6 leases stay out of the IPv4 lease logic
         if lease6:
             lease_rows = [l for l in lease_rows if not l.get("ip6")]
+        return lease_rows, lease6
+
+    def _lease_sightings(self, lease_rows: list[dict], skip, reservations: list | None, arp: list) -> list[Sighting]:
+        """Maps IPv4 lease rows plus the reservations (Kea) or static hosts (dnsmasq) to "dhcp" sightings."""
+        out: list[Sighting] = []
         if reservations:
             # an active lease already carries what its reservation says, except the description (label);
             # only lease-less reservations are added as rows
@@ -514,6 +534,12 @@ class Fw1Client:
                 online=l.get("status") == "online", client_id=_s(l.get("client_id")),
                 label=_s(l.get("label"))[:LABEL_MAX],
             ))
+        return out
+
+    @staticmethod
+    def _v6_sightings(lease6: list[dict], skip) -> tuple[list[Sighting], int]:
+        """Maps lease rows with ip6 to "dhcp6" sightings; returns them and how many were kept."""
+        out: list[Sighting] = []
         kept6 = 0
         for l in lease6:
             mac = norm_mac(_s(l.get("mac")))
@@ -527,6 +553,12 @@ class Fw1Client:
                 source="dhcp6", lease_type=lease_type if lease_type in ("dynamic", "static") else "dynamic",
                 online=False, client_id=_s(l.get("client_id")), ip6=_s(l.get("ip6")).split("%", 1)[0],
             ))
+        return out, kept6
+
+    @staticmethod
+    def _arp_sightings(arp: list, skip) -> tuple[list[Sighting], set[str]]:
+        """Maps ARP rows to "arp" sightings; returns them and the MACs of the permanent entries."""
+        out: list[Sighting] = []
         own: set[str] = set()  # MACs of permanent ARP entries: the firewall's own interfaces
         for a in arp:
             if not isinstance(a, dict):
@@ -545,6 +577,12 @@ class Fw1Client:
                 vlan=_s(a.get("intf_description")) or iface, iface=iface,
                 source="arp", lease_type="", online=True,
             ))
+        return out, own
+
+    @staticmethod
+    def _ndp_sightings(ndp: list | None, skip, own: set[str]) -> tuple[list[Sighting], int]:
+        """Maps NDP rows to "ndp" sightings; returns them and how many were kept."""
+        out: list[Sighting] = []
         kept = 0
         for n in ndp or ():
             if not isinstance(n, dict):
@@ -567,11 +605,4 @@ class Fw1Client:
                 vlan=_s(n.get("intf_description")) or iface, iface=iface,
                 source="ndp", lease_type="", online=False, ip6=ip6,
             ))
-        stats = {"leases": len(leases), "arp": len(arp)}
-        if reservations is not None:
-            stats["reservations"] = len(reservations)
-        if ipv6 and (self.dhcp_backend == "dnsmasq" or (self.dhcp_backend == "kea" and leases6 is not None)):
-            stats["leases6"] = kept6
-        if ndp is not None:
-            stats["ndp"] = kept
-        return out, stats
+        return out, kept
