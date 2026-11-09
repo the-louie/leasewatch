@@ -453,8 +453,8 @@
       if ((d.name || d.wifi_alias) && d.hostname && d.hostname !== lbl) sub.push(`<span class="host">${esc(d.hostname)}</span>`);
       if (d.vendor && d.vendor !== lbl) sub.push(esc(d.vendor));
       if (!sub.length && !d.name && !d.wifi_alias && !d.hostname && !d.label) sub.push(`<span class="host">${esc(d.mac)}</span>`);
-      // a private address says so in words at every width; the sleuth shows here only where the MAC column is hidden
-      if (d.private) sub.unshift('<span class="priv-hint"><span class="ico" aria-hidden="true">\u{1F575}\u{FE0F}</span>' + esc(t("row.private")) + "</span>");
+      // a private address says so in words at every width; where the MAC column is hidden, the words alone mark it
+      if (d.private) sub.unshift('<span class="priv-hint">' + esc(t("row.private")) + "</span>");
       $(".dev-sub", tr).innerHTML = sub.join(" · ");
       $(".dev-meta .ip", tr).textContent = d.ip || "–";
       const vm = $(".dev-meta .badge", tr); vm.textContent = d.vlan || "?"; vm.style.setProperty("--vc", vlanColor(d.vlan));
@@ -467,8 +467,8 @@
       if (d.ip) copyable($(".c-ip .cp", tr), d.ip); else { $(".c-ip .cp", tr).remove(); $(".c-ip", tr).prepend("–"); } // nothing to copy
       if (!d.ip6) v6.forEach(e => e.remove()); // no empty focusable element
       copyable($(".c-mac .cp", tr), d.mac);
-      // a private (locally administered) MAC: tinted row border, the sleuth and its "private address" hint
-      if (d.private) { tr.classList.add("is-private"); $(".c-mac .priv", tr).classList.remove("hidden"); }
+      // a private (locally administered) MAC: a golden MAC and the "private address" hint under the name
+      if (d.private) tr.classList.add("is-private");
       const vb = $(".c-vlan .badge", tr); vb.textContent = d.vlan || "?"; vb.style.setProperty("--vc", vlanColor(d.vlan));
       const ty = $(".c-type", tr); ty.textContent = ty.title = typeText(d);
       const fs = $(".c-first", tr); fs.textContent = d.baseline ? t("row.since_start") : rel(d.first_seen); fs.title = d.baseline ? t("row.baseline_title", { when: abs(state.meta.baseline_ts) }) : abs(d.first_seen);

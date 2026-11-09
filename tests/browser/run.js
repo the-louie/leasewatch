@@ -384,29 +384,27 @@ const scenarios = {
     res.dialog_log = dialogs;
     return res;
   },
-  // private (locally administered) MACs: the row's border class, the sleuth and its hint; a hardware MAC has none
+  // private (locally administered) MACs: the row's class, the golden MAC text and the hint; a hardware MAC has none
   async private(page) {
     const rows = await page.$$eval('#rows tr', trs => trs.map(t => {
-      const p = t.querySelector('.c-mac .priv'), s = p && getComputedStyle(p);
-      const h = t.querySelector('.dev-sub .priv-hint'), sub = t.querySelector('.dev-sub');
-      return { mac: t.dataset.mac, hint: h ? h.textContent.replace(/^\s*\u{1F575}\u{FE0F}/u, '') : null,
+      const h = t.querySelector('.dev-sub .priv-hint'), sub = t.querySelector('.dev-sub'), cp = t.querySelector('.c-mac .cp');
+      return { mac: t.dataset.mac, hint: h ? h.textContent : null,
                hint_shown: !!h && h.offsetWidth > 0 && getComputedStyle(h).visibility !== 'hidden',
-               sub_start: h ? sub.textContent.replace(/^\s*\u{1F575}\u{FE0F}?/u, '').slice(0, 15) : null,
-               ico_in_mac: !!t.querySelector('.c-mac .priv') && t.querySelector('.c-mac .priv').offsetWidth > 0,
-               ico_in_hint: !!h && h.querySelector('.ico').offsetWidth > 0,
-               cls: t.classList.contains('is-private'), shadow: getComputedStyle(t.querySelector('td')).boxShadow,
-               shown: !!p && s.display !== 'none' && p.offsetWidth > 0, emoji: p ? p.textContent.includes('\u{1F575}\u{FE0F}') : false,
-               title: p ? p.getAttribute('title') : null,
-               copy_text: t.querySelector('.c-mac .cp') ? t.querySelector('.c-mac .cp').textContent : null };
+               sub_start: h ? sub.textContent.slice(0, 15) : null,
+               cls: t.classList.contains('is-private'), mac_color: cp ? getComputedStyle(cp).color : null,
+               copy_text: cp ? cp.textContent : null };
     }));
-    // below 900 px the MAC column is hidden: the sleuth moves into the hint, and the page does not scroll sideways
+    // the --priv colour as the browser computes it, to compare with the MAC text
+    const priv_color = await page.evaluate(() => {
+      const s = document.createElement('span'); s.style.color = 'var(--priv)'; document.body.appendChild(s);
+      const c = getComputedStyle(s).color; s.remove(); return c;
+    });
+    // below 900 px the MAC column is hidden: the hint alone marks the row, and the page does not scroll sideways
     await page.setViewport({ width: 800, height: 900 });
     const narrow = { scroll: await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
       rows: await page.$$eval('#rows tr', trs => Object.fromEntries(trs.map(t => {
         const h = t.querySelector('.dev-sub .priv-hint'), m = t.querySelector('.c-mac');
-        return [t.dataset.mac, { hint: h ? h.textContent.replace(/^\s*\u{1F575}\u{FE0F}/u, '') : null,
-          hint_shown: !!h && h.offsetWidth > 0, mac_shown: m.offsetWidth > 0,
-          ico_in_hint: !!h && h.querySelector('.ico').offsetWidth > 0 }];
+        return [t.dataset.mac, { hint: h ? h.textContent : null, hint_shown: !!h && h.offsetWidth > 0, mac_shown: m.offsetWidth > 0 }];
       }))) };
     await page.setViewport({ width: 1400, height: 900 });
     // the merged device's drawer lists the MAC merged into it and why
@@ -431,7 +429,7 @@ const scenarios = {
     await page.waitForSelector('#events .k.merged');
     const merged_event = await page.$$eval('#events li', ls => ls.filter(l => l.querySelector('.k.merged'))
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
-    return { rows, narrow, drawer, plain, merged_event };
+    return { rows, priv_color, narrow, drawer, plain, merged_event };
   },
   // an offline event in the drawer history carries its kind as a class
   async presencekinds(page, base) {
@@ -535,7 +533,7 @@ const scenarios = {
       cols: [...document.querySelectorAll('#tbl thead th')].map(t => t.offsetWidth) }));
     const copied = () => page.evaluate(() => window.__copied.slice());
     const res = { before: await widths() };
-    // a private row: its sleuth already makes it the widest MAC cell, so anything added on hover widens the column
+    // hovering a private row's MAC: its golden text must not add anything that widens the column
     await page.hover(`${row('02:00:00:00:10:01')} td.c-mac`);
     res.hover_mac = await widths();
     res.mac_title = await page.$eval(`${row(MAC)} .c-mac .cp`, e => e.getAttribute('title'));
@@ -1071,7 +1069,7 @@ const scenarios = {
     res.done = { dialogs: [...dialogs], aliases: await aliases(), headings: await page.$$eval('#dBody h3', hs => hs.map(h => h.textContent)),
                  server: await serverAliases(), open: await drawerOpen(page), title: await page.$eval('#dTitle', e => e.textContent),
                  mac: await page.$$eval('#dBody dd.mono', ds => ds.map(d => d.textContent)),
-                 row_private: await page.$eval(`${row(ALIAS)} .c-mac .priv`, e => e.title),
+                 row_private: await page.$eval(`${row(ALIAS)} .priv-hint`, e => e.textContent),
                  buttons: (await page.$$('#dBody [data-split]')).length, name: await page.$eval('#fName', e => e.value),
                  focus: await page.evaluate(() => document.activeElement && document.activeElement.id) };
     // the old button, kept from before the split: a second split of the same address fails and says so

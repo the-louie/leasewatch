@@ -4,6 +4,9 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ## Unreleased
 
+### Changed
+- A private (locally administered) MAC is shown in gold in the device list instead of a yellow row border, and the 🕵️ next to the MAC is gone (the words *private address* stay under the name; the device panel keeps the icon).
+
 ### Fixed
 - The full device table no longer scrolls sideways on a desktop, so the Mark known column is always in view: from a 1400 px window the page is 1380 px wide (was 1280), and below that the date phrases ("not since the start") wrap when the table is tight.
 

@@ -405,28 +405,23 @@ class BrowserPrivateTest(_BrowserCase):
     def test_private_rows_are_marked(self) -> None:
         rows = {r["mac"]: r for r in self.result("private")["rows"]}
         self.assertEqual(set(rows), {self.UA, self.DEV, self.OTHER})
+        priv = self.result("private")["priv_color"]
         for m in (self.DEV, self.OTHER):
             with self.subTest(mac=m):
                 r = rows[m]
                 self.assertTrue(r["cls"])
-                self.assertNotEqual(r["shadow"], "none")  # the tinted border
-                self.assertTrue(r["shown"])
-                self.assertTrue(r["emoji"])
-                self.assertEqual(r["title"], "private address")
+                self.assertEqual(r["mac_color"], priv)  # the golden MAC
                 self.assertEqual(r["hint"], "private address")  # in words, at 1400 px
                 self.assertTrue(r["hint_shown"])
-                self.assertEqual(r["ico_in_mac"], True)  # the sleuth stays next to the MAC at 1400 px
-                self.assertEqual(r["ico_in_hint"], False)
-                self.assertEqual(r["copy_text"], m)  # the sleuth is not part of the copied text
+                self.assertEqual(r["copy_text"], m)
         self.assertEqual(rows[self.DEV]["sub_start"], "private address")
         ua = rows[self.UA]
         self.assertIsNone(ua["hint"])
         self.assertFalse(ua["cls"])
-        self.assertEqual(ua["shadow"], "none")
-        self.assertFalse(ua["shown"])
+        self.assertNotEqual(ua["mac_color"], priv)
         self.assertEqual(ua["copy_text"], self.UA)
 
-    def test_private_hint_at_800_px_has_the_sleuth_and_no_scroll(self) -> None:
+    def test_private_hint_at_800_px_is_golden_text_and_no_scroll(self) -> None:
         d = self.result("private")["narrow"]
         self.assertLessEqual(d["scroll"], 0)
         for m in (self.DEV, self.OTHER):
@@ -435,7 +430,6 @@ class BrowserPrivateTest(_BrowserCase):
                 self.assertEqual(r["hint"], "private address")
                 self.assertTrue(r["hint_shown"])
                 self.assertFalse(r["mac_shown"])  # .c-mac is hidden here
-                self.assertTrue(r["ico_in_hint"])
         self.assertIsNone(d["rows"][self.UA]["hint"])
 
     def test_network_colour_survives_archiving_an_earlier_networks_last_device(self) -> None:
@@ -493,7 +487,7 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertEqual((done["aliases"], done["server"], done["open"], done["title"]), ([], [], True, "tablet"))
         self.assertNotIn("Merged addresses", done["headings"])
         self.assertIn(self.DEV, done["mac"])
-        self.assertEqual(done["row_private"], "private address")
+        self.assertEqual(done["row_private"].strip(), "private address")
         # Name held unsaved text: the table still drops the address, the text and the focus stay
         self.assertEqual((done["buttons"], done["name"], done["focus"]), (0, " typed", "fName"))
         a = d["again"]  # the button from before the split, clicked again
