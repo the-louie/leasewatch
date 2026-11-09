@@ -15,6 +15,7 @@ import logging
 import re
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -34,11 +35,20 @@ RECV_TIMEOUT = 1.0  # seconds; the listener checks its stop event at least this 
 RATE_LIMIT = 200  # packets parsed per second; the rest are counted in dropped_rate and skipped
 WARN_INTERVAL = 3600.0  # seconds between two malformed-packet warnings for one source address
 MAX_WARNED = 1024  # source addresses remembered for that; the memory is cleared when it is full
+WARN_BUDGET = 10  # malformed-packet warnings per WARN_INTERVAL from all sources together; the rest go to DEBUG
 JOIN_TIMEOUT = 2.0  # seconds close() waits for the listener thread
 DAY = 86400
 # Linux: a socket with this option set (the default) also receives the groups that other sockets joined, on any
 # interface; cleared, it hears only its own memberships
 IP_MULTICAST_ALL = getattr(socket, "IP_MULTICAST_ALL", 49)
+# RFC 6762 11: the link checks. IP_RECVTTL hands over the IP TTL of each packet (as a control message of type IP_TTL
+# on Linux, which Python does not name the option for), IP_PKTINFO its destination address (struct in_pktinfo:
+# ifindex, spec_dst, addr). Without both the listener falls back to recvfrom() and accepts any source
+IP_RECVTTL = getattr(socket, "IP_RECVTTL", 12 if sys.platform.startswith("linux") else None)
+IP_PKTINFO = getattr(socket, "IP_PKTINFO", None)
+_TTL_TYPES = frozenset(t for t in (socket.IP_TTL, getattr(socket, "IP_RECVTTL", None)) if t is not None)
+ANC_SIZE = socket.CMSG_SPACE(4) + socket.CMSG_SPACE(12)
+LINK_TTL = 255  # a router decrements the TTL, so only a sender on the link arrives with 255
 NEEDS_HOST = "needs leasewatch 1.5 or later (device_ips)"
 
 # a Linux interface name: at most 15 characters (IFNAMSIZ - 1), no "/", no white space; ":" (an alias) is left out
@@ -62,7 +72,28 @@ def _int(value: str, default: str) -> int:
 
 
 def _errno_text(e: OSError) -> str:
-    return e.strerror or type(e).__name__
+    return e.strerror or str(e) or type(e).__name__
+
+
+def _link_reject(ancdata: Any) -> str:
+    """The stats key a packet with these control messages is rejected under, or "" to accept it: "off_link" when
+    its IP TTL is not 255 (or missing), "unicast" when its destination is not the group (or missing)."""
+    ttl = dst = None
+    for level, kind, data in ancdata:
+        if level != socket.IPPROTO_IP:
+            continue
+        if kind in _TTL_TYPES:
+            if len(data) >= 4:  # Linux: an int
+                ttl = struct.unpack("=i", data[:4])[0]
+            elif len(data) == 1:  # the BSDs: one byte
+                ttl = data[0]
+        elif kind == IP_PKTINFO and len(data) >= 12:
+            dst = socket.inet_ntoa(data[8:12])
+    if ttl != LINK_TTL:
+        return "off_link"
+    if dst != MDNS_GROUP:
+        return "unicast"
+    return ""
 
 
 class MdnsConnector(SettingsMixin):
@@ -91,11 +122,15 @@ class MdnsConnector(SettingsMixin):
         self._lock = threading.Lock()  # the cache, its IP index and the counters
         self._cache: dict[str, _Entry] = {}  # mac -> entry, in the order last heard (oldest first)
         self._by_ip: dict[str, str] = {}  # ip -> the mac whose entry holds it
-        self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "wrong_port", "dropped_rate", "errors"), 0)
+        self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "wrong_port", "off_link", "unicast",
+                                      "dropped_rate", "errors"), 0)
         self._joined = 0  # interfaces the group was joined on by the current socket
         self._window = -1  # the second the rate budget counts in
         self._in_window = 0
         self._warned: dict[str, float] = {}  # source ip -> clock of its last malformed-packet warning
+        self._warn_since = -WARN_INTERVAL  # clock when the current window of WARN_BUDGET warnings started
+        self._warn_count = 0  # warnings logged in that window
+        self._link_warned = False  # the "cannot check the sender's link" warning was logged
         self._state = threading.Lock()  # starting and stopping the listener
         self._stop = threading.Event()
         self._sock: Any = None
@@ -147,7 +182,11 @@ class MdnsConnector(SettingsMixin):
                 try:
                     mreq = group + socket.inet_aton(str(ipaddress.IPv4Address(self.interface)))
                 except ValueError:  # a name: struct ip_mreqn (group, local address any, interface index)
-                    mreq = struct.pack("=4s4si", group, any_addr, socket.if_nametoindex(self.interface))
+                    try:
+                        index = socket.if_nametoindex(self.interface)
+                    except OSError:
+                        raise ConnectorError(f"mdns: no interface named {self.interface}") from None
+                    mreq = struct.pack("=4s4si", group, any_addr, index)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
                 joined = 1
             else:
@@ -186,22 +225,46 @@ class MdnsConnector(SettingsMixin):
                 sock = self._socket_factory()
             except OSError as e:
                 raise ConnectorError(f"mdns: cannot listen on {MDNS_PORT} ({_errno_text(e)})") from None
+            checked = self._link_options(sock)
             # a new event per thread: a listener that outlived close()'s join must not be woken up again
             self._stop = threading.Event()
             self._sock = sock
-            self._thread = threading.Thread(target=self._run, args=(sock, self._stop), name=f"mdns-{self.name}",
-                                            daemon=True)
+            self._thread = threading.Thread(target=self._run, args=(sock, self._stop, checked),
+                                            name=f"mdns-{self.name}", daemon=True)
             self._thread.start()
+
+    def _link_options(self, sock: Any) -> bool:
+        """Ask for each packet's TTL and destination address (RFC 6762 11). False when the OS refuses: the listener
+        then uses recvfrom() and accepts any source, after one warning."""
+        try:
+            if IP_RECVTTL is None or IP_PKTINFO is None or not hasattr(sock, "recvmsg"):
+                raise OSError("not supported on this system")
+            sock.setsockopt(socket.IPPROTO_IP, IP_RECVTTL, 1)
+            sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
+        except OSError as e:
+            if not self._link_warned:
+                self._link_warned = True
+                log.warning("mdns: cannot check the sender's link; accepting any source")
+            log.debug("connector %s: link checks unavailable (%s)", self.name, _errno_text(e))
+            return False
+        return True
 
     def _count(self, key: str) -> None:
         with self._lock:
             self._counts[key] += 1
 
-    def _run(self, sock: Any, stop: threading.Event) -> None:
-        """The listener: receive until stopped. No exception ends it; each one is counted in "errors"."""
+    def _run(self, sock: Any, stop: threading.Event, checked: bool = False) -> None:
+        """The listener: receive until stopped. No exception ends it; each one is counted in "errors". With
+        `checked`, each packet comes with its TTL and destination, and one from off the link or sent unicast is
+        rejected."""
         while not stop.is_set():
             try:
-                data, addr = sock.recvfrom(RECV_SIZE)
+                if checked:
+                    data, ancdata, _flags, addr = sock.recvmsg(RECV_SIZE, ANC_SIZE)
+                    reject = _link_reject(ancdata)
+                else:
+                    data, addr = sock.recvfrom(RECV_SIZE)
+                    reject = ""
             except TimeoutError:  # socket.timeout
                 continue
             except Exception:  # noqa: BLE001 - a closed or broken socket; never let it end the thread unasked
@@ -214,18 +277,22 @@ class MdnsConnector(SettingsMixin):
             if stop.is_set():
                 break
             try:
-                self._handle(data, addr)
+                self._handle(data, addr, reject)
             except Exception:  # noqa: BLE001 - one bad packet or a failing device_ips() must not end the thread
                 self._count("errors")
                 log.debug("connector %s: packet not handled", self.name, exc_info=True)
 
     # --- what is heard -----------------------------------------------------------------------------------------
 
-    def _handle(self, data: bytes, addr: Any) -> None:
-        """One received packet: the rate budget, the parse, then every name it carries."""
+    def _handle(self, data: bytes, addr: Any, reject: str = "") -> None:
+        """One received packet: the link checks (`reject` names the one it failed), the rate budget, the parse,
+        then every name it carries."""
         second = int(self._clock())
         with self._lock:
             self._counts["packets"] += 1
+            if reject:
+                self._counts[reject] += 1
+                return
             if not (isinstance(addr, tuple) and len(addr) > 1 and addr[1] == MDNS_PORT):
                 self._counts["wrong_port"] += 1  # RFC 6762 6: a response not from port 5353 is not mDNS
                 return
@@ -256,8 +323,19 @@ class MdnsConnector(SettingsMixin):
             if len(self._warned) >= MAX_WARNED:
                 self._warned.clear()
             self._warned[source] = now
-        log.warning("connector %s: malformed mDNS packet from %s (further ones from it are not logged for an hour)",
-                    self.name, source)
+            # a budget for all sources together: many sources must not flood the log either
+            if now - self._warn_since >= WARN_INTERVAL:
+                self._warn_since, self._warn_count = now, 0
+            self._warn_count += 1
+            count = self._warn_count
+        if count < WARN_BUDGET:
+            log.warning("connector %s: malformed mDNS packet from %s (further ones from it are not logged for an "
+                        "hour)", self.name, source)
+        elif count == WARN_BUDGET:
+            log.warning("connector %s: malformed mDNS packet from %s; further malformed packets are logged at DEBUG "
+                        "for an hour", self.name, source)
+        else:
+            log.debug("connector %s: malformed mDNS packet from %s", self.name, source)
 
     def _drop(self, mac: str) -> None:
         """Remove one cache entry and its IP index. Called with the lock held."""
@@ -316,7 +394,12 @@ class MdnsConnector(SettingsMixin):
         sightings = [Sighting(mac=mac, source=self.name, kind="scan", presence=False, observed_at=now,
                               hostname=e.hostname, label=e.label) for mac, e in entries]
         # the counters cover the time since the previous collect()
-        return Batch(sightings=sightings, stats={"names": len(sightings), "joined": self._joined, **counts})
+        stats = {"names": len(sightings), "joined": self._joined, **counts}
+        if not sightings:
+            # an empty cache (just started, or nothing heard for MAX_AGE_DAYS) is no evidence that a label was
+            # removed: the host keeps the stored labels
+            stats["labels_unavailable"] = 1
+        return Batch(sightings=sightings, stats=stats)
 
     def close(self) -> None:
         with self._state:

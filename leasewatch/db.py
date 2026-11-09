@@ -639,9 +639,9 @@ class Database:
             if new_note is not None and new_note != old_note:
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
                           (now, mac, "note", f"{len(old_note)} -> {len(new_note)} chars{by}"))
-            if tags_change:
+            if tags_change:  # both sides in full: at most TAGS_MAX tags of TAG_LEN_MAX characters (199 with the commas)
                 c.execute("INSERT INTO events(ts,mac,kind,detail) VALUES(?,?,?,?)",
-                          (now, mac, "tags", f"{old_tags[:80] or '(none)'} -> {new_tags[:80] or '(none)'}{by}"))
+                          (now, mac, "tags", f"{old_tags or '(none)'} -> {new_tags or '(none)'}{by}"))
         return dict(c.execute("SELECT * FROM devices WHERE mac=?", (mac,)).fetchone()), ack_change or arch_change
 
     def stats(self, new_days: int) -> dict:

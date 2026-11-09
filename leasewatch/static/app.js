@@ -338,12 +338,12 @@
     }
     let more = null;
     if (shown.length < list.length) {
-      const next = list.find(t => !shown.includes(t)).tag; // not list[shown.length]: an active tag from beyond the cap is in shown
+      const before = new Set(shown.map(s => s.tag)); // the row is plain tags, then owners: the first new chip in row order, not the next in rank
       more = document.createElement("button");
       more.type = "button"; more.className = "chip toggle"; more.id = "tagMore"; more.textContent = t("chip.more", { n: list.length - shown.length });
       more.title = t("chip.show_all");
       // the button goes with the click: the focus moves to the first chip it brought in
-      more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box).find(c => c.dataset.tag === next)?.focus(); };
+      more.onclick = () => { state.tagsAll = true; renderTags(); $$(".chip[data-tag]", box).find(c => !before.has(c.dataset.tag))?.focus(); };
       box.appendChild(more);
       if (fe?.id === "tagMore") more.focus();
     } else if (fe?.id === "tagMore") chips[0]?.focus();
@@ -705,7 +705,7 @@
     const row = w => {
       const first = since && Math.abs(w.first_seen - since) <= poll ? t("drawer.wifi_since", { when: abs(since) }) : abs(w.first_seen);
       const last = d?.online && d.wifi_ssid && d.wifi_ssid === w.ssid ? t("row.now") : abs(w.last_seen);
-      const title = t("drawer.wifi_time_title", { h: (w.seconds_seen / 3600).toLocaleString(lang, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), polls: w.polls_seen });
+      const title = t("drawer.wifi_time_title", { h: (w.seconds_seen / 3600).toLocaleString(lang, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), polls: t("drawer.wifi_polls", { n: w.polls_seen }) });
       return `<tr><td>${esc(w.ssid)}</td><td>${esc(first)}</td><td>${esc(last)}</td><td title="${esc(title)}">${esc(durText(w.seconds_seen))}</td><td>${esc(w.last_ap || "–")}</td></tr>`;
     };
     return `<h3>${esc(t("drawer.wifi_history"))}</h3>

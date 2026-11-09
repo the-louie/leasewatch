@@ -24,6 +24,7 @@ FIELDS = ("name", "note", "acked", "archived", "watch", "tags")
 MAX_BYTES = 1024 * 1024  # the export of a large home network is well below this
 MAX_ROWS = 20_000
 MAX_LISTED = 10  # unknown MACs, and apart from them duplicates and skipped lines, printed after the summary
+SKIP_REASON_MAX = 80  # characters of a skipped line's reason ("…" ends a longer one)
 _TRUE = ("1", "true", "yes")
 _FALSE = ("0", "false", "no")
 _SEPARATORS = ";\r\n"  # the places _csv_cell in web.py guards besides the cell start
@@ -170,7 +171,9 @@ def parse_csv(data: str | bytes, fields: Iterable[str] = FIELDS) -> ParsePlan:
                     except ValueError:
                         raise ValueError(f"{f} is {v[:20]!r}, not 0 or 1") from None
         except ValueError as e:
-            plan.bad.append((start, str(e)))
+            # a refused tag is named in full by normalize_tags: cut like the other reasons, which quote 20-40 characters
+            reason = str(e)
+            plan.bad.append((start, reason if len(reason) <= SKIP_REASON_MAX else reason[:SKIP_REASON_MAX - 1] + "…"))
             continue
         plan.rows.append(row)
     return plan

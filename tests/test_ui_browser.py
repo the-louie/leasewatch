@@ -774,6 +774,14 @@ class BrowserTagsTest(_BrowserCase):
         self.assertEqual((d["chips"], d["more"]), (self._plain_first(self.TAGS14[:12]), "+2 more"))
         self.assertEqual(d["focus"], "tagMore")
 
+    def test_more_focuses_the_first_new_chip_in_row_order(self) -> None:
+        r = self.result("tags")
+        self.assertEqual(r["owner_capped"]["more"], "+2 more")
+        self.assertNotIn("owner:bob", r["owner_capped"]["chips"])
+        chips = r["owner_all"]["chips"]
+        self.assertEqual(chips[-2:], ["owner:alexandra-long", "owner:bob"])  # the owners close the row
+        self.assertEqual(r["owner_all"]["focus"], "printer-a")  # the new plain chip, not the owner that ranks first of the two
+
     def test_chip_filters_and_reload_keeps_it(self) -> None:
         r = self.result("tags")
         for name in ("filtered", "reloaded"):
@@ -846,6 +854,14 @@ class BrowserIp6Test(_BrowserCase):
         self.assertEqual((r["copied"], r["open_after_copy"], r["copied_cls"]), ([self.V6], False, True))
         self.assertEqual(r["title_after"], self.V6)
 
+    def test_copied_bubble_keeps_the_text_cut(self) -> None:
+        r = self.result("ipv6")
+        look = r["copied_look"]  # the column's IPv6 line while "Copied" shows
+        self.assertEqual((look["cut"], look["width_ok"], look["text_overflow"], look["bubble"]), (True, True, "ellipsis", '"Copied"'), look)
+        self.assertNotEqual(look["overflow"], "visible", look)
+        look = r["meta_enter"]["look"]  # the phone meta line's IPv6 shows the mark too
+        self.assertEqual((look["cut"], look["width_ok"], look["text_overflow"], look["bubble"]), (True, True, "ellipsis", '"Copied"'), look)
+
     def test_phone_layout_keeps_two_lines_and_no_sideways_scroll(self) -> None:
         r = self.result("ipv6")
         for width in ("400", "360"):
@@ -861,7 +877,8 @@ class BrowserIp6Test(_BrowserCase):
     def test_focused_meta_address_survives_a_rebuild_and_enter_copies(self) -> None:
         r = self.result("ipv6")
         self.assertTrue(r["meta_focus"]["restored"], r["meta_focus"])
-        self.assertEqual(r["meta_enter"], {"copied": [self.V6], "open": False, "cls": True, "title": "Copied"}, r["meta_enter"])
+        self.assertEqual({k: v for k, v in r["meta_enter"].items() if k != "look"},
+                         {"copied": [self.V6], "open": False, "cls": True, "title": "Copied"}, r["meta_enter"])
 
 
 class BrowserLangSvTest(_BrowserCase):

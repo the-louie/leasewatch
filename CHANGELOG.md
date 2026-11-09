@@ -18,6 +18,9 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - Swedish: the page is shown in Swedish when the browser's language is Swedish, or with `?lang=sv`, or with `UI_LANG=sv`; `UI_LANG=en` pins English (default `auto`). Event details, mails, CSV headers and the API stay English.
 
 ### Changed
+- The firewall's hostname (lease or ARP) ranks before the controller's: with `HOSTNAMES=1` the controller's hostname and vendor fill gaps and never replace a firewall name.
+- A device that only a controller or a name source lists gets no row of its own: those sources enrich devices the firewall knows.
+- `LW_CONNECTORS` needs at least one connector that produces sightings and is neither a controller nor a name source.
 - A failed source holds private-MAC merges back only if it listed DHCP leases when it last answered, so a second firewall that lists ARP only, or a name source, no longer does. A controller or a name-only source never fails the poll and never holds the baseline.
 - The device-list and event-list ETag also follows `PRAGMA data_version`, so a write from another process (`import-csv`, `reset-baseline`, a sqlite3 shell) is seen at the next refresh instead of the next poll write. This fixes the staleness, not the rate: a steady poll rewrites `last_seen`/`last_online` of every listed device, so about half of the refreshes at 60 s refresh and 120 s polls still revalidate with a full body.
 - A sighting's `ip` that is not a dotted IPv4 address is emptied by the host, and the merge reads an empty `ip` as unknown, so a device keeps its last IPv4 address; only a device none of whose sightings has an IPv4 address ends up with no IP.
@@ -26,6 +29,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Fixed
 - The gzip HEAD test freezes the clock, so it no longer fails now and then.
+- The MQTT keepalive allows for the notification channels' time after a poll; a crashed poll counts toward the status going offline.
 
 ## 1.4.0 (2026-11-08)
 

@@ -20,6 +20,9 @@ from .connectors import (_URL_BAD_CHAR_RE, NAME_RE, InstanceSpec, instance_probl
 ENV_PREFIX = "LW_CONNECTOR__"
 SMTP_PORTS = {"starttls": 587, "tls": 465, "none": 25}  # SMTP_TLS -> default SMTP_PORT
 MAX_SECRET_FILE = 64 * 1024  # bytes of a <KEY>_FILE; a secret is a few hundred at most
+# a sighting producer of one of these roles is secondary: its sightings count, but its failure does not fail the
+# poll, hold the baseline back or make the merge lease-blind (a Wi-Fi controller, a listen-only name source)
+SECONDARY_ROLES = frozenset({"controller", "names"})
 
 log = logging.getLogger("leasewatch.config")
 
@@ -636,9 +639,12 @@ class Config:
         for spec in self.connector_specs:
             problems += instance_problems(spec)
         # without the list at all, "LW_CONNECTORS is not set" already says it
-        if self.connectors_listed and not any("sighting" in cls.describe().produces for sp in self.connector_specs
-                                              for cls in (registry().get(sp.type),) if cls):
-            problems.append("LW_CONNECTORS: at least one connector must produce sightings (e.g. type opnsense)")
+        # a controller or a name source alone cannot fail a poll or hold a lease, so it is no primary source
+        if self.connectors_listed and not any("sighting" in info.produces and not frozenset(info.roles) & SECONDARY_ROLES
+                                              for sp in self.connector_specs for cls in (registry().get(sp.type),) if cls
+                                              for info in (cls.describe(),)):
+            problems.append("LW_CONNECTORS: at least one connector must produce sightings and not be a controller or "
+                            "a name source (e.g. type opnsense)")
         return problems
 
     def _flag_problems(self) -> list[str]:

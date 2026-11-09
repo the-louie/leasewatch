@@ -91,13 +91,14 @@ class ConnectTests(PubCase):
         self.assertTrue(self.broker.wait_published(1))
         self.assertEqual(self.broker.published[0][:4], ("lw/status", b"online", 1, True))
         self.assertEqual(self.broker.will, ("lw/status", b"offline", 1, True))
-        self.assertEqual(self.broker.keepalive, 240)  # 2 x (POLL_SECONDS 60 + the connector's default timeout 60)
+        # 2 x (POLL_SECONDS 60 + the connector's default timeout 60 + the notification channels' timeouts 50)
+        self.assertEqual(self.broker.keepalive, 340)
         self.assertEqual(self.broker.client_id, "leasewatch-example-home")
         self.assertEqual([s[:2] for s in self.broker.subscriptions], [("homeassistant/status", 1)])
 
     def test_keepalive_covers_a_slow_poll(self) -> None:
         os.environ.update(POLL_SECONDS="15", LW_CONNECTOR__FW1__TIMEOUT="60")
-        self.assertEqual(self.make().keepalive, 150)
+        self.assertEqual(self.make().keepalive, 250)
         os.environ.update(LW_CONNECTOR__FW1__TIMEOUT="3600", POLL_SECONDS="86400")
         self.assertEqual(self.make().keepalive, 0xFFFF)
 
@@ -336,10 +337,10 @@ class StatusTests(PubCase):
 
     def test_ping_if_idle(self) -> None:
         sent = self.pub.client.last_sent
-        self.clock.now = sent + 119  # keepalive 240: idle for less than 120 s
+        self.clock.now = sent + 169  # keepalive 340: idle for less than 170 s
         self.pub.ping_if_idle()
         self.assertEqual(self.broker.pings, 0)
-        self.clock.now = sent + 120
+        self.clock.now = sent + 170
         self.pub.ping_if_idle()
         self.assertTrue(self.broker.wait_for(lambda: self.broker.pings == 1))
         self.pub.ping_if_idle()  # the PINGREQ itself counts as sent

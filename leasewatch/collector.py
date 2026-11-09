@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping
 
-from .config import Config
+from .config import SECONDARY_ROLES, Config
 from .db import Database, db_error_text
 from .connectors import (Batch, ConnectorError, HostContext, InstanceSpec, build_instance, instance_problems,
                          instances_context, registry)
@@ -41,9 +41,6 @@ SKIPPED = "previous collection has not completed; skipped"
 SOURCE_DOWN_POLLS = 3  # failed polls in a row before an instance gets a source_down event (6 min at default polls)
 ALERT_KINDS = ("source_down", "source_up")  # the event kinds MAIL_ON_SOURCE sends
 WATCH_KINDS = ("offline", "online", "ip", "vlan", "port", "wifi")  # MAIL_ON_WATCH sends these of watched devices
-# a sighting producer of one of these roles is secondary: its sightings count, but its failure does not fail the
-# poll, hold the baseline back or make the merge lease-blind (a Wi-Fi controller, a listen-only name source)
-SECONDARY_ROLES = frozenset({"controller", "names"})
 ALERT_BATCH = 50  # events per alert message; the rest go at the next poll
 ALERT_MARK = "notify.alert_event_id"  # meta: the events up to this id were considered (sent, or no alert then)
 # one event: by its kind, with the error or the outage length from its detail (the subject cut to 80 characters)
@@ -1020,8 +1017,10 @@ class Collector:
         self._write_notify_state()
 
     def _primary(self, producers: list[str]) -> list[str]:
-        """The primary sighting producers: those without a secondary role; all of them when every one has one."""
-        return [n for n in producers if not self._runs[n].roles & SECONDARY_ROLES] or producers
+        """The primary sighting producers: the enabled ones without a secondary role; every enabled one when each has
+        one (a disabled primary next to an answering controller), so the poll proceeds. Empty: none is enabled."""
+        enabled = [n for n in producers if not self._runs[n].disabled]
+        return [n for n in enabled if not self._runs[n].roles & SECONDARY_ROLES] or enabled
 
     def _sightings(self, producers: list[str], primary: list[str]
                    ) -> tuple[dict[str, object], dict[str, str], dict[str, Batch]] | dict:
@@ -1185,6 +1184,10 @@ class Collector:
                     log.debug("poll cut off by shutdown")  # the database was closed under a poll that outlived the join
                     break
                 self._poll_crashed(e)
+                try:  # a crashed poll is a failed one for MQTT too: status offline at SOURCE_DOWN_POLLS, keepalive
+                    self._mqtt_step(ok=False)
+                except Exception as e2:  # never ends the loop
+                    log.debug("mqtt after a failed poll: %s", e2)
             else:
                 # a returned {"ok": False} (every producer failed) is no recovery: the spell stays open and its
                 # count unchanged (only a crash counts as a failed poll here)

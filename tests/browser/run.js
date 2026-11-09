@@ -602,6 +602,10 @@ const scenarios = {
     res.copied = await page.evaluate(() => window.__copied.slice());
     res.open_after_copy = await drawerOpen(page);
     res.copied_cls = await page.$eval(`${row(A)} .c-ip .cp.ip6`, e => e.classList.contains('copied'));
+    // while "Copied" shows the text stays cut (ellipsis, nothing runs into the next column) and the bubble is there
+    res.copied_look = await page.$eval(`${row(A)} .c-ip .cp.ip6`, e => { const cs = getComputedStyle(e), r = e.getBoundingClientRect();
+      return { cut: e.scrollWidth > e.clientWidth, width_ok: r.width <= 160.5, overflow: cs.overflowX, text_overflow: cs.textOverflow,
+        bubble: getComputedStyle(e, '::after').content }; });
     await page.waitForFunction(s => !document.querySelector(s).classList.contains('copied'), {}, `${row(A)} .c-ip .cp.ip6`);
     res.title_after = await page.$eval(`${row(A)} .c-ip .cp.ip6`, e => e.title);
     // phone widths: the meta line carries the address, in at most two lines, and nothing scrolls sideways
@@ -638,7 +642,10 @@ const scenarios = {
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => window.__copied.length === 1);
     res.meta_enter = { copied: await page.evaluate(() => window.__copied.slice()), open: await drawerOpen(page),
-      cls: await page.$eval(sel, e => e.classList.contains('copied')), title: await page.$eval(sel, e => e.title) };
+      cls: await page.$eval(sel, e => e.classList.contains('copied')), title: await page.$eval(sel, e => e.title),
+      look: await page.$eval(sel, e => { const cs = getComputedStyle(e);
+        return { cut: e.scrollWidth > e.clientWidth, width_ok: e.getBoundingClientRect().width <= 160.5, text_overflow: cs.textOverflow,
+          bubble: getComputedStyle(e, '::after').content }; }) };
     return res;
   },
   // archive from the drawer hides the row; the "Archived" filter shows it; restore brings it back (changes server state)
@@ -1181,6 +1188,16 @@ const scenarios = {
     await page.keyboard.press('Enter');
     await waitUrl(null);
     res.far_off = await cap();
+    // 14 tags with an owner among the two left out: the row is plain tags, then owners, so "+2 more" focuses the first new
+    // chip in row order (printer-a), not the better ranked owner:bob that sits at the end of the row
+    await post([[W, 'energy-monitoring-on, firmware-pinned-v2, guest-network-allowed, kids-bedtime-schedule, living-room-speaker-01, media-streaming-box, owner:alexandra-long'],
+      [A, 'owner:bob'], [B, 'alpha-1, alpha-2, alpha-3, alpha-4, alpha-5, printer-a']]);
+    await page.goto(new URL(page.url()).origin + '/', { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelector('#tagMore') && document.querySelectorAll('#tags .chip[data-tag]').length === 12);
+    res.owner_capped = await cap();
+    await page.click('#tagMore');
+    await page.waitForFunction(() => !document.querySelector('#tagMore'));
+    res.owner_all = await cap();
     // only plain tags left: the row looks as before, no headings
     await post([[A, 'iot'], [B, ''], [W, 'speaker']]);
     await page.evaluate(() => window.__lwReload());

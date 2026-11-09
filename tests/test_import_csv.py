@@ -64,6 +64,13 @@ class ParseTests(unittest.TestCase):
         plan = importer.parse_csv(f'mac,note\n{A},"a\nb"\nbad,x\n')
         self.assertEqual(plan.bad, [(4, "bad MAC 'bad'")])
 
+    def test_long_refused_tag_is_cut(self):
+        plan = importer.parse_csv(f"mac,tags\n{A},{'x' * 5000}!\n")
+        reason = plan.bad[0][1]
+        self.assertEqual(len(reason), importer.SKIP_REASON_MAX)
+        self.assertTrue(reason.startswith("tag xxx"))
+        self.assertTrue(reason.endswith("x…"))
+
 
 class ImportCsvTests(unittest.TestCase):
     def setUp(self):

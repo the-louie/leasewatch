@@ -27,9 +27,14 @@ from datetime import UTC, datetime
 from .config import Config
 from .db import Database
 from .mqtt import Client, MqttError
-from .notify import _tls_context
+from .notify import SmtpChannel, WebhookChannel, _tls_context
 
 log = logging.getLogger("leasewatch.mqtt_pub")
+
+# seconds the notifications after the MQTT step may take: the sum of the channels' own timeouts (Mailgun's request
+# 20 s, SMTP 20 s, webhook 10 s; MQTT sends are traffic of their own). A failing channel waits in its backoff, so the
+# alert and the new-device message do not each pay it
+NOTIFY_SECONDS = 20 + int(SmtpChannel.timeout + WebhookChannel.timeout)
 
 META_PUBLISHED = "mqtt.published"
 META_CLEARED = "mqtt.discovery_cleared"
@@ -65,9 +70,10 @@ class Publisher:
         self.version = version
         self.clock = clock
         self.base = cfg.mqtt_topic
-        # two polls, each as long as the slowest connector may take: a slow poll must not let the broker fire the Will
+        # two polls, each as long as the slowest connector may take plus the notifications sent after the MQTT step:
+        # a slow poll must not let the broker fire the Will
         slowest = max((s.timeout for s in cfg.instances), default=60)
-        self.keepalive = min(2 * (cfg.poll_seconds + slowest), 0xFFFF)
+        self.keepalive = min(2 * (cfg.poll_seconds + slowest + NOTIFY_SECONDS), 0xFFFF)
         self.client: Client | None = None
         self.full = True
         self.birth_seen = False

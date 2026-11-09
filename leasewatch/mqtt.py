@@ -46,6 +46,9 @@ MAX_REMAINING = 268_435_455  # the largest Remaining Length four bytes can carry
 # bytes of one incoming packet: the broker only sends back what was subscribed to (small status messages); a larger
 # announced length is refused instead of buffering up to 256 MB
 MAX_INCOMING = 1024 * 1024
+# PUBLISHes kept for poll_incoming(): beyond either limit the oldest is dropped (Client.dropped_incoming counts them)
+MAX_KEPT = 64
+MAX_KEPT_BYTES = 1024 * 1024
 _RECV_SIZE = 65536
 _POLL_READS = 64  # recv calls per poll_incoming(): a busy subscription cannot keep the caller in there for ever
 _TYPES_IN = {CONNACK, PUBLISH, PUBACK, SUBACK, UNSUBACK, PINGRESP}  # what a broker may send a client that never uses QoS 2
@@ -139,6 +142,11 @@ def _parse_publish(flags: int, body: bytes) -> tuple[str, bytes, int, int]:
     return topic, bytes(body[pos:]), qos, pid
 
 
+def _kept_size(topic: str, payload: bytes) -> int:
+    """The bytes one kept PUBLISH counts toward MAX_KEPT_BYTES: its topic (UTF-8) and payload."""
+    return len(topic.encode("utf-8")) + len(payload)
+
+
 class Client:
     """One connection to one broker. Not thread-safe: the caller serialises calls."""
 
@@ -166,6 +174,8 @@ class Client:
         self._sock: socket.socket | None = None
         self._rbuf = bytearray()
         self._incoming: list[tuple[str, bytes]] = []
+        self._incoming_bytes = 0  # topic and payload bytes in _incoming
+        self.dropped_incoming = 0  # PUBLISHes dropped (oldest first) beyond MAX_KEPT / MAX_KEPT_BYTES
         self._pid = 0
         self._last_sent = 0.0
 
@@ -306,7 +316,7 @@ class Client:
                     sock.settimeout(self.timeout)
             while (pkt := self._take_packet()) is not None:
                 self._dispatch(*pkt)
-        out, self._incoming = self._incoming, []
+        out, self._incoming, self._incoming_bytes = self._incoming, [], 0
         return out
 
     # --- internals -----------------------------------------------------------
@@ -419,6 +429,12 @@ class Client:
             if qos:
                 self._send(_packet(PUBACK, 0, pid.to_bytes(2, "big")))
             self._incoming.append((topic, payload))
+            self._incoming_bytes += _kept_size(topic, payload)
+            # a flood while the caller waits for an ack (or between two polls) must not grow the buffer without end
+            while len(self._incoming) > MAX_KEPT or self._incoming_bytes > MAX_KEPT_BYTES:
+                t, p = self._incoming.pop(0)
+                self._incoming_bytes -= _kept_size(t, p)
+                self.dropped_incoming += 1
         elif ptype == CONNACK:
             raise self._fail("mqtt: bad packet (unexpected CONNACK)")
         # PINGRESP, and a PUBACK/SUBACK/UNSUBACK nobody waits for: consumed

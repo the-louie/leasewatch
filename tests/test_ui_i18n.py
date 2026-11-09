@@ -14,7 +14,7 @@ PARAM = re.compile(r"\{(\w+)\}")
 # A Swedish value equal to its English one is allowed when it has no lowercase letter outside {params}, or when every
 # word in it is one of these
 NEUTRAL_WORDS = {"IPv6", "Wi-Fi", "dBm", "min", "h", "d", "Status", "Port", "Online", "Offline", "online", "offline",
-                 "client-id", "iot", "owner", "alex", "leases"}
+                 "client-id", "iot", "owner", "alex", "lease", "leases"}
 # the t() calls whose key is computed: t's own definition and kindText (both "key"), and applyI18n (the marks)
 COMPUTED_KEY_ARGS = {"key", "el.dataset.i18n", "pair.slice(i + 1"}
 

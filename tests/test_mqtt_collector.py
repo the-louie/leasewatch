@@ -12,6 +12,7 @@ import os
 import socket
 import threading
 import time
+import unittest.mock
 
 import _env  # noqa: F401  # the repo root on the path and the network guard, also when this module runs on its own
 from _case import EnvTmpCase
@@ -115,6 +116,24 @@ class PollTests(MqttCollectorCase):
         self.assertEqual(len([t for t in topics if t.endswith("/state")]), len(MACS))
         self.assertIn("lw/stats", topics)
         self.assertEqual(self.broker.connections, 1)
+
+    def test_crashed_polls_count_toward_offline(self) -> None:
+        self.poll()
+        start = len(self.broker.published)
+
+        class Stop(threading.Event):  # set after `left` waits, so loop() runs that many polls without sleeping
+            left = SOURCE_DOWN_POLLS
+
+            def wait(self, timeout: float | None = None) -> bool:
+                self.left -= 1
+                if self.left <= 0:
+                    self.set()
+                return self.is_set()
+
+        with unittest.mock.patch.object(self.col, "_commit", side_effect=RuntimeError("synthetic")), \
+                self.assertLogs("leasewatch.collector", "ERROR"):
+            self.col.loop(Stop())
+        self.assertEqual(self.sent(start), [("lw/status", b"offline")])
 
     def test_broker_down_warns_once_and_records_not_ok(self) -> None:
         self.use_port(free_port())

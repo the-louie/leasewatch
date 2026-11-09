@@ -541,10 +541,27 @@ out.v = [rawText("2 leases, 1 arp, 3 reservations, 4 ndp, 0 leases6, ndp unavail
          rawText("2 leases, 1 arp, junk")];
 """)
         self.assertEqual(out["v"], [
-            "2 leases, 1 ARP entries, 3 reservations, 4 NDP entries, 0 DHCPv6 leases, NDP table unavailable, "
+            "2 leases, 1 ARP entry, 3 reservations, 4 NDP entries, 0 DHCPv6 leases, NDP table unavailable, "
             "DHCPv6 leases unavailable",
-            "0 leases, 12 ARP entries", "2 leases, 1 ARP entries, 0 NDP entries, DHCPv6 leases unavailable", "arp 5", "",
+            "0 leases, 12 ARP entries", "2 leases, 1 ARP entry, 0 NDP entries, DHCPv6 leases unavailable", "arp 5", "",
             "2 leases, 1 arp, junk"])
+
+    # a count of 1 takes the singular in both languages (Swedish "1 reservation", English "1 ARP entry")
+    def test_status_counts_singular_and_plural(self) -> None:
+        for lang, one, two in (
+            ("en", "1 lease, 1 ARP entry, 1 reservation, 1 NDP entry, 1 DHCPv6 lease",
+             "2 leases, 2 ARP entries, 2 reservations, 2 NDP entries, 2 DHCPv6 leases"),
+            ("sv", "1 lease, 1 ARP-post, 1 reservation, 1 NDP-post, 1 DHCPv6-lease",
+             "2 leases, 2 ARP-poster, 2 reservationer, 2 NDP-poster, 2 DHCPv6-leases"),
+        ):
+            with self.subTest(lang=lang):
+                out = _run([], f'location.search = "?lang={lang}";' + r"""//--
+out.v = [rawText("1 leases, 1 arp, 1 reservations, 1 ndp, 1 leases6"), rawText("2 leases, 2 arp, 2 reservations, 2 ndp, 2 leases6"),
+         t("drawer.wifi_time_title", { h: "1,00", polls: t("drawer.wifi_polls", { n: 1 }) }),
+         t("drawer.wifi_time_title", { h: "2,00", polls: t("drawer.wifi_polls", { n: 2 }) })];
+""")
+                polls = {"en": ("1,00 h in 1 poll", "2,00 h in 2 polls"), "sv": ("1,00 h på 1 avläsning", "2,00 h på 2 avläsningar")}[lang]
+                self.assertEqual(out["v"], [one, two, *polls])
 
     # the status line, the counts and the chip titles in English: a plural count says "1 device", not "1 devices"
     def test_english_counts_and_status(self) -> None:

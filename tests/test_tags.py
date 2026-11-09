@@ -102,6 +102,13 @@ class TagsApiTests(_Base):
         self.assertEqual(self.events()[-1], ("tags", "iot,owner:alex -> (none) (by 127.0.0.1)"))
         self.assertEqual(self.stored(), "")
 
+    def test_event_holds_the_longest_tags_in_full(self) -> None:
+        full = ",".join(f"{c}" * 24 for c in "abcdefgh")  # 8 tags of 24 characters: 199 characters
+        self.assertEqual(len(full), 199)
+        self.assertEqual(self.post(body={"tags": full})[0], 200)
+        self.post(body={"tags": full.replace("a", "z")})
+        self.assertEqual(self.events()[-1], ("tags", f"{full} -> {full.replace('a', 'z')} (by 127.0.0.1)"))
+
     def test_other_fields_leave_tags_alone(self) -> None:
         self.post(body={"tags": "iot"})
         self.post(body={"name": "tv", "acked": True})

@@ -41,6 +41,12 @@ a socket also hears the groups that other sockets joined on other interfaces, so
 connector clears `IP_MULTICAST_ALL` to hear that interface only. A response whose source port is not 5353 is not
 mDNS (RFC 6762 section 6) and is counted as `wrong_port` without being read.
 
+As RFC 6762 section 11 asks, the listener reads each packet's IP TTL and destination address (`IP_RECVTTL` and
+`IP_PKTINFO`). It accepts only a packet sent to 224.0.0.251 with TTL 255, so a host off the link (a router lowers
+the TTL) or a unicast packet to this host cannot name a device; these are counted as `off_link` and `unicast`. If
+the OS refuses the two options, the connector logs "mdns: cannot check the sender's link; accepting any source"
+once and accepts any source.
+
 ## Running in a container
 
 The default `docker-compose.yml` uses a bridge network. Multicast from the LAN does not arrive on a bridge, so the
@@ -63,15 +69,20 @@ repeated traffic reaches the VLAN the host is on.
   is stored as the sighting's `label`.
 
 Devices announce on their own schedule, and the cache refresh cycle of most responders is about 75 minutes, so the
-first names arrive within an hour or two after the start. They then stay for `MAX_AGE_DAYS`.
+first names arrive within an hour or two after the start. They then stay for `MAX_AGE_DAYS`. The cache is not
+saved, so after a restart the names return within one announcement cycle; while the cache is empty the connector
+reports `labels_unavailable`, and leasewatch keeps the stored labels meanwhile.
 
 The connector keeps one entry per device for `MAX_AGE_DAYS`. An address that moves to another device drops the old
 device's entry. A goodbye (TTL 0) does not remove the name: the name is kept for the full time.
 
 The listener thread starts at the first `check()` or `collect()` and parses at most 200 packets a second; the rest
 are counted as `dropped_rate`. The status counts, reset each poll, are `names`, `packets`, `malformed`,
-`unmapped`, `wrong_port`, `dropped_rate` and `errors`; `joined` is the number of interfaces the group is joined
-on.
+`unmapped`, `wrong_port`, `off_link`, `unicast`, `dropped_rate` and `errors`; `joined` is the number of interfaces
+the group is joined on.
+
+A malformed packet is logged as a WARNING at most once an hour per source address, and at most 10 times an hour in
+total; after that, malformed packets are logged at DEBUG until the hour is over.
 
 A packet with more than 32 questions, more than 16 compression pointers in one name or more than 16 KiB of names
 in total is counted as `malformed`. A packet with an OPCODE or RCODE other than 0 is ignored.
@@ -86,7 +97,8 @@ The names and models of the devices on your LAN are stored like a DHCP hostname 
 - Responses only; the parser reads `A`, `PTR`, `SRV` and `TXT` records. Queries from other hosts are ignored.
 - No SSDP/UPnP and no active probes: it never asks a device anything.
 - A device whose address leasewatch does not know is counted as `unmapped`.
-- Only what reaches the host's network segment is heard (see "Running in a container").
+- Only what reaches the host's network segment is heard (see "Running in a container"), and only multicast
+  packets with TTL 255: a repeater that re-sends with a lower TTL is not heard.
 
 ## Installing
 

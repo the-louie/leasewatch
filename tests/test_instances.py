@@ -166,7 +166,8 @@ class ValidateTests(Base):
 
     def test_one_sighting_producer_required(self):
         p = self.cfg({"LW_CONNECTORS": "x", "LW_CONNECTOR__X__TYPE": "fake"}).validate()
-        self.assertEqual(p, ["LW_CONNECTORS: at least one connector must produce sightings (e.g. type opnsense)"])
+        self.assertEqual(p, ["LW_CONNECTORS: at least one connector must produce sightings and not be a controller or "
+                             "a name source (e.g. type opnsense)"])
         self.assertEqual(self.cfg({"LW_CONNECTORS": "x", "LW_CONNECTOR__X__TYPE": "fakefw"}).validate(), [])
 
     def test_invalid_instance_is_disabled_at_startup(self):

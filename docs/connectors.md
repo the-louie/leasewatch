@@ -88,7 +88,7 @@ One device as one source saw it (an IP, a hostname, a network).
 | `presence` | `bool` | `True` only if the source saw the device on the wire **now** (an ARP entry, a lease the DHCP server marks online, an active controller client). A lease or a reservation alone is `False`. |
 | `observed_at` | `int` | Epoch seconds when you collected it (use `ctx.now()`). Informational in API 1; the merge does not rank by it. |
 | `ip` | `str` | IPv4 address, or `""`. IPv4 only; anything else (IPv6, junk, a leading zero as in `010.0.0.1`) is treated as empty. |
-| `ip6` | `str` | optional (default `""`); the device's IPv6 address as the source gives it. The host normalises it to the compressed lower-case form, drops a `%scope`, and empties a link-local address, an IPv4 or IPv4-mapped value, and anything that does not parse. |
+| `ip6` | `str` | optional (default `""`); the device's IPv6 address as the source gives it. The host normalises it to the compressed lower-case form, drops a `%scope`, and empties a link-local, loopback, unspecified, multicast, site-local or IPv4-embedded address (IPv4-mapped included), and anything that does not parse. |
 | `hostname` | `str` | Or `""`. |
 | `vendor` | `str` | Or `""`. |
 | `network` | `str` | Human interface name (`LAN`, `IOT`); shown as the device's network (the `vlan` column). |
@@ -434,7 +434,9 @@ services:
   the Sighting field `ip6` and `HostContext.device_ips()`. 1.5 also widened the description of `scan` to passive
   discovery; the kind's rank is unchanged. A connector written for 1.4 is unaffected and needs no change. A connector
   that needs `device_ips()` should check `hasattr(ctx, "device_ips")` in `validate()` and name the host version it
-  needs (1.5), because the API version stays 1.
+  needs (1.5), because the API version stays 1. A connector that emits `ip6` needs a 1.5 host: on a 1.4 host the
+  `Sighting(...)` call fails with a TypeError (unexpected keyword). Guard it with `"ip6" in {f.name for f in
+  dataclasses.fields(Sighting)}` or require host 1.5 in your package metadata.
 
   Removing or renaming any of the 15 public names, a record field, a `HostContext` member, a lifecycle method or the
   meaning of a value (`kind`, `link`, `presence`, `present`, the `controller` role), or making something optional

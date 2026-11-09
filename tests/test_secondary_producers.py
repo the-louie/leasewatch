@@ -143,6 +143,66 @@ class Secondary(Base):
         self.assertTrue(col.run_once()["ok"])
         self.assertEqual(db.device(DEV)["label"], "")
 
+    def test_mac_only_the_controller_lists_gets_no_row_until_the_firewall_does(self):
+        col, db = self.build("unifi", rows=[lease(DEV, "10.0.0.5")])
+        self.assertTrue(col.run_once()["ok"])  # the baseline
+        self.wifi = lambda: {DEV: WifiInfo(ssid="HomeNet", hostname="laptop", oui="Acme"),
+                             NEW: WifiInfo(ssid="HomeNet", hostname="tablet", oui="Acme")}
+        res = col.run_once()
+        self.assertEqual((res["ok"], res["new"]), (True, 0))
+        self.assertIsNone(db.device(NEW))
+        self.assertEqual(db.q("SELECT kind FROM events WHERE mac=?", (NEW,)), [])
+        self.client.rows = [lease(DEV, "10.0.0.5"), lease(NEW, "10.0.0.6")]
+        res = col.run_once()
+        self.assertEqual((res["ok"], res["new"]), (True, 1))
+        self.assertEqual(db.device(NEW)["hostname"], "tablet")  # the controller's name as the fallback
+        self.assertEqual([r["kind"] for r in db.q("SELECT kind FROM events WHERE mac=?", (NEW,))], ["new"])
+
+    def test_mac_only_the_name_source_lists_gets_no_row(self):
+        col, db = self.build("names", rows=[lease(DEV, "10.0.0.5")])
+        self.assertTrue(col.run_once()["ok"])
+        self.sec.on_collect = lambda: Batch(sightings=[Sighting(
+            mac=NEW, source="", kind="scan", presence=False, observed_at=0, ip="10.0.0.6", hostname="printer")])
+        self.assertEqual(col.run_once()["new"], 0)
+        self.assertIsNone(db.device(NEW))
+
+    def test_arp_name_stays_when_the_controller_names_the_device_otherwise(self):
+        arp = Fw1Sighting(mac=DEV, ip="10.0.0.5", hostname="pc-arp", vendor="", vlan="LAN", iface="lan", source="arp",
+                          lease_type="", online=True)
+        col, db = self.build("unifi", rows=[arp])
+        self.wifi = lambda: {}  # as before the controller named clients: the firewall's name is stored
+        self.assertTrue(col.run_once()["ok"])
+        self.assertEqual(db.device(DEV)["hostname"], "pc-arp")
+        self.wifi = lambda: {DEV: WifiInfo(ssid="HomeNet", hostname="laptop", oui="Acme")}
+        self.assertTrue(col.run_once()["ok"])
+        self.assertEqual(db.device(DEV)["hostname"], "pc-arp")
+        self.assertEqual(db.q("SELECT kind FROM events WHERE mac=? AND kind='hostname'", (DEV,)), [])
+
+    def test_disabled_primary_next_to_an_answering_secondary(self):
+        # fw2's PORT is out of range, so the instance is disabled at startup: the name source carries the poll
+        col, db = self.collector({"LW_CONNECTORS": "fw2,names", "LW_CONNECTOR__FW2__TYPE": "fakefw2",
+                                  "LW_CONNECTOR__FW2__PORT": "0", "LW_CONNECTOR__NAMES__TYPE": "fakenames"})
+        self.assertTrue(col._runs["fw2"].disabled)
+        col._connectors["names"].on_collect = lambda: Batch(sightings=[Sighting(
+            mac=DEV, source="", kind="scan", presence=False, observed_at=0, ip="10.0.0.5", hostname="printer")])
+        res = col.run_once()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(db.device(DEV)["hostname"], "printer")
+
+    def test_no_enabled_producer_fails_the_poll(self):
+        col, db = self.collector({"LW_CONNECTORS": "fw2", "LW_CONNECTOR__FW2__TYPE": "fakefw2",
+                                  "LW_CONNECTOR__FW2__PORT": "0"})
+        res = col.run_once()
+        self.assertEqual((res["ok"], res["error"]), (False, "no sighting connector is enabled"))
+
+    def test_a_secondary_connector_alone_is_refused(self):
+        msg = ("LW_CONNECTORS: at least one connector must produce sightings and not be a controller or a name source "
+               "(e.g. type opnsense)")
+        self.assertIn(msg, self.cfg({"LW_CONNECTORS": "unifi", **UNIFI_ENV}).validate())
+        self.assertIn(msg, self.cfg({"LW_CONNECTORS": "names", "LW_CONNECTOR__NAMES__TYPE": "fakenames"}).validate())
+        self.assertNotIn(msg, self.cfg({"LW_CONNECTORS": "fw1,names", **FW1,
+                                        "LW_CONNECTOR__NAMES__TYPE": "fakenames"}).validate())
+
     def test_instance_added_later_is_a_suspect_until_it_answers(self):
         col, db = self.collector({"LW_CONNECTORS": "fw1", **FW1}, rows=[lease(DEV, "10.0.0.5", CID)])
         self.assertTrue(col.run_once()["ok"])

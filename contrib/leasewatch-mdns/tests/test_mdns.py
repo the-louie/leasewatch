@@ -34,22 +34,42 @@ _CLOSED = object()
 class FakeSocket:
     """A listen-only stand-in for the multicast socket: recvfrom() blocks on a queue for at most `timeout` seconds
     and then raises socket.timeout, as the real one does after settimeout(1.0). Every transmitting or connecting
-    call is recorded, so a test can assert there was none."""
+    call is recorded, so a test can assert there was none. recvmsg() returns the packet's IP TTL and destination
+    address as the kernel's control messages; with `link_options` False, setsockopt() refuses the options for them."""
 
-    def __init__(self, timeout: float = mc.RECV_TIMEOUT) -> None:
+    def __init__(self, timeout: float = mc.RECV_TIMEOUT, link_options: bool = True) -> None:
         self.timeout = timeout
+        self.link_options = link_options
+        self.options: list[tuple[int, int, object]] = []
         self.inbox: queue.Queue = queue.Queue()
         self.closed = False
         self.sent: list[tuple[str, tuple]] = []
         self.received = 0
 
-    def deliver(self, data: bytes = b"\x00" * 12, src: str = IP_A) -> None:
-        self.inbox.put((data, (src, 5353)))
+    def deliver(self, data: bytes = b"\x00" * 12, src: str = IP_A, ttl: int = 255,
+                dst: str = mc.MDNS_GROUP) -> None:
+        self.inbox.put((data, (src, 5353), ttl, dst))
 
     def fail_next(self, exc: BaseException) -> None:
         self.inbox.put(exc)
 
+    def setsockopt(self, level: int, option: int, value: object) -> None:
+        if not self.link_options:
+            raise OSError(errno.ENOPROTOOPT, os.strerror(errno.ENOPROTOOPT))
+        self.options.append((level, option, value))
+
     def recvfrom(self, bufsize: int) -> tuple[bytes, tuple[str, int]]:
+        data, addr, _ttl, _dst = self._next()
+        return data, addr
+
+    def recvmsg(self, bufsize: int, ancbufsize: int = 0) -> tuple[bytes, list, int, tuple[str, int]]:
+        data, addr, ttl, dst = self._next()
+        pktinfo = struct.pack("=i4s4s", 2, socket.inet_aton("10.0.0.2"), socket.inet_aton(dst))
+        ancdata = [(socket.IPPROTO_IP, socket.IP_TTL, struct.pack("=i", ttl)),
+                   (socket.IPPROTO_IP, mc.IP_PKTINFO, pktinfo)]
+        return data, ancdata, 0, addr
+
+    def _next(self) -> tuple[bytes, tuple[str, int], int, str]:
         if self.closed:
             raise OSError(errno.EBADF, "Bad file descriptor")
         try:
@@ -82,14 +102,15 @@ class FakeSocket:
 class FakeSocketFactory:
     """The injectable socket_factory: a new FakeSocket per call, or `error` raised as a failed bind would."""
 
-    def __init__(self, error: OSError | None = None) -> None:
+    def __init__(self, error: OSError | None = None, link_options: bool = True) -> None:
         self.error = error
+        self.link_options = link_options
         self.sockets: list[FakeSocket] = []
 
     def __call__(self) -> FakeSocket:
         if self.error is not None:
             raise self.error
-        s = FakeSocket()
+        s = FakeSocket(link_options=self.link_options)
         self.sockets.append(s)
         return s
 
@@ -212,7 +233,14 @@ class LifecycleTest(Base):
         self.assertEqual(len(self.factory.sockets), 1)
         self.assertEqual(batch.sightings, [])
         self.assertEqual(batch.stats, {"names": 0, "joined": 0, "packets": 0, "malformed": 0, "unmapped": 0,
-                                       "wrong_port": 0, "dropped_rate": 0, "errors": 0})
+                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "dropped_rate": 0, "errors": 0,
+                                       "labels_unavailable": 1})
+
+    def test_cold_cache_keeps_labels(self) -> None:
+        c = self.conn()
+        self.assertEqual(c.collect().stats["labels_unavailable"], 1)  # nothing heard since the start
+        c._hear("printer-7", IP_A, "P1", NOW)
+        self.assertNotIn("labels_unavailable", c.collect().stats)
 
     def test_restart_after_close(self) -> None:
         c = self.conn()
@@ -233,14 +261,14 @@ class LifecycleTest(Base):
         self.assertIsNone(c._thread)
         c.close()
 
-    def test_close_while_blocked_in_recvfrom(self) -> None:
-        # a real socket's close() does not wake a recvfrom() blocked in another thread; the receive timeout does
+    def test_close_while_blocked_in_recvmsg(self) -> None:
+        # a real socket's close() does not wake a recvmsg() blocked in another thread; the receive timeout does
         entered = threading.Event()
 
         class BlockingSocket(FakeSocket):
-            def recvfrom(self, bufsize: int) -> tuple[bytes, tuple[str, int]]:
+            def recvmsg(self, bufsize: int, ancbufsize: int = 0) -> tuple[bytes, list, int, tuple[str, int]]:
                 entered.set()
-                return super().recvfrom(bufsize)
+                return super().recvmsg(bufsize, ancbufsize)
 
             def close(self) -> None:
                 self.closed = True
@@ -352,6 +380,24 @@ class PacketPathTest(Base):
         self.assertEqual(stats["malformed"], 4)
         self.assertEqual(stats["names"], 0)  # a malformed packet's names are not used
 
+    def test_malformed_global_budget(self) -> None:
+        c = self.conn()
+        clock = [1000.0]
+        c._clock = lambda: clock[0]
+        with mock.patch.object(dns, "parse_response", return_value=packet(malformed=True)):
+            with self.assertLogs("leasewatch.contrib.mdns", "DEBUG") as logs:
+                for i in range(50):
+                    c._handle(b"", (f"10.0.2.{i}", 5353))
+                clock[0] += mc.WARN_INTERVAL  # a new hour: a new budget
+                c._handle(b"", ("10.0.3.1", 5353))
+        warnings = [r.getMessage() for r in logs.records if r.levelname == "WARNING"]
+        self.assertEqual(len(warnings), mc.WARN_BUDGET + 1)
+        self.assertIn("further malformed packets are logged at DEBUG for an hour", warnings[mc.WARN_BUDGET - 1])
+        self.assertEqual(sum("further malformed packets" in w for w in warnings), 1)
+        self.assertIn("10.0.3.1", warnings[-1])
+        self.assertEqual(sum(r.levelname == "DEBUG" for r in logs.records), 50 - mc.WARN_BUDGET)
+        self.assertEqual(c.collect().stats["malformed"], 51)
+
     def test_rate_budget(self) -> None:
         c = self.conn()
         clock = [5000.2]
@@ -374,6 +420,55 @@ class PacketPathTest(Base):
         batch = c.collect()
         self.assertEqual(batch.sightings, [])
         self.assertEqual((batch.stats["packets"], batch.stats["wrong_port"]), (1, 1))
+
+    def test_link_options_requested(self) -> None:
+        c = self.conn()
+        c.check()
+        self.assertEqual(self.factory.sockets[0].options, [(socket.IPPROTO_IP, mc.IP_RECVTTL, 1),
+                                                           (socket.IPPROTO_IP, mc.IP_PKTINFO, 1)])
+
+    def test_off_link_and_unicast_rejected(self) -> None:
+        c = self.conn()
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))) as parse:
+            c.check()
+            s = self.factory.sockets[0]
+            s.deliver(ttl=64)  # routed: a router decremented the TTL
+            s.deliver(dst="10.0.0.2")  # sent to this host's own address, not to the group
+            self.assertTrue(wait_until(lambda: s.received == 2))
+            self.assertTrue(wait_until(lambda: c._counts["unicast"] == 1))
+            self.assertEqual(parse.call_count, 0)
+            self.assertEqual(c._cache, {})
+            s.deliver()  # TTL 255 to the group
+            self.assertTrue(wait_until(lambda: MAC_A in c._cache))
+        stats = c.collect().stats
+        self.assertEqual((stats["packets"], stats["off_link"], stats["unicast"], stats["names"]), (3, 1, 1, 1))
+        stats = c.collect().stats
+        self.assertEqual((stats["off_link"], stats["unicast"]), (0, 0))  # reset per poll
+
+    def test_link_reject(self) -> None:
+        ttl = (socket.IPPROTO_IP, socket.IP_TTL, struct.pack("=i", 255))
+        info = (socket.IPPROTO_IP, mc.IP_PKTINFO, struct.pack("=i4s4s", 2, socket.inet_aton("10.0.0.2"),
+                                                              socket.inet_aton(mc.MDNS_GROUP)))
+        self.assertEqual(mc._link_reject([ttl, info]), "")
+        self.assertEqual(mc._link_reject([info]), "off_link")  # no TTL: rejected
+        self.assertEqual(mc._link_reject([ttl]), "unicast")  # no destination: rejected
+        self.assertEqual(mc._link_reject([(socket.IPPROTO_IP, socket.IP_TTL, b"\xff"), info]), "")  # one byte
+
+    def test_link_options_refused_falls_back(self) -> None:
+        self.factory.link_options = False
+        c = self.conn()
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))):
+            with self.assertLogs("leasewatch.contrib.mdns", "WARNING") as logs:
+                c.check()
+                c.close()
+                c.check()  # a second start does not warn again
+            s = self.factory.sockets[1]
+            s.deliver(ttl=64, dst="10.0.0.2")  # nothing can be checked: accepted
+            self.assertTrue(wait_until(lambda: MAC_A in c._cache))
+        self.assertEqual([r.getMessage() for r in logs.records],
+                         ["mdns: cannot check the sender's link; accepting any source"])
+        stats = c.collect().stats
+        self.assertEqual((stats["off_link"], stats["unicast"], stats["names"]), (0, 0, 1))
 
     def test_goodbye_keeps_name(self) -> None:
         # the parser returns a TTL-0 record like any other: the name is heard again, not removed
@@ -483,6 +578,10 @@ class RecordingSocket:
         time.sleep(0.01)  # nothing ever arrives
         raise socket.timeout("timed out")
 
+    def recvmsg(self, bufsize: int, ancbufsize: int = 0) -> tuple[bytes, list, int, tuple[str, int]]:
+        time.sleep(0.01)
+        raise socket.timeout("timed out")
+
     def close(self) -> None:
         self.closed = True
 
@@ -549,6 +648,22 @@ class JoinTest(unittest.TestCase):
         self.assertEqual(sock.joins(), [struct.pack("=4s4si", GROUP, ANY, 2)])
         self.assertEqual(sock.multicast_all(), [0])
         self.assertEqual(c._joined, 1)
+
+    def test_unknown_interface_name(self) -> None:
+        def no_such(name: str) -> int:
+            raise OSError("no interface with this name")
+
+        c = MdnsConnector("mdns1", {"interface": "eth9"}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        with mock.patch.object(socket, "if_nametoindex", no_such):
+            with self.assertRaises(ConnectorError) as cm:
+                c.check()
+        self.assertEqual(str(cm.exception), "mdns: no interface named eth9")
+        self.assertTrue(RecordingSocket.made[-1].closed)
+
+    def test_errno_text_without_errno(self) -> None:
+        self.assertEqual(mc._errno_text(OSError("no interface with this name")), "no interface with this name")
+        self.assertEqual(mc._errno_text(OSError()), "OSError")
 
     def test_interface_address(self) -> None:
         _c, sock = self.open("10.0.0.2")

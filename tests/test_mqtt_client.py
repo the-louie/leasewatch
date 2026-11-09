@@ -192,6 +192,25 @@ class IncomingTests(BrokerCase):
         self.assertEqual(c.poll_incoming(), [])
 
 
+class FloodTests(BrokerCase):
+    """Not split: 100 split packets would outlast the PUBACK wait."""
+    def test_flood_during_puback_wait_keeps_the_newest_64(self) -> None:
+        b, c = self.connected(withhold_puback=True, timeout=1.0)
+        for i in range(100):
+            b.inject("lw/cmd", b"m%d" % i)
+        self.assertEqual(self.err(c.publish, "lw/a", b"x", qos=1), "mqtt: timeout waiting for PUBACK")
+        self.assertEqual(c.dropped_incoming, 36)
+        self.assertEqual(c.poll_incoming(), [("lw/cmd", b"m%d" % i) for i in range(36, 100)])
+
+    def test_flood_during_puback_wait_keeps_at_most_one_mib(self) -> None:
+        b, c = self.connected(withhold_puback=True, timeout=1.0)
+        for i in range(3):
+            b.inject("lw/cmd", bytes([i]) * 400_000)
+        self.assertEqual(self.err(c.publish, "lw/a", b"x", qos=1), "mqtt: timeout waiting for PUBACK")
+        self.assertEqual(c.dropped_incoming, 1)
+        self.assertEqual([p[:1] for _, p in c.poll_incoming()], [b"\x01", b"\x02"])
+
+
 class PingTests(BrokerCase):
     def test_ping_and_last_sent(self) -> None:
         now = [100.0]

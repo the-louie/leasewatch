@@ -234,9 +234,9 @@ class ListenerPathTest(unittest.TestCase):
         self.handled = 0
         handle = self.c._handle
 
-        def counting_handle(data: bytes, addr: object) -> None:  # the listener calls it; counts finished packets
+        def counting_handle(data: bytes, addr: object, reject: str = "") -> None:  # counts finished packets
             try:
-                handle(data, addr)
+                handle(data, addr, reject)
             finally:
                 self.handled += 1
         self.c._handle = counting_handle
@@ -264,7 +264,7 @@ class ListenerPathTest(unittest.TestCase):
             Sighting(mac=MAC_PRINTER, source="mdns1", kind="scan", presence=False, observed_at=NOW,
                      hostname="BRW020000000030", label="Brother HL-L2350DW series")])
         self.assertEqual(batch.stats, {"names": 2, "joined": 0, "packets": 2, "malformed": 0, "unmapped": 0,
-                                       "wrong_port": 0, "dropped_rate": 0, "errors": 0})
+                                       "wrong_port": 0, "off_link": 0, "unicast": 0, "dropped_rate": 0, "errors": 0})
 
     def test_unmapped_address(self) -> None:
         self.feed((fx.GOODBYE, "10.0.0.50"))  # 10.0.0.50 is not in device_ips

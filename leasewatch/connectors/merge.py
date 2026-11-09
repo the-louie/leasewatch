@@ -16,8 +16,8 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
                                                         behaviour). Only with neither ARP nor a lease with an IP: a
                                                         sighting with an IP first, then the (empty-IP) lease, then
                                                         client, scan, any other kind (presence first within a kind)
-    hostname              dhcp, client, arp, scan,      the lease's hostname first, then the first non-empty value
-                          dhcp6
+    hostname              dhcp, arp, client, scan,      the lease's hostname first, then the first non-empty value (the
+                          dhcp6                         firewall stays the authority; a controller fills gaps)
     vendor                dhcp, arp, client, scan, ndp  the first non-empty value
     lease_type            dhcp                          the chosen lease only
     ip6                   any kind                      GUA, ULA, other; one a dhcp6 sighting carries; the MAC's EUI-64
@@ -25,7 +25,10 @@ RANKING (rule 4 of the connector design), by Sighting.kind; a kind not listed ra
                                                         listed in the best class (prefix, DHCPv6, EUI-64) or while
                                                         none is listed
 
-ndp and dhcp6 sightings only enrich: a MAC listed by them alone gets no row, and they never assert presence.
+ndp and dhcp6 sightings only enrich: a MAC listed by them alone gets no row, and they never assert presence. The
+same holds for a MAC listed this poll only by secondary instances (MergeState.secondary: a controller or a name
+source): without a row it gets none (not new, not present); once a primary instance lists it, their values are the
+fallbacks above.
 
 "First" is by the sort keys (empty IP last, then empty network last, network, IP, static before dynamic, hostname,
 vendor, interface), so the result never depends on the order the sources return rows in.
@@ -65,7 +68,8 @@ log = logging.getLogger("leasewatch.merge")
 
 # ndp and dhcp6 are not in FALLBACK_KINDS: unlisted, so they rank after every listed kind for ip/network/iface
 FALLBACK_KINDS = ("client", "scan")              # ip/network/iface when there is neither a dhcp nor an arp sighting
-NAME_KINDS = ("dhcp", "client", "arp", "scan", "dhcp6")    # hostname fallback
+# hostname fallback: the firewall's names (lease, ARP/DNS) first; a controller's client name only fills a gap
+NAME_KINDS = ("dhcp", "arp", "client", "scan", "dhcp6")
 VENDOR_KINDS = ("dhcp", "arp", "client", "scan", "ndp")    # vendor (rule 4)
 # IPv6-only kinds: they enrich a known device (ip6, a last-resort name or vendor) but never create a row or assert
 # presence, and do not place the device (network/iface)
@@ -625,8 +629,10 @@ def merge(prev: dict[str, dict], batches: dict[str, Batch | ConnectorFailure], c
     held = _held_back(raw, keys, prev, state, hold, now)
     ok, att_macs = _rekey_batches(ok, keys, state.aliases, held)
     merged = merge_sightings([to_fw1(s) for b in ok.values() for s in b.sightings])
-    # enrichment only: a MAC listed by NDP/DHCPv6 alone gets no row of its own (not new, not present)
-    merged = {mac: m for mac, m in merged.items() if mac in prev or not m.sources <= V6_KINDS}
+    # enrichment only: a MAC listed by NDP/DHCPv6 alone, or by secondary instances alone (a controller, a name
+    # source), gets no row of its own (not new, not present)
+    listed = {s.mac for n, b in ok.items() if n not in state.secondary for s in b.sightings if s.kind not in V6_KINDS}
+    merged = {mac: m for mac, m in merged.items() if mac in prev or mac in listed}
     grace_s = cfg.online_grace_minutes * 60
     grace = now - grace_s
     res = MergeResult(aliases=new_aliases + folds, folds=folds,
