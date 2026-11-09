@@ -96,6 +96,16 @@ def _ui_lang_env() -> str:
     return v
 
 
+def _mail_lang_env() -> str:
+    # the language of mails, webhook titles and MQTT event texts. Not derived from UI_LANG on purpose: programs match
+    # webhook titles, so a page language must not change them. A typo must not stop the start
+    v = _env("MAIL_LANG", "en").lower() or "en"
+    if v not in ("en", "sv"):
+        log.warning("MAIL_LANG=%r is not en or sv: using en", v[:40])
+        return "en"
+    return v
+
+
 def _smtp_port_env() -> int:
     # empty: -1, the default for SMTP_TLS (set in __post_init__); a junk value falls back to that same default, so
     # its warning names the port actually used
@@ -288,6 +298,7 @@ class Config:
     site_name: str = field(default_factory=lambda: _env("SITE_NAME", "Leasewatch"))
     # UI language: auto (the browser's: Swedish or English), en or sv
     ui_lang: str = field(default_factory=_ui_lang_env)
+    mail_lang: str = field(default_factory=_mail_lang_env)
     new_days: int = field(default_factory=lambda: _env_int("NEW_DAYS", 7))
     # a device not seen for this long is "offline" even if a lease is still active
     online_grace_minutes: int = field(default_factory=lambda: _env_int("ONLINE_GRACE_MINUTES", 10))

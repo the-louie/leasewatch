@@ -161,6 +161,23 @@ class SettingDefaultsTests(unittest.TestCase):
         self.assertEqual(c.validate(), [])
         self.assertIn("UI_LANG='xx' is not auto, en or sv: using auto", logs.output[0])
 
+    def test_mail_lang_default_values_and_fallback(self):
+        self.assertEqual(Config().mail_lang, "en")
+        # not taken from UI_LANG
+        os.environ["UI_LANG"] = "sv"
+        self.assertEqual(Config().mail_lang, "en")
+        for value, want in (("en", "en"), ("sv", "sv"), ("SV", "sv"), ("", "en")):
+            os.environ["MAIL_LANG"] = value
+            with self.assertNoLogs("leasewatch.config", "WARNING"):
+                c = Config()
+            self.assertEqual((c.mail_lang, c.validate()), (want, []), value)
+        for value in ("auto", "xx"):
+            os.environ["MAIL_LANG"] = value
+            with self.assertLogs("leasewatch.config", "WARNING") as logs:
+                c = Config()
+            self.assertEqual((c.mail_lang, c.validate()), ("en", []), value)
+            self.assertIn(f"MAIL_LANG='{value}' is not en or sv: using en", logs.output[0])
+
     def test_lan_proxy_default_off(self):
         from leasewatch.connectors import build_instance, instances_context
         spec = Config().instances[0]
