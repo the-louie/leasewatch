@@ -26,7 +26,7 @@ from . import auth, metrics
 from .config import Config
 from .connectors import InstanceSpec, instances_context, make_host_mask, type_report
 from .connectors.merge import is_private_mac
-from .db import CONTROL_CHARS, AlreadyADevice, Database, UnknownDevices, normalize_tags
+from .db import CONTROL_CHARS, AlreadyADevice, Database, TagsFull, UnknownDevices, normalize_tags
 from .fw1 import MAC_RE
 
 log = logging.getLogger("leasewatch.web")
@@ -734,8 +734,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"device": _dev(res[0]), "split": _dev(res[1])})
 
     def _api_devices_post(self) -> None:
-        """Mark known or archive/restore up to BULK_MAX devices at once: all or nothing, the same events as the same
-        single POSTs. The UI reloads the list afterwards, so the answer holds only counts."""
+        """Mark known, archive/restore or add/remove tags on up to BULK_MAX devices at once: all or nothing, the same
+        events as the same single POSTs. The UI reloads the list afterwards, so the answer holds only counts."""
         body = self._read_json_body()
         if body is None:
             return
@@ -745,19 +745,43 @@ class Handler(BaseHTTPRequestHandler):
         for i, mac in enumerate(macs):
             if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):  # fullmatch: "$" alone lets a trailing "\n" in
                 return self._json({"error": "bad mac", "index": i}, 400)  # the value is not echoed back
-        # exactly one of the two fields: a name or note for many devices at once is never meant
-        if any(k in body for k in ("name", "note", "watch", "tags")) or ("acked" in body) == ("archived" in body):
-            return self._error(400, "bulk takes acked or archived")
+        # at most one of acked and archived, with or without tags to add or remove: a name or note for many devices at
+        # once is never meant, nor one tags text that replaces each device's own
+        refused = "bulk takes acked, archived, tags_add or tags_remove"
+        has_tags = "tags_add" in body or "tags_remove" in body
+        if any(k in body for k in ("name", "note", "watch", "tags")) or ("acked" in body and "archived" in body) \
+                or not (has_tags or "acked" in body or "archived" in body):
+            return self._error(400, refused)
         f = self._user_fields(body)  # the same type checks and texts as the single POST
         if f is None:
             return
         acked, archived = f.acked, f.archived
-        if acked is None and archived is None:  # {"acked": null}
-            return self._error(400, "bulk takes acked or archived")
+        tag_lists: dict[str, list[str]] = {}
+        for key in ("tags_add", "tags_remove"):
+            text = body.get(key)
+            if text is None:
+                tag_lists[key] = []
+                continue
+            if not isinstance(text, str):
+                return self._error(400, f"{key} must be a string")
+            try:
+                text.encode("utf-8")
+                tag_lists[key] = [t for t in normalize_tags(text).split(",") if t]
+            except UnicodeEncodeError:
+                return self._error(400, f"{key} must be valid Unicode text")
+            except ValueError as e:  # the same texts as the single POST's tags
+                return self._error(400, str(e))
+        if set(tag_lists["tags_add"]) & set(tag_lists["tags_remove"]):
+            return self._error(400, "a tag cannot be both added and removed")
+        if acked is None and archived is None and not tag_lists["tags_add"] and not tag_lists["tags_remove"]:
+            return self._error(400, refused)  # {"acked": null}, {"tags_add": ""}
         try:
-            changed, unchanged = self.db.update_many(macs, acked=acked, archived=archived, actor=self._actor())
+            changed, unchanged = self.db.update_many(macs, acked=acked, archived=archived, actor=self._actor(),
+                                                     tags_add=tag_lists["tags_add"], tags_remove=tag_lists["tags_remove"])
         except UnknownDevices as e:
             return self._json({"error": "unknown device", "unknown": e.macs}, 404)
+        except TagsFull as e:
+            return self._json({"error": str(e), "full": e.macs}, 400)
         except Exception:
             log.exception("POST /api/devices failed")
             return self._error(500, "internal error")

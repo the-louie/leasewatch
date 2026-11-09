@@ -159,6 +159,14 @@ class UnknownDevices(LookupError):
         self.macs = macs
 
 
+class TagsFull(ValueError):
+    """A bulk tag change would give these devices more than TAGS_MAX tags; nothing was written."""
+
+    def __init__(self, macs: list[str]):
+        super().__init__(f"at most {TAGS_MAX} tags")
+        self.macs = macs
+
+
 @dataclass
 class ImportResult:
     """What import_user_fields did: devices changed, devices already holding the values, MACs that are no device,
@@ -498,10 +506,13 @@ class Database:
             return out[0], out[1]
 
     def update_many(self, macs: list[str], acked: bool | None = None,
-                    archived: bool | None = None, *, actor: str = "") -> tuple[list[str], list[str]]:
-        """Set acked or archived on several devices in one transaction: (changed keys, unchanged keys). An alias MAC
-        counts as its device, and a device named twice counts once. Raises UnknownDevices (nothing written) when any
-        MAC is neither a device nor an alias."""
+                    archived: bool | None = None, *, actor: str = "", tags_add: tuple[str, ...] | list[str] = (),
+                    tags_remove: tuple[str, ...] | list[str] = ()) -> tuple[list[str], list[str]]:
+        """Set acked or archived and add or remove tags (normalised single tags) on several devices in one transaction:
+        (changed keys, unchanged keys). A device's new tags are its stored ones minus tags_remove, in their order, then
+        the added ones it lacks; the tags event is that of the single POST. An alias MAC counts as its device, and a
+        device named twice counts once. Raises UnknownDevices when any MAC is neither a device nor an alias, and
+        TagsFull when any device would have more than TAGS_MAX tags; either way nothing is written."""
         with self.tx() as c:
             keys: list[str] = []
             unknown: list[str] = []
@@ -514,11 +525,26 @@ class Database:
                     keys.append(key)
             if unknown:  # before any write, so the rollback has nothing to undo
                 raise UnknownDevices(unknown)
+            old_tags: dict[str, str] = {}
+            new_tags: dict[str, str] = {}
+            if tags_add or tags_remove:
+                full: list[str] = []
+                for key in keys:
+                    old_tags[key] = c.execute("SELECT tags FROM devices WHERE mac=?", (key,)).fetchone()["tags"] or ""
+                    kept = [t for t in old_tags[key].split(",") if t and t not in tags_remove]
+                    new = kept + [t for t in tags_add if t not in kept]
+                    if len(new) > TAGS_MAX:
+                        full.append(key)
+                    new_tags[key] = ",".join(new)
+                if full:  # before any write, as above
+                    raise TagsFull(full)
             now = int(time.time())  # one time for the whole batch
             changed: list[str] = []
             unchanged: list[str] = []
             for key in keys:
-                (changed if self._apply_user_fields(c, key, now, acked, None, None, archived, actor)[1] else unchanged).append(key)
+                kw = {"tags": new_tags[key]} if key in new_tags else {}
+                ack_arch = self._apply_user_fields(c, key, now, acked, None, None, archived, actor, **kw)[1]
+                (changed if ack_arch or new_tags.get(key, "") != old_tags.get(key, "") else unchanged).append(key)
             return changed, unchanged
 
     def import_user_fields(self, rows, *, overwrite: bool = False, actor: str = "") -> ImportResult:

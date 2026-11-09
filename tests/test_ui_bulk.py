@@ -9,6 +9,7 @@ import test_ops_write as OW
 
 MACS = [f"02:00:00:00:01:{n:02x}" for n in range(1, 4)]
 ALIAS = "06:00:00:00:09:01"
+REFUSED = "bulk takes acked, archived, tags_add or tags_remove"
 
 
 class _Bulk(OW._Base):
@@ -87,10 +88,10 @@ class BulkTests(_Bulk):
             ({"macs": [MACS[0], 7], "acked": True}, {"error": "bad mac", "index": 1}),
             ({"macs": ["0A:00:00:00:01:01"], "acked": True}, {"error": "bad mac", "index": 0}),
             ({"macs": [MACS[0] + "\n"], "acked": True}, {"error": "bad mac", "index": 0}),
-            ({"macs": MACS, "acked": True, "archived": True}, {"error": "bulk takes acked or archived"}),
-            ({"macs": MACS}, {"error": "bulk takes acked or archived"}),
-            ({"macs": MACS, "acked": None}, {"error": "bulk takes acked or archived"}),
-            ({"macs": MACS, "acked": True, "name": "x"}, {"error": "bulk takes acked or archived"}),
+            ({"macs": MACS, "acked": True, "archived": True}, {"error": REFUSED}),
+            ({"macs": MACS}, {"error": REFUSED}),
+            ({"macs": MACS, "acked": None}, {"error": REFUSED}),
+            ({"macs": MACS, "acked": True, "name": "x"}, {"error": REFUSED}),
             ({"macs": MACS, "acked": "yes"}, {"error": "acked must be boolean"}),
             ({"macs": MACS, "archived": 1}, {"error": "archived must be boolean"}),
         ]

@@ -63,7 +63,7 @@ class WatchTests(_Base):
         for body in ({"macs": [QW.MAC], "watch": True}, {"macs": [QW.MAC], "acked": True, "watch": True}):
             with self.subTest(body=body):
                 st, _, raw = self.post(path="/api/devices", body=body)
-                self.assertEqual((st, json.loads(raw)), (400, {"error": "bulk takes acked or archived"}))
+                self.assertEqual((st, json.loads(raw)), (400, {"error": "bulk takes acked, archived, tags_add or tags_remove"}))
         self.assertEqual(self.db.q("SELECT watch, acked FROM devices WHERE mac=?", (QW.MAC,))[0]["watch"], 0)
 
     def test_csv_last_column_and_json(self) -> None:

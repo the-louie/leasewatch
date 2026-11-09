@@ -5,11 +5,15 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 ## Unreleased
 
 ### Added
+- Bulk tagging: `POST /api/devices` takes `tags_add` and `tags_remove` (comma lists), alone or with `acked` or `archived`. Each device keeps its own tags minus the removed ones and gains the added ones; one `tags` event per changed device, as from the single POST. All or nothing: a device that would get more than 8 tags fails the request with 400 `{"error": "at most 8 tags", "full": [mac, ...]}`; a tag in both lists is a 400.
 
 ### Changed
+- The bulk route's refusal text is now `bulk takes acked, archived, tags_add or tags_remove`.
 
 ### Fixed
 - The mDNS connector accepts packets from a listed repeater (`RELAYS`) at any TTL: the OPNsense os-mdns-repeater package sends with TTL 1, which 1.5 refused as off-link.
+- A plugin directory entry name is cut to one line before it appears in a problem text or a log line.
+- A connector stat value is reduced to a plain int for the output without calling an int subclass's own methods.
 
 ## 1.5.0 (2026-11-09)
 
