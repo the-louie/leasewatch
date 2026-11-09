@@ -22,6 +22,9 @@ from leasewatch_mdns import connector as mc  # noqa: E402
 from leasewatch_mdns import dns  # noqa: E402
 from leasewatch_mdns.connector import MdnsConnector  # noqa: E402
 
+sys.path.insert(0, HERE)
+import fixtures as fx  # noqa: E402
+
 NOW = 1_800_000_000
 DAY = 86400
 IP_A, MAC_A = "10.0.0.7", "02:00:00:00:00:07"
@@ -862,6 +865,181 @@ class SsdpSocketTest(Base):
         self.assertEqual(mc._link_info([info]).ifindex, 7)
         self.assertEqual(mc._link_info([]), (None, None, None))
         self.assertEqual(mc._link_reject([ttl, info]), (False, False))  # the mDNS rule: not the mDNS group
+
+
+SONOS_IP, SONOS_MAC = "10.0.0.40", "02:00:00:00:00:40"
+
+
+def anc(dst: str = mc.SSDP_GROUP, ttl: int = 2, ifindex: int = 2) -> list:
+    """The control messages of a packet: its IP TTL and its in_pktinfo (interface index, local and destination)."""
+    pktinfo = struct.pack("=i4s4s", ifindex, socket.inet_aton("10.0.0.2"), socket.inet_aton(dst))
+    return [(socket.IPPROTO_IP, socket.IP_TTL, struct.pack("=i", ttl)), (socket.IPPROTO_IP, mc.IP_PKTINFO, pktinfo)]
+
+
+class SsdpPathTest(Base):
+    """SSDP=1: a NOTIFY from a mapped source on the link becomes a product label for that source's MAC."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ips[SONOS_IP] = SONOS_MAC
+        self.clock = [1000.0]
+
+    def ssdp(self, **settings: str) -> MdnsConnector:
+        c = self.conn(ssdp="1", **settings)
+        c._clock = lambda: self.clock[0]
+        return c
+
+    def send(self, c: MdnsConnector, data: bytes = fx.SONOS, src: str = SONOS_IP, ancdata="default") -> None:
+        c._handle_ssdp(data, (src, 1900), anc() if ancdata == "default" else ancdata)
+
+    def test_label_from_notify(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        batch = c.collect()
+        self.assertEqual([(s.mac, s.hostname, s.label, s.kind, s.presence) for s in batch.sightings],
+                         [(SONOS_MAC, "", "Sonos/70.3-35220", "scan", False)])
+        self.assertEqual((batch.stats["ssdp_labels"], batch.stats["names"]), (1, 1))
+        self.assertNotIn("labels_unavailable", batch.stats)
+        self.assertEqual(batch.stats["ssdp_generic"], 0)  # every counter is reported from the start
+
+    def test_mdns_label_wins_hostname_kept(self) -> None:
+        c = self.ssdp()
+        c._hear("sonos-kitchen", SONOS_IP, "Sonos Play:1", NOW)
+        self.send(c)
+        batch = c.collect()
+        self.assertEqual([(s.hostname, s.label) for s in batch.sightings], [("sonos-kitchen", "Sonos Play:1")])
+        self.assertEqual((batch.stats["names"], batch.stats["ssdp_labels"]), (1, 1))
+
+    def test_mdns_hostname_without_label_takes_ssdp_label(self) -> None:
+        c = self.ssdp()
+        c._hear("sonos-kitchen", SONOS_IP, "", NOW)
+        self.send(c)
+        self.assertEqual([(s.hostname, s.label) for s in c.collect().sightings],
+                         [("sonos-kitchen", "Sonos/70.3-35220")])
+
+    def test_unicast_dropped(self) -> None:
+        c = self.ssdp()
+        self.send(c, ancdata=anc(dst="10.0.0.25"))
+        batch = c.collect()
+        self.assertEqual((batch.stats["ssdp_unicast"], batch.stats["ssdp_labels"]), (1, 0))
+        self.assertEqual(batch.sightings, [])
+        self.assertEqual(batch.stats["labels_unavailable"], 1)
+
+    def test_wrong_interface(self) -> None:
+        c = self.ssdp(interface="eth0")
+        c._ssdp_joined_idx = frozenset({2})
+        self.send(c, ancdata=anc(ifindex=9))
+        self.send(c, ancdata=anc(ifindex=2))
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_wrong_if"], stats["ssdp_labels"]), (1, 1))
+
+    def test_interface_not_checked_without_setting_or_indexes(self) -> None:
+        c = self.ssdp()
+        c._ssdp_joined_idx = frozenset({2})  # no INTERFACE: every interface is listened on
+        self.send(c, ancdata=anc(ifindex=9))
+        c2 = self.ssdp(interface="eth0")  # INTERFACE set but no index known
+        self.send(c2, ancdata=anc(ifindex=9))
+        self.assertEqual((c.collect().stats["ssdp_wrong_if"], c2.collect().stats["ssdp_wrong_if"]), (0, 0))
+
+    def test_ttl_counted_not_checked(self) -> None:
+        c = self.ssdp()
+        self.send(c, ancdata=anc(ttl=64))
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_ttl_gt4"], stats["ssdp_labels"]), (1, 1))
+
+    def test_without_control_messages_link_rule_skipped(self) -> None:
+        c = self.ssdp()
+        self.send(c, ancdata=None)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_unicast"], stats["ssdp_labels"]), (0, 1))
+
+    def test_mismatch(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.MISMATCH)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_mismatch"], stats["ssdp_labels"]), (1, 0))
+
+    def test_location_name_passes(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.notify(fx.SONOS_SERVER, location="http://sonos-kitchen.local:1400/desc.xml"))
+        self.assertEqual(c.collect().stats["ssdp_labels"], 1)
+
+    def test_generic_and_parse_failures(self) -> None:
+        c = self.ssdp()
+        cases = [(fx.GENERIC_LIBUPNP, "ssdp_generic"), (fx.MSEARCH, "ssdp_not_notify"), (fx.BYEBYE, "ssdp_byebye"),
+                 (fx.MALFORMED, "ssdp_malformed"), (fx.OVERSIZED, "ssdp_oversized")]
+        for n, (data, _counter) in enumerate(cases):
+            src = "10.0.0.42" if data is fx.GENERIC_LIBUPNP else f"10.0.0.{50 + n}"  # its LOCATION host
+            self.ips[src] = f"02:00:00:00:00:{50 + n}"
+            self.send(c, data, src=src)
+        stats = c.collect().stats
+        self.assertEqual(stats["ssdp_generic"], 1)
+        for counter in ("ssdp_not_notify", "ssdp_byebye", "ssdp_malformed", "ssdp_oversized"):
+            self.assertEqual(stats[counter], 1, counter)
+        self.assertEqual((stats["ssdp_labels"], stats["ssdp_no_label"]), (0, 0))
+
+    def test_no_label(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.notify("UPnP/1.0"))
+        self.assertEqual(c.collect().stats["ssdp_labels"], 0)
+
+    def test_repeat_within_window_then_parsed_again(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        self.clock[0] += 599
+        self.send(c)
+        self.assertEqual(len(c._ssdp), 1)
+        self.clock[0] += 2  # 601 s after the first
+        self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_repeat"], stats["ssdp_labels"], stats["ssdp_packets"]), (1, 1, 3))
+
+    def test_repeat_memory_is_capped(self) -> None:
+        c = self.ssdp()
+        with mock.patch.object(mc, "MAX_WARNED", 3):
+            for n in range(10):
+                self.send(c, src=f"10.0.1.{n}")
+        self.assertLessEqual(len(c._ssdp_seen), 3)
+
+    def test_unmapped(self) -> None:
+        c = self.ssdp()
+        self.send(c, fx.notify(fx.SONOS_SERVER, location="http://10.0.0.77:1400/d.xml"), src="10.0.0.77")
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_unmapped"], stats["ssdp_labels"]), (1, 0))
+
+    def test_address_handed_on_drops_old_mac(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        self.ips[SONOS_IP] = "02:00:00:00:00:41"
+        self.clock[0] += 1000
+        self.send(c)
+        self.assertEqual([s.mac for s in c.collect().sightings], ["02:00:00:00:00:41"])
+
+    def test_last_heard_order_and_cap(self) -> None:
+        c = self.ssdp(max_entries="64")
+        for n in range(70):
+            self.ips[f"10.0.2.{n}"] = f"02:00:00:00:02:{n:02x}"
+            self.send(c, fx.notify(fx.SONOS_SERVER, location=f"http://10.0.2.{n}:1400/d.xml"), src=f"10.0.2.{n}")
+        batch = c.collect()
+        self.assertEqual(batch.stats["ssdp_labels"], 64)
+        self.assertNotIn("02:00:00:00:02:00", [s.mac for s in batch.sightings])
+
+    def test_ageing(self) -> None:
+        c = self.ssdp(max_age_days="1")
+        self.send(c)
+        self.now += DAY - 1
+        self.assertEqual(c.collect().stats["ssdp_labels"], 1)
+        self.now += 2
+        batch = c.collect()
+        self.assertEqual((batch.sightings, batch.stats["ssdp_labels"], batch.stats["labels_unavailable"]), ([], 0, 1))
+
+    def test_ssdp_off_never_calls_handler(self) -> None:
+        c = self.conn()
+        with mock.patch.object(c, "_handle_ssdp") as handler:
+            c.check()
+            self.assertEqual(len(self.factory.sockets), 1)
+        handler.assert_not_called()
+        self.assertNotIn("ssdp_labels", c.collect().stats)
 
 
 class SsdpJoinTest(unittest.TestCase):

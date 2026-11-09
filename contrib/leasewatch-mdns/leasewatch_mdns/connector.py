@@ -26,6 +26,7 @@ from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, Connector
                                    SettingsMixin, Sighting, parse_bool)
 
 from . import dns
+from .ssdp import is_generic, parse_notify, product_label
 
 log = logging.getLogger("leasewatch.contrib.mdns")
 
@@ -37,6 +38,8 @@ RECV_SIZE = 9000  # the largest mDNS packet RFC 6762 allows over a jumbo-frame l
 RECV_TIMEOUT = 1.0  # seconds; the listener checks its stop event at least this often
 RATE_LIMIT = 200  # packets parsed per second; the rest are counted in dropped_rate and skipped
 WARN_INTERVAL = 3600.0  # seconds between two malformed-packet warnings for one source address
+SSDP_REPARSE = 600.0  # seconds before a NOTIFY from the same source is parsed again; a device sends bursts
+SSDP_MAX_TTL = 4  # a NOTIFY with a higher IP TTL is counted (ssdp_ttl_gt4), not dropped
 MAX_WARNED = 1024  # source addresses remembered for that; the memory is cleared when it is full
 WARN_BUDGET = 10  # malformed-packet warnings per WARN_INTERVAL from all sources together; the rest go to DEBUG
 JOIN_TIMEOUT = 2.0  # seconds close() waits for the listener thread
@@ -63,6 +66,13 @@ _IFNAME_RE = re.compile(r"\A[A-Za-z0-9_.-]{1,15}\Z")
 class _Entry:
     ip: str
     hostname: str
+    label: str
+    heard_at: int
+
+
+@dataclass(frozen=True)
+class _SsdpEntry:
+    ip: str
     label: str
     heard_at: int
 
@@ -181,8 +191,12 @@ class MdnsConnector(SettingsMixin):
         keys = ["packets", "malformed", "unmapped", "wrong_port", "off_link", "unicast", "relayed", "dropped_rate",
                 "errors"]
         if self.ssdp:  # the SSDP socket's counters, in the same dict; without SSDP the stats are as before
-            keys += ["ssdp_packets", "ssdp_dropped_rate", "ssdp_errors"]
+            keys += ["ssdp_packets", "ssdp_dropped_rate", "ssdp_errors", "ssdp_unicast", "ssdp_wrong_if",
+                     "ssdp_ttl_gt4", "ssdp_not_notify", "ssdp_byebye", "ssdp_malformed", "ssdp_oversized",
+                     "ssdp_repeat", "ssdp_unmapped", "ssdp_mismatch", "ssdp_generic", "ssdp_no_label"]
         self._counts = dict.fromkeys(keys, 0)
+        self._ssdp: dict[str, _SsdpEntry] = {}  # mac -> product label heard in SSDP, in the order last heard
+        self._ssdp_seen: dict[str, float] = {}  # source ip -> clock of its last accepted parse
         self._joined = 0  # interfaces the mDNS group was joined on by the current socket
         self._ssdp_joined = 0  # the same for the SSDP group
         # the interface indexes each group was joined on by index (empty when INTERFACE is an address, or with an
@@ -401,14 +415,72 @@ class MdnsConnector(SettingsMixin):
         self._handle(data, addr, "" if ancdata is None else self._verdict(ancdata, addr))
 
     def _handle_ssdp(self, data: bytes, addr: Any, ancdata: Any) -> None:
-        """One packet from the SSDP socket, with its control messages (None when the OS cannot give them; the TTL
-        rule of mDNS does not apply to SSDP). For now it is counted and held to the socket's own rate budget; the
-        NOTIFY parse and the link rule for SSDP build on this."""
+        """One packet from the SSDP socket, with its control messages (None when the OS cannot give them: then the
+        link checks are skipped). The rate budget, the link rule (a multicast destination, an interface the group
+        was joined on; the TTL is only counted), the NOTIFY parse, one parse per source per SSDP_REPARSE, the
+        source's MAC, the LOCATION host check, then the product label. Each step that fails is counted and ends it."""
         second = int(self._clock())
+        now_clock = self._clock()
+        source = addr[0] if isinstance(addr, tuple) and addr else "?"
         with self._lock:
             self._counts["ssdp_packets"] += 1
             if not self._ssdp_window.take(second):
                 self._counts["ssdp_dropped_rate"] += 1
+                return
+            if ancdata is not None:
+                info = _link_info(ancdata)
+                if info.dst != SSDP_GROUP:  # a unicast NOTIFY is the only way an off-link host reaches the port
+                    self._counts["ssdp_unicast"] += 1
+                    return
+                if (self.interface and self._ssdp_joined_idx and info.ifindex not in self._ssdp_joined_idx):
+                    self._counts["ssdp_wrong_if"] += 1
+                    return
+                if info.ttl is not None and info.ttl > SSDP_MAX_TTL:
+                    self._counts["ssdp_ttl_gt4"] += 1
+        notify, reason = parse_notify(bytes(data))
+        with self._lock:
+            if notify is None:
+                self._counts["ssdp_" + reason] += 1
+                return
+            last = self._ssdp_seen.get(source)
+            if last is not None and now_clock - last < SSDP_REPARSE:
+                self._counts["ssdp_repeat"] += 1
+                return
+            if len(self._ssdp_seen) >= MAX_WARNED:
+                self._ssdp_seen.clear()
+            self._ssdp_seen[source] = now_clock
+        mac = self.ctx.device_ips().get(source)
+        with self._lock:
+            if not mac:
+                self._counts["ssdp_unmapped"] += 1
+                return
+            if self._location_differs(notify.location_host, source):
+                self._counts["ssdp_mismatch"] += 1  # a relay or proxy sent it: the label would land on its MAC
+                return
+            label = product_label(notify.server)
+            if not label:
+                self._counts["ssdp_generic" if is_generic(notify.server) else "ssdp_no_label"] += 1
+                return
+            self._hear_ssdp(mac, source, label, self.ctx.now())
+
+    @staticmethod
+    def _location_differs(host: str, source: str) -> bool:
+        """True when `host` (the LOCATION host of a NOTIFY) is a literal IPv4 address other than `source`. A name or
+        an empty host is not checked."""
+        try:
+            return str(ipaddress.IPv4Address(host)) != source
+        except ValueError:
+            return False
+
+    def _hear_ssdp(self, mac: str, ip: str, label: str, now: int) -> None:
+        """Keep one SSDP product label under `mac`; an entry of another MAC that held the address is dropped.
+        Called with the lock held."""
+        for other in [m for m, e in self._ssdp.items() if e.ip == ip and m != mac]:
+            del self._ssdp[other]
+        self._ssdp.pop(mac, None)  # re-inserted below: the dict stays in the order last heard
+        self._ssdp[mac] = _SsdpEntry(ip=ip, label=label, heard_at=now)
+        while len(self._ssdp) > self.max_entries:
+            del self._ssdp[next(iter(self._ssdp))]
 
     def _handle(self, data: bytes, addr: Any, reject: str = "") -> None:
         """One received mDNS packet: the link checks (`reject` names the one it failed, or "relayed"), the rate
@@ -513,15 +585,25 @@ class MdnsConnector(SettingsMixin):
             if extra > 0:
                 for mac, _ in sorted(self._cache.items(), key=lambda kv: kv[1].heard_at)[:extra]:
                     self._drop(mac)
-            entries = list(self._cache.items())
+            for mac in [m for m, e in self._ssdp.items() if e.heard_at < cutoff]:
+                del self._ssdp[mac]
+            extra = len(self._ssdp) - self.max_entries
+            if extra > 0:
+                for mac, _ in sorted(self._ssdp.items(), key=lambda kv: kv[1].heard_at)[:extra]:
+                    del self._ssdp[mac]
+            entries = dict(self._cache)
+            labels = {mac: e.label for mac, e in self._ssdp.items()}
             counts = self._counts
             self._counts = dict.fromkeys(counts, 0)
         sightings = [Sighting(mac=mac, source=self.name, kind="scan", presence=False, observed_at=now,
-                              hostname=e.hostname, label=e.label) for mac, e in entries]
+                              hostname=entries[mac].hostname if mac in entries else "",
+                              label=(entries[mac].label if mac in entries else "") or labels.get(mac, ""))
+                     for mac in [*entries, *(m for m in labels if m not in entries)]]
         # the counters cover the time since the previous collect()
         stats = {"names": len(sightings), "joined": self._joined, **counts}
         if self.ssdp:
             stats["ssdp_joined"] = self._ssdp_joined
+            stats["ssdp_labels"] = len(labels)
         if not sightings:
             # an empty cache (just started, or nothing heard for MAX_AGE_DAYS) is no evidence that a label was
             # removed: the host keeps the stored labels
