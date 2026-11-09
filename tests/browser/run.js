@@ -450,19 +450,32 @@ const scenarios = {
                hint_shown: !!h && h.offsetWidth > 0 && getComputedStyle(h).visibility !== 'hidden',
                sub_start: h ? sub.textContent.slice(0, 15) : null,
                cls: t.classList.contains('is-private'), mac_color: cp ? getComputedStyle(cp).color : null,
-               copy_text: cp ? cp.textContent : null };
+               hint_color: h ? getComputedStyle(h).color : null, copy_text: cp ? cp.textContent : null };
     }));
     // the --priv colour as the browser computes it, to compare with the MAC text
     const priv_color = await page.evaluate(() => {
       const s = document.createElement('span'); s.style.color = 'var(--priv)'; document.body.appendChild(s);
       const c = getComputedStyle(s).color; s.remove(); return c;
     });
+    // the dark theme: the private MAC follows the dark --priv; the theme attribute is put back as it was
+    const dark = await page.evaluate(async () => {
+      const root = document.documentElement, before = root.dataset.theme;
+      root.dataset.theme = 'dark';
+      await new Promise(r => requestAnimationFrame(r));
+      const cp = document.querySelector('#rows tr.is-private .c-mac .cp');
+      const s = document.createElement('span'); s.style.color = 'var(--priv)'; document.body.appendChild(s);
+      const res = { dark_mac_color: cp ? getComputedStyle(cp).color : null, dark_priv_color: getComputedStyle(s).color };
+      s.remove();
+      if (before === undefined) delete root.dataset.theme; else root.dataset.theme = before;
+      return res;
+    });
     // below 900 px the MAC column is hidden: the hint alone marks the row, and the page does not scroll sideways
     await page.setViewport({ width: 800, height: 900 });
     const narrow = { scroll: await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
       rows: await page.$$eval('#rows tr', trs => Object.fromEntries(trs.map(t => {
         const h = t.querySelector('.dev-sub .priv-hint'), m = t.querySelector('.c-mac');
-        return [t.dataset.mac, { hint: h ? h.textContent : null, hint_shown: !!h && h.offsetWidth > 0, mac_shown: m.offsetWidth > 0 }];
+        return [t.dataset.mac, { hint: h ? h.textContent : null, hint_shown: !!h && h.offsetWidth > 0, mac_shown: m.offsetWidth > 0,
+                                 hint_color: h ? getComputedStyle(h).color : null }];
       }))) };
     await page.setViewport({ width: 1400, height: 900 });
     // the merged device's drawer lists the MAC merged into it and why
@@ -487,7 +500,7 @@ const scenarios = {
     await page.waitForSelector('#events .k.merged');
     const merged_event = await page.$$eval('#events li', ls => ls.filter(l => l.querySelector('.k.merged'))
       .map(l => ({ label: l.querySelector('.k.merged').textContent, detail: l.querySelector('.muted').textContent })));
-    return { rows, priv_color, narrow, drawer, plain, merged_event };
+    return { rows, priv_color, ...dark, narrow, drawer, plain, merged_event };
   },
   // an offline event in the drawer history carries its kind as a class
   async presencekinds(page, base) {

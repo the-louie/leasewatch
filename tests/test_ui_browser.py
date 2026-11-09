@@ -411,6 +411,7 @@ class BrowserPrivateTest(_BrowserCase):
                 r = rows[m]
                 self.assertTrue(r["cls"])
                 self.assertEqual(r["mac_color"], priv)  # the golden MAC
+                self.assertEqual(r["hint_color"], priv)  # and the golden hint
                 self.assertEqual(r["hint"], "private address")  # in words, at 1400 px
                 self.assertTrue(r["hint_shown"])
                 self.assertEqual(r["copy_text"], m)
@@ -421,6 +422,16 @@ class BrowserPrivateTest(_BrowserCase):
         self.assertNotEqual(ua["mac_color"], priv)
         self.assertEqual(ua["copy_text"], self.UA)
 
+    # --priv is #8a5206 in the light theme and #e0b23c in the dark one, and a private MAC follows it in both
+    def test_private_colour_light_and_dark(self) -> None:
+        d = self.result("private")
+        self.assertEqual(d["priv_color"], "rgb(138, 82, 6)")
+        self.assertEqual(d["dark_priv_color"], "rgb(224, 178, 60)")
+        self.assertEqual(d["dark_mac_color"], d["dark_priv_color"])
+        light = {r["mac"]: r for r in d["rows"]}[self.DEV]["mac_color"]
+        self.assertEqual(light, d["priv_color"])
+        self.assertNotEqual(d["dark_mac_color"], light)
+
     def test_private_hint_at_800_px_is_golden_text_and_no_scroll(self) -> None:
         d = self.result("private")["narrow"]
         self.assertLessEqual(d["scroll"], 0)
@@ -430,6 +441,7 @@ class BrowserPrivateTest(_BrowserCase):
                 self.assertEqual(r["hint"], "private address")
                 self.assertTrue(r["hint_shown"])
                 self.assertFalse(r["mac_shown"])  # .c-mac is hidden here
+                self.assertEqual(r["hint_color"], self.result("private")["priv_color"])
         self.assertIsNone(d["rows"][self.UA]["hint"])
 
     def test_network_colour_survives_archiving_an_earlier_networks_last_device(self) -> None:

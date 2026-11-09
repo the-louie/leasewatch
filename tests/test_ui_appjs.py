@@ -256,6 +256,20 @@ out.kv = body.kv.innerHTML;
         self.assertIn("<dt>Sedd av</dt>", out["kv"])
         self.assertIn("<dt>Vendor</dt>", out["kv"])  # a key Swedish lacks falls back to English
 
+    # the row's link icon is a named image; the drawer's is decorative, as the status is written beside it
+    def test_link_icon_named_in_the_row_decorative_in_the_drawer(self) -> None:
+        out = _run([], r"""//--
+state.meta = { now: 100, new_days: 7 };
+const d = { mac: "02:00:00:00:00:01", sources: "", online: 0, link: "wired" };
+out.row = linkIcon(d); out.plain = linkIcon(d, true);
+""")
+        self.assertIn('role="img"', out["row"])
+        self.assertIn("aria-label=", out["row"])
+        self.assertIn('aria-hidden="true"', out["plain"])
+        self.assertNotIn("aria-label", out["plain"])
+        self.assertNotIn("role=", out["plain"])
+        self.assertIn('title="wired"', out["plain"])
+
     # a history row with a stable IPv6 address shows it under the IPv4; a row without one renders as before
     def test_drawer_history_shows_the_v6_address_when_set(self) -> None:
         out = _run(["refreshDrawer", "seenHtml", "drawerActions", "splitFromLabel"], r"""

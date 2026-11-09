@@ -132,8 +132,11 @@
   const LINK_SVG = '<svg class="k-wifi" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.5 9a15 15 0 0 1 21 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="currentColor" stroke-width="1"/></svg>'
     + '<svg class="k-wired" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2ZM9 8v3M12 8v3M15 8v3M12 5v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     + '<svg class="k-unknown" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
-  const linkIcon = d => {
-    const k = linkKind(d), onl = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
+  // plain: the drawer writes the status beside the icon, so there it is decorative and its tip names only the link type
+  const linkIcon = (d, plain = false) => {
+    const k = linkKind(d);
+    if (plain) return `<span class="lk${d.online ? " on" : ""}" aria-hidden="true" data-k="${k || "unknown"}" title="${esc(linkLabel(k))}">${LINK_SVG}</span>`;
+    const onl = d.online ? t("row.online") : (d.last_online ? t("row.offline_last", { ago: rel(d.last_online) }) : t("row.offline_never"));
     const lab = esc(linkLabel(k) + " · " + onl);
     return `<span class="lk${d.online ? " on" : ""}" role="img" data-k="${k || "unknown"}" title="${lab}" aria-label="${lab}">${LINK_SVG}</span>`;
   };
@@ -760,7 +763,7 @@
     $("#dTitle").textContent = label(d);
     const b = $("#dBody");
     const kv = `
-        <dt>${esc(t("drawer.status"))}</dt><dd>${linkIcon(d)} ${esc(d.online ? t("row.online") : (d.last_online ? t("drawer.offline_last", { ago: rel(d.last_online) }) : (d.sources === "" ? t("drawer.offline_split") : t("drawer.offline_never"))))}</dd>
+        <dt>${esc(t("drawer.status"))}</dt><dd>${linkIcon(d, true)} ${esc(d.online ? t("row.online") : (d.last_online ? t("drawer.offline_last", { ago: rel(d.last_online) }) : (d.sources === "" ? t("drawer.offline_split") : t("drawer.offline_never"))))}</dd>
         <dt>${esc(t("drawer.ip"))}</dt><dd class="mono">${esc(d.ip || "–")}</dd>
         ${d.ip6 ? `<dt>${esc(t("drawer.ip6"))}</dt><dd class="mono">${esc(d.ip6)}</dd>` : ""}
         <dt>${esc(t("drawer.mac"))}</dt><dd class="mono">${esc(d.mac)}</dd>

@@ -114,8 +114,8 @@ tr.row.is-new:hover td { background: var(--new-bg); }
 tbody tr:last-child td { border-bottom: 0; }
 .c-dot { width: 28px; padding-right: 0; }
 .c-dev { max-width: 320px; }
-/* link-type icon (Wi-Fi, wired, unknown): grey offline, green online; CSS shows the glyph of data-k */
-.lk { display: inline-flex; width: 16px; height: 16px; vertical-align: -3px; color: color-mix(in srgb, var(--muted) 45%, transparent); }
+/* link-type icon (Wi-Fi, wired, unknown): muted text colour offline (the glyph carries meaning, so it keeps 3:1 contrast), green online; CSS shows the glyph of data-k */
+.lk { display: inline-flex; width: 16px; height: 16px; vertical-align: -3px; color: var(--muted); }
 .lk.on { color: var(--ok); }
 .lk svg { width: 16px; height: 16px; display: none; }
 .lk[data-k="wifi"] .k-wifi, .lk[data-k="wired"] .k-wired, .lk[data-k="unknown"] .k-unknown { display: block; }
@@ -224,7 +224,7 @@ table.aliases th, table.wifi th { padding: 4px 8px 4px 0; font-size: 11px; backg
 table.aliases td, table.wifi td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }
 
 footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--muted); font-size: 12px; }
-@media (min-width: 1400px) { main, footer { max-width: 1380px; } } /* a wide window gets 100 px more, so every column fits at its natural width */
+@media (min-width: 1400px) { main, footer, .top { max-width: 1380px; } .banner { max-width: 1332px; } .selbar { width: min(1332px, 100%); } } /* a wide window gets 100 px more, so every column fits at its natural width; the header, the error banner and the Select bar keep in line with the table */
 
 @media (max-width: 1279px) { .c-type { display: none; } } /* the table is capped at 1232 px (main; 1332 px from a 1400 px window): Type fits from 1280 px */
 /* Select mode adds the 24 px checkbox column. It is paid for by Type from 1280 px, and by First seen up to 1400 px (the
@@ -250,6 +250,7 @@ footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--m
   .c-dev { max-width: none; }
   .dev-name { flex-wrap: wrap; row-gap: 2px; } /* a long name and its badges: the badges move to a second line */
   td, th { padding-left: 8px; padding-right: 8px; }
+  .c-dot { width: 17px; padding-left: 3px; } .lk, .lk svg { width: 14px; height: 14px; } /* a smaller link icon keeps the table within a 320 px phone */
   .status span:last-child { display: none; }
   .vlans { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -16px; margin-right: -16px; padding: 0 16px 2px; }
   .chip { flex: none; }
