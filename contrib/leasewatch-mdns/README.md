@@ -26,6 +26,7 @@ counted as `unmapped` and dropped. The record it produces has no address and no 
 | `MAX_AGE_DAYS` | no | `7` | How long a heard name is kept per device, 1 to 90 days |
 | `MAX_ENTRIES` | no | `4096` | The most devices kept in the cache, 64 to 65536 |
 | `RELAYS` | no | empty | Comma-separated IPv4 addresses of mDNS repeaters. A packet sent to the group from one of them is accepted at any TTL and counted as `relayed`. See "Running in a container" |
+| `SSDP` | no | `0` | `1` also listens to SSDP announcements (UDP 1900, group 239.255.255.250) and takes the product named in `SERVER:` as the device's label when mDNS gives none; the socket only receives |
 
 `TYPE` and `TIMEOUT` are host keys, as for every connector.
 
@@ -60,6 +61,8 @@ connector would hear nothing. Use one of these instead:
   every address of the host).
 - **A macvlan network** on the VLAN to listen on, with the container attached to it.
 
+With `SSDP=1` the SSDP socket needs the same: host networking or a macvlan, for the same reason.
+
 Only the VLANs the host is attached to are heard. mDNS does not cross a router, so for devices on other VLANs (for
 example an IoT VLAN) run an mDNS repeater on the firewall, such as os-mdns-repeater on OPNsense, and make sure the
 repeated traffic reaches the VLAN the host is on. os-mdns-repeater 1.11 as packaged by OPNsense sends with the
@@ -87,6 +90,28 @@ are counted as `dropped_rate`. The status counts, reset each poll, are `names`, 
 `dropped_rate` and `errors`; `joined` is the number of interfaces
 the group is joined on.
 
+### SSDP (`SSDP=1`)
+
+SSDP is how UPnP devices announce themselves: every few minutes a device sends a NOTIFY to 239.255.255.250:1900.
+Its `SERVER:` header names the OS, `UPnP/1.0` and the product, for example `Linux/4.9 UPnP/1.0 Sonos/70.3-35220`,
+which gives the label `Sonos/70.3-35220`. The label is the tokens after `UPnP/`. There is no label when they name a
+UPnP library rather than a device; these ten names are generic: `Portable SDK for UPnP devices`,
+`UPnP-Device-Host`, `MiniUPnPd`, `Platinum`, `Cling`, `DLNADOC`, `Samsung UPnP SDK`, `libupnp`, `IntelUpnp` and
+`WindowsMediaPlayer`. The device is the one that holds the NOTIFY's source address, found as for mDNS.
+
+The mDNS label wins: SSDP fills the label only when mDNS gave none. A device known by SSDP alone gets a sighting
+with a label and no hostname, because an SSDP announcement carries no host name. One NOTIFY per source address is
+read every 10 minutes; the others are counted as `ssdp_repeat`. SSDP has its own cache, with the same
+`MAX_AGE_DAYS` and `MAX_ENTRIES`, and its own rate budget of 200 packets a second.
+
+The SSDP status counts, reset each poll, are all there when `SSDP=1` and absent otherwise:
+`ssdp_packets` (every datagram on the SSDP socket), `ssdp_dropped_rate` (over the rate budget), `ssdp_errors`
+(receive failures), `ssdp_unicast`, `ssdp_wrong_if`, `ssdp_ttl_gt4` (counted, not dropped), `ssdp_not_notify` (an
+M-SEARCH or a response), `ssdp_byebye`, `ssdp_malformed`, `ssdp_oversized` (over 2048 bytes), `ssdp_repeat`,
+`ssdp_unmapped` (no known device holds the address), `ssdp_mismatch`, `ssdp_generic` (a generic UPnP stack),
+`ssdp_no_label` (no product after `UPnP/`); `ssdp_joined` is the number of interfaces the SSDP group is joined on,
+and `ssdp_labels` the number of devices that hold an SSDP label.
+
 A malformed packet is logged as a WARNING at most once an hour per source address, and at most 10 times an hour in
 total; after that, malformed packets are logged at DEBUG until the hour is over.
 
@@ -97,11 +122,19 @@ in total is counted as `malformed`. A packet with an OPCODE or RCODE other than 
 
 The names and models of the devices on your LAN are stored like a DHCP hostname is. Nothing leaves the host.
 
+With `SSDP=1` the connector still never sends: it sends no M-SEARCH and only hears what devices announce anyway. It
+never fetches the `LOCATION` URL of a NOTIFY; it reads the host in it and nothing else.
+
 ## Limits
 
 - IPv4 only: no `AAAA` records and no `ff02::fb` group.
 - Responses only; the parser reads `A`, `PTR`, `SRV` and `TXT` records. Queries from other hosts are ignored.
-- No SSDP/UPnP and no active probes: it never asks a device anything.
+- No active probes: it never asks a device anything, with or without SSDP.
+- SSDP: a unicast NOTIFY is dropped (`ssdp_unicast`). A NOTIFY whose `LOCATION` names another IPv4 address than its
+  source is dropped (`ssdp_mismatch`): a relay re-sent it, and the label would land on the relay. With `INTERFACE`
+  set, a packet from another interface is dropped (`ssdp_wrong_if`). The TTL is counted (`ssdp_ttl_gt4`), not
+  checked. More than 200 packets a second are dropped (`ssdp_dropped_rate`). SSDP labels are often generic, which
+  is why the list of ten library names exists.
 - A device whose address leasewatch does not know is counted as `unmapped`.
 - Only what reaches the host's network segment is heard (see "Running in a container"), and only multicast
   packets with TTL 255, or from a repeater listed in `RELAYS`: a repeater that re-sends with a lower TTL and is

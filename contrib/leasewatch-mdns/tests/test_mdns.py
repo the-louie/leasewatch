@@ -1042,6 +1042,117 @@ class SsdpPathTest(Base):
         self.assertNotIn("ssdp_labels", c.collect().stats)
 
 
+class SsdpMatrixTest(Base):
+    """SSDP=1 seen through collect(): the whole path from a socket, the counters and the merge of the two caches."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ips[SONOS_IP] = SONOS_MAC
+        self.clock = [1000.0]
+
+    def ssdp(self, **settings: str) -> MdnsConnector:
+        c = self.conn(ssdp="1", **settings)
+        c._clock = lambda: self.clock[0]
+        return c
+
+    def send(self, c: MdnsConnector, data: bytes = fx.SONOS, src: str = SONOS_IP) -> None:
+        c._handle_ssdp(data, (src, 1900), anc())
+
+    SSDP_KEYS = ["ssdp_byebye", "ssdp_dropped_rate", "ssdp_errors", "ssdp_generic", "ssdp_joined", "ssdp_labels",
+                 "ssdp_malformed", "ssdp_mismatch", "ssdp_no_label", "ssdp_not_notify", "ssdp_oversized",
+                 "ssdp_packets", "ssdp_repeat", "ssdp_ttl_gt4", "ssdp_unicast", "ssdp_unmapped", "ssdp_wrong_if"]
+    MDNS_KEYS = ["dropped_rate", "errors", "joined", "labels_unavailable", "malformed", "names", "off_link",
+                 "packets", "relayed", "unicast", "unmapped", "wrong_port"]
+
+    def test_nothing_is_sent_on_either_socket(self) -> None:
+        c = self.ssdp()
+        c.check()
+        mdns_sock, ssdp_sock = self.factory.sockets
+        ssdp_sock.deliver(fx.SONOS, src=SONOS_IP, ttl=2, dst=mc.SSDP_GROUP)
+        mdns_sock.deliver(src=IP_A)
+        self.assertTrue(wait_until(lambda: c._counts["ssdp_packets"] == 1 and c._counts["packets"] == 1))
+        batch = c.collect()
+        self.assertEqual(batch.stats["ssdp_labels"], 1)
+        c.close()
+        self.assertEqual((mdns_sock.sent, ssdp_sock.sent), ([], []))
+
+    def test_flood_from_many_sources(self) -> None:
+        c = self.ssdp()
+        for n in range(300):
+            c._handle_ssdp(fx.SONOS, (f"10.1.{n // 250}.{n % 250}", 1900), anc())
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_packets"], stats["ssdp_dropped_rate"]), (300, 100))
+        self.assertEqual((stats["packets"], stats["dropped_rate"], stats["malformed"], stats["errors"]), (0, 0, 0, 0))
+
+    def test_priority_through_collect(self) -> None:
+        c = self.ssdp()
+        c._hear("printer", SONOS_IP, "", NOW)
+        self.send(c)
+        self.assertEqual([(s.mac, s.hostname, s.label) for s in c.collect().sightings],
+                         [(SONOS_MAC, "printer", "Sonos/70.3-35220")])
+        c._hear("printer", SONOS_IP, "Brother HL", NOW)
+        self.assertEqual([(s.hostname, s.label) for s in c.collect().sightings], [("printer", "Brother HL")])
+
+    def test_ssdp_only_mac_disappears_when_mdns_has_it(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        self.assertEqual([s.mac for s in c.collect().sightings], [SONOS_MAC])
+        c._hear("sonos-kitchen", SONOS_IP, "Sonos Play:1", NOW)
+        batch = c.collect()
+        self.assertEqual([(s.mac, s.label) for s in batch.sightings], [(SONOS_MAC, "Sonos Play:1")])
+        self.assertEqual((batch.stats["names"], batch.stats["ssdp_labels"]), (1, 1))
+
+    def test_stats_keys_with_ssdp_on(self) -> None:
+        c = self.ssdp()
+        stats = c.collect().stats
+        self.assertEqual(sorted(stats), sorted(self.MDNS_KEYS + self.SSDP_KEYS))
+        self.assertEqual([k for k in self.SSDP_KEYS if stats[k] != 0], [])
+
+    def test_stats_keys_with_ssdp_off_after_a_packet(self) -> None:
+        c = self.conn()
+        c.check()
+        self.factory.sockets[0].deliver(src=IP_A)
+        self.assertTrue(wait_until(lambda: c._counts["packets"] == 1))
+        stats = c.collect().stats
+        self.assertEqual(sorted(stats), sorted(self.MDNS_KEYS))
+        self.assertEqual(stats["packets"], 1)
+
+    def test_ssdp_cache_ages_and_caps_on_its_own(self) -> None:
+        c = self.ssdp(max_entries="64", max_age_days="1")
+        self.now = NOW - 2 * DAY
+        c._hear("printer-7", IP_A, "P1", self.now)  # aged out by the time of the collect()
+        c._hear("printer-8", IP_B, "P2", self.now)
+        self.now = NOW
+        for n in range(65):
+            self.ips[f"10.0.3.{n}"] = f"02:00:00:00:03:{n:02x}"
+            self.send(c, fx.notify(fx.SONOS_SERVER, location=f"http://10.0.3.{n}:1400/d.xml"), src=f"10.0.3.{n}")
+        batch = c.collect()
+        self.assertEqual((len(batch.sightings), batch.stats["names"], batch.stats["ssdp_labels"]), (64, 64, 64))
+        self.assertNotIn(MAC_A, [s.mac for s in batch.sightings])
+
+    def test_location_rule(self) -> None:
+        cases = [("a name", fx.LOCATION_NAME, 1), ("the source's own IPv4", fx.SONOS, 1),
+                 ("another IPv4", fx.MISMATCH, 0), ("an IPv6 literal", fx.LOCATION_V6, 1)]
+        for what, data, labels in cases:
+            with self.subTest(location=what):
+                c = self.ssdp()
+                self.send(c, data)
+                stats = c.collect().stats
+                self.assertEqual((stats["ssdp_labels"], stats["ssdp_mismatch"]), (labels, 1 - labels))
+
+    def test_close_then_collect_restarts_both_listeners(self) -> None:
+        c = self.ssdp()
+        c.collect()
+        c.close()
+        self.assertEqual(len(self.factory.sockets), 2)
+        c.collect()
+        self.assertEqual(len(self.factory.sockets), 4)
+        self.assertEqual([(s.group, s.port) for s in self.factory.sockets[2:]],
+                         [(mc.MDNS_GROUP, mc.MDNS_PORT), (mc.SSDP_GROUP, mc.SSDP_PORT)])
+        self.assertTrue(c._thread.is_alive() and c._ssdp_thread.is_alive())
+        self.assertFalse(any(s.closed for s in self.factory.sockets[2:]))
+
+
 class SsdpJoinTest(unittest.TestCase):
     """_default_socket(group, port) for SSDP: the same joins, on port 1900 and 239.255.255.250."""
 
