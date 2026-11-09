@@ -103,7 +103,7 @@ def _csv_cell(v: object) -> str:
     return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
-_KIND = re.compile(r"[a-z_]{1,20}")
+_KIND = re.compile(r"[a-z0-9_]{1,20}")
 _DEFAULT_EVENT_LIMIT = 300
 _EVENT_PARAMS = {"kind", "since", "until", "before", "limit"}
 

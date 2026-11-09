@@ -213,7 +213,7 @@ class AppJsTests(unittest.TestCase):
     # every kind the events filter offers has a label (no raw kind name falls through) and a colour
     def test_kind_text_knows_every_filter_kind(self) -> None:
         out = _run(["EV_KINDS"], "//--\nout.kinds = EV_KINDS.flatMap(g => g[1]); out.labels = out.kinds.map(k => t(\"kind.\" + k));")
-        self.assertEqual(len(out["kinds"]), 23)
+        self.assertEqual(len(out["kinds"]), 24)
         css = _read("leasewatch", "static", "style.css")
         for k, text in zip(out["kinds"], out["labels"]):
             with self.subTest(kind=k):
@@ -255,6 +255,34 @@ out.kv = body.kv.innerHTML;
         self.assertIn("<dt>Värdnamn</dt>", out["kv"])
         self.assertIn("<dt>Sedd av</dt>", out["kv"])
         self.assertIn("<dt>Vendor</dt>", out["kv"])  # a key Swedish lacks falls back to English
+
+    # a history row with a stable IPv6 address shows it under the IPv4; a row without one renders as before
+    def test_drawer_history_shows_the_v6_address_when_set(self) -> None:
+        out = _run(["refreshDrawer", "seenHtml", "drawerActions", "splitFromLabel"], r"""
+const api = async () => ({ device: { mac: "02:00:00:00:00:01", hostname: "h", sources: "lease", first_seen: 1 }, events: [], seen: [],
+  history: [{ ts: 20, ip: "10.0.0.7", ip6: "2001:db8:2::7", hostname: "h", vlan: "LAN", lease_type: "dynamic" },
+            { ts: 10, ip: "10.0.0.6", ip6: "", hostname: "h", vlan: "LAN", lease_type: "dynamic" }] });
+const CSS = { escape: s => s };
+//--
+state.meta = { now: 30, new_days: 7, can_write: true };
+await refreshDrawer("02:00:00:00:00:01", false);
+out.rows = [...body.innerHTML.matchAll(/<li><span class="t">[^<]*<\/span>(.*?)<\/li>/g)].map(m => m[1]);
+""")
+        first = next(r for r in out["rows"] if "10.0.0.7" in r)
+        self.assertIn('<span class="mono">10.0.0.7</span><br><span class="mono">2001:db8:2::7</span>', first)
+        older = next(r for r in out["rows"] if "10.0.0.6" in r)
+        self.assertNotIn("2001:db8", older)
+        self.assertNotIn("<br>", older)
+        self.assertEqual(older.count('class="mono"'), 1)
+
+    # ?ek=ip6 in the address restores the events filter; a kind with a bad character does not
+    def test_event_filter_kind_from_the_address_takes_digits(self) -> None:
+        out = _run(["readUrl", "isDay"], r"""
+//--
+byId.fStatus = new El("SELECT"); byId.fStatus.value = "all";out.v = [];
+for (const s of ["?ek=ip6", "?ek=ip6!", "?ek=" + "a1".repeat(10) + "b", "?ek=ip"]) { location.search = s; readUrl(); out.v.push(state.evKind); }
+""")
+        self.assertEqual(out["v"], ["ip6", "", "", "ip"])
 
     # an SSID-less Wi-Fi row that a switch has since placed on a port is wired, as before;
     # a live SSID-less client (no stored port) still shows as Wi-Fi

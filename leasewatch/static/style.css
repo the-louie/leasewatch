@@ -190,7 +190,7 @@ main.has-selbar { padding-bottom: 96px; }
 .event-list li:last-child { border-bottom: 0; }
 .event-list .t { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .event-list .k { font-weight: 600; }
-.k.new { color: var(--new); } .k.ip, .k.hostname, .k.vlan, .k.lease_type, .k.port, .k.wifi { color: var(--accent); } .k.back { color: var(--ok); } .k.acked { color: var(--ok); } .k.unacked { color: var(--warn); }
+.k.new { color: var(--new); } .k.ip, .k.ip6, .k.hostname, .k.vlan, .k.lease_type, .k.port, .k.wifi { color: var(--accent); } .k.back { color: var(--ok); } .k.acked { color: var(--ok); } .k.unacked { color: var(--warn); }
 .k.watched { color: var(--warn); } .k.unwatched { color: var(--muted); }
 .k.renamed, .k.note, .k.tags { color: var(--accent); } .k.offline { color: var(--danger); } .k.online { color: var(--ok); }
 .k.archived { color: var(--muted); } .k.restored { color: var(--ok); } .k.merged, .k.split { color: var(--accent); }

@@ -66,7 +66,7 @@ def kind_keys() -> list[str]:
     """The kind.* keys kindText() builds: one per kind the events filter offers."""
     src = (STATIC / "app.js").read_text(encoding="utf-8")
     block = re.search(r"const EV_KINDS = (.*?);\n", src, re.S).group(1)
-    return ["kind." + k for k in re.findall(r"\"([a-z_]+)\"", block)]
+    return ["kind." + k for k in re.findall(r"\"([a-z0-9_]+)\"", block)]
 
 
 WARN_KEYS = ["warn.dropped", "warn.kea6_unavailable", "warn.labels_unavailable", "warn.ndp_unavailable"]
@@ -150,7 +150,7 @@ class I18nDriftTest(unittest.TestCase):
 
     def test_every_filter_kind_has_a_label(self) -> None:
         keys = kind_keys()
-        self.assertEqual(len(keys), 23)
+        self.assertEqual(len(keys), 24)
         self.assertEqual([k for k in keys if k not in self.en], [])
 
     def test_tables_are_the_only_languages(self) -> None:

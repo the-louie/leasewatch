@@ -561,7 +561,7 @@
   // ---------- events list: filters, paging ----------
   const EV_PAGE = 60;
   const EV_KINDS = [[t("evgroup.devices"), ["new", "back", "archived", "restored", "merged", "split"]], [t("evgroup.presence"), ["offline", "online"]],
-    [t("evgroup.changes"), ["ip", "hostname", "vlan", "lease_type", "port", "wifi"]],
+    [t("evgroup.changes"), ["ip", "ip6", "hostname", "vlan", "lease_type", "port", "wifi"]],
     [t("evgroup.review"), ["acked", "unacked", "renamed", "note", "tags", "watched", "unwatched"]], [t("evgroup.sources"), ["source_down", "source_up"]]];
   // a real calendar day: 2026-02-31 would roll over to March 3, so the day must come back unchanged
   const isDay = v => {
@@ -798,7 +798,7 @@
       <div id="dAliases">${aliasesHtml(r.aliases)}</div>
       ${wifiHtml(r.wifi_presence, state.meta, d)}
       <h3>${esc(t("drawer.history"))}</h3>
-      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span> ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || `<li class="none">${esc(t("drawer.no_changes"))}</li>`}</ul>
+      <ul class="tl">${r.history.map(h => `<li><span class="t">${esc(abs(h.ts))}</span><span class="mono">${esc(h.ip)}</span>${h.ip6 ? `<br><span class="mono">${esc(h.ip6)}</span>` : ""} ${esc(h.hostname || "")} <span class="badge vlan" data-vc="${esc(vlanColor(h.vlan))}">${esc(h.vlan)}</span> <span class="muted">${esc(h.lease_type)}</span></li>`).join("") || `<li class="none">${esc(t("drawer.no_changes"))}</li>`}</ul>
       <h3>${esc(t("drawer.events"))}</h3>
       <ul class="tl">${r.events.map(e => `<li><span class="t">${esc(abs(e.ts))}</span><span class="k ${esc(e.kind)}">${esc(kindText(e.kind))}</span> <span class="muted">${esc(String(e.detail || "").replace(" -> ", " → "))}</span></li>`).join("") || `<li class="none">${esc(t("drawer.no_events"))}</li>`}</ul>`;
     paintVc(b);
@@ -971,7 +971,7 @@
     state.tag = p.get("tag") || null; // no tag is empty
     $("#q").value = state.q; $("#fStatus").value = state.status; $("#sort").value = state.sort;
     const ek = p.get("ek") || "", es = p.get("es") || "", eu = p.get("eu") || "";
-    state.evKind = /^[a-z_]{1,20}$/.test(ek) ? ek : ""; state.evFrom = isDay(es) ? es : ""; state.evTo = isDay(eu) ? eu : "";
+    state.evKind = /^[a-z0-9_]{1,20}$/.test(ek) ? ek : ""; state.evFrom = isDay(es) ? es : ""; state.evTo = isDay(eu) ? eu : "";
     $("#evKind").value = state.evKind; $("#evFrom").value = state.evFrom; $("#evTo").value = state.evTo;
     if (!$("#evKind").value) state.evKind = ""; // a kind the list does not offer
     // lower case, colon form only: anything else is ignored, and the next syncUrl() drops it from the address

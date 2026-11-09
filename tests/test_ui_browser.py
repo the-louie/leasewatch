@@ -1301,8 +1301,8 @@ class BrowserEventsViewTest(_BrowserCase):
         d = self.result("eventsview")
         values = [o["value"] for o in d["kind_options"]]
         self.assertEqual(values[0], "")
-        self.assertEqual(len(values), 24)  # "All" and the 23 kinds the server writes
-        for k in ("source_down", "source_up", "lease_type", "merged", "split", "offline", "online", "renamed", "note", "tags", "watched", "unwatched"):
+        self.assertEqual(len(values), 25)  # "All" and the 24 kinds the server writes
+        for k in ("ip6", "source_down", "source_up", "lease_type", "merged", "split", "offline", "online", "renamed", "note", "tags", "watched", "unwatched"):
             self.assertIn(k, values)
         self.assertIn({"value": "tags", "text": "tags changed"}, d["kind_options"])
         self.assertIn({"value": "source_down", "text": "source down"}, d["kind_options"])
