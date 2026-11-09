@@ -143,6 +143,8 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 1279px) { :lang(sv) .c-act .btn.ack { white-space: normal; text-align: left; line-height: 1.15; } } /* "Markera som känd" wraps where the table is tight */
 th.c-first, th.c-last { white-space: normal; } /* a long heading (Swedish "Första gången sedd") wraps instead of widening the column past its dates */
 .c-first, .c-last { white-space: nowrap; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+/* below 1400 px the page is capped at 1232 px and a full table is tight: a long phrase ("not since the start") may wrap there, so the actions column fits without a sideways scroll; from 1400 px the page is 100 px wider instead */
+@media (max-width: 1399px) { td.c-first, td.c-last { white-space: normal; } }
 .c-first.recent { color: var(--text); }
 .c-act { width: 1%; text-align: right; white-space: nowrap; }
 /* click-to-copy MAC and IP text: nothing is added on hover, and "Copied" floats above the text, so no column moves */
@@ -224,8 +226,9 @@ table.aliases th, table.wifi th { padding: 4px 8px 4px 0; font-size: 11px; backg
 table.aliases td, table.wifi td { padding: 4px 8px 4px 0; overflow-wrap: anywhere; vertical-align: top; }
 
 footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--muted); font-size: 12px; }
+@media (min-width: 1400px) { main, footer { max-width: 1380px; } } /* a wide window gets 100 px more, so every column fits at its natural width */
 
-@media (max-width: 1279px) { .c-type { display: none; } } /* the table is capped at 1232 px (main): Type fits from 1280 px */
+@media (max-width: 1279px) { .c-type { display: none; } } /* the table is capped at 1232 px (main; 1332 px from a 1400 px window): Type fits from 1280 px */
 /* Select mode adds the 24 px checkbox column. It is paid for by Type from 1280 px, and by First seen up to 1400 px (the
    long names of the rows, and the Connected via text, take the width the column would need), then by Last seen and
    Connected via; the drawer shows every one of them */

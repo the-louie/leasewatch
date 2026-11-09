@@ -2,6 +2,11 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+- The full device table no longer scrolls sideways on a desktop, so the Mark known column is always in view: from a 1400 px window the page is 1380 px wide (was 1280), and below that the date phrases ("not since the start") wrap when the table is tight.
+
 ## 1.6.0 (2026-11-09)
 
 ### Added
