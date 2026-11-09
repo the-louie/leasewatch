@@ -165,5 +165,39 @@ class V6Only(Base):
         self.assertEqual((ev(res), hist(res)), ([], []))
 
 
+class Displayed(Base):
+    def polls(self, *polls, prev=None):
+        """Merge the polls in turn, each on the rows of the one before; the A row after each."""
+        rows, out = prev or [row(A)], []
+        for v6 in polls:
+            res = self.merge(rows, [sight(), *v6])
+            rows = [res.rows[A]]
+            out.append(res.rows[A])
+        return out
+
+    def test_aged_out_eui64_does_not_flip_the_address(self):
+        got = self.polls([ndp(EUI), ndp(TEMP)], [ndp(TEMP)], [ndp(EUI), ndp(TEMP2)])
+        self.assertEqual([r["ip6"] for r in got], [EUI] * 3)
+        self.assertEqual([r["ip6_stable"] for r in got], [EUI] * 3)
+
+    def test_stored_temporary_moves_to_the_stable_address(self):
+        res = self.merge([row(A, ip6=TEMP)], [sight(), ndp(TEMP), ndp(EUI)])
+        self.assertEqual((res.rows[A]["ip6"], res.rows[A]["ip6_stable"]), (EUI, EUI))
+
+    def test_stored_temporary_stays_while_the_stable_one_is_not_listed(self):
+        res = self.merge([row(A, ip6=TEMP, ip6_stable=EUI)], [sight(), ndp(TEMP)])
+        self.assertEqual((res.rows[A]["ip6"], res.rows[A]["ip6_stable"]), (TEMP, EUI))
+
+    def test_without_a_stable_address_the_sticky_rule_holds(self):
+        got = self.polls([ndp(TEMP), ndp(TEMP2)], [ndp(TEMP2)], [ndp(TEMP), ndp(TEMP2)])
+        self.assertEqual([r["ip6"] for r in got], [TEMP, TEMP2, TEMP2])
+        self.assertEqual([r["ip6_stable"] for r in got], [""] * 3)
+
+    def test_dhcp6_stable_address_shown_beside_a_ula_eui64(self):
+        got = self.polls([dhcp6(DHCP), ndp(ULA_EUI)], [ndp(ULA_EUI)], [dhcp6(DHCP), ndp(ULA_EUI)])
+        self.assertEqual([r["ip6"] for r in got], [DHCP] * 3)
+        self.assertEqual([r["ip6_stable"] for r in got], [DHCP] * 3)
+
+
 if __name__ == "__main__":
     unittest.main()

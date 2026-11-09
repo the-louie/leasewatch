@@ -219,6 +219,18 @@ class PollTests(PubCase):
         self.assertEqual([g[0] for g in got], [f"lw/device/{ID_B}/attributes", "lw/stats"])
         self.assertEqual(json.loads(got[0][1])["ip"], "10.0.0.9")
 
+    def test_held_ip6_republishes_nothing_and_a_changed_one_does(self) -> None:
+        eui, temp = "2001:db8::ff:fe00:b", "2001:db8::abcd"
+        self.db.q("UPDATE devices SET ip6=? WHERE mac=?", (eui, MAC_B))
+        self.poll()
+        for _ in range(2):  # the displayed address held while the stable one ages out of NDP and returns
+            self.db.q("UPDATE devices SET ip6=?, last_seen=last_seen+60 WHERE mac=?", (eui, MAC_B))
+            self.assertEqual(self.poll(), [("lw/stats", STATS_JSON, 1, True)])
+        self.db.q("UPDATE devices SET ip6=? WHERE mac=?", (temp, MAC_B))
+        got = self.poll()
+        self.assertEqual([g[0] for g in got], [f"lw/device/{ID_B}/attributes", "lw/stats"])
+        self.assertEqual(json.loads(got[0][1])["ip6"], temp)
+
     def test_unwatch_clears_three_retained_topics(self) -> None:
         self.poll()
         self.db.q("UPDATE devices SET watch=0 WHERE mac=?", (MAC_B,))

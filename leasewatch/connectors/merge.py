@@ -880,11 +880,18 @@ def _watch_events(rows: dict[str, dict], before: dict[str, dict], res: MergeResu
 def _update_row(mac: str, cur: dict, m: Merged, sources: str, cfg: Config, state: MergeState, now: int,
                 lease_blind: bool, grace_s: int, res: MergeResult, label_blind: bool = False) -> int:
     """A known device's row updated in place from this poll's record; returns 1 when it writes a history row."""
-    # sticky, no event or history: the stored address stays while still listed in the best class (a temporary
-    # address rotating beside it changes nothing) or while nothing is listed (NDP aged it out)
-    ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
     old_stable = cur.get("ip6_stable") or ""
     stable = _settle_ip6_stable((mac,), old_stable, m)
+    # sticky, no event or history. The stable address is the one shown while it is among this poll's candidates (a
+    # stable address of a worse class than a listed one, such as a DHCPv6 ULA beside an NDP GUA, is not), and also
+    # while it is shown already and merely not listed: NDP ages an EUI-64 entry out while a temporary address outlives it,
+    # and picking from what is listed alone would show the temporary now and the stable address again later.
+    # Without a stable address: the stored one stays while still listed in the best class (a temporary address
+    # rotating beside it changes nothing) or while nothing is listed
+    if stable and (stable in m.ip6s or cur["ip6"] == stable):
+        ip6 = stable
+    else:
+        ip6 = cur["ip6"] if cur["ip6"] in m.ip6s else m.ip6 or cur["ip6"]
     # a stable address replaced by another one is a renumbering; the first one ('' before) is no event
     renumbered = [("ip6", f"{old_stable} -> {stable}")] if old_stable and stable != old_stable else []
     if m.sources <= V6_KINDS:
