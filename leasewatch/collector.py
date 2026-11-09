@@ -150,6 +150,19 @@ class Collector:
     def __init__(self, cfg: Config, db: Database, client: Fw1Client | None = None):
         self.cfg = cfg
         self.db = db
+        self._warn_event_days(cfg)
+        self._lock = threading.Lock()  # guards _Run.result/_Run.phase/_Run.gen between the worker threads and run_once
+        self._init_state()
+        self._refresh_ip_map()
+        self._init_mqtt()
+        specs = cfg.instances
+        self._add_instances(specs, client)
+        self._reconcile_removed(specs)
+        # None: never stored (first poll). _answered: the primary producers that answered at least once
+        self._lease_holders, self._answered = self._load_lease_holders() or (None, None)
+
+    @staticmethod
+    def _warn_event_days(cfg: Config) -> None:
         # a restore by hand holds against PRUNE_DAYS and PRUNE_PRIVATE_DAYS only while its `restored` event exists
         # by the effective thresholds: the merge caps PRUNE_PRIVATE_DAYS at PRUNE_DAYS when both are on
         private = min(cfg.prune_private_days, cfg.prune_days) if cfg.prune_days > 0 else cfg.prune_private_days
@@ -158,35 +171,25 @@ class Collector:
         if prune[0] > 0 and cfg.event_days < prune[0]:
             log.warning("EVENT_DAYS=%d is below %s=%d: a device restored by hand is protected for %d days only",
                         cfg.event_days, prune[1], prune[0], cfg.event_days)
-        self._lock = threading.Lock()  # guards _Run.result/_Run.phase/_Run.gen between the worker threads and run_once
-        specs = cfg.instances
-        # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
-        self._ctx = instances_context(specs)
-        self._ctx.device_names = self._device_names
-        self._ctx.device_ips = self._device_ips
+
+    def _init_state(self) -> None:
         # before the instances are built: a connector may call device_names() in __init__
         self._poll_hosts: dict[str, str] = {}  # mac -> hostname from this poll's firewall data, for _device_names()
         self._poll_ips: dict[str, str] = {}  # ip -> mac from this poll's sightings, for the ip map
         # ip -> device key, read by _device_ips() from any thread: rebuilt once per poll after the commit and handed
         # over by rebinding (never changed in place); until the first poll, the stored rows
         self._ip_map: Mapping[str, str] = MappingProxyType({})
-        self._refresh_ip_map()
         self._connectors: dict = {}
         self._closed = False
         self._poll_spell: tuple | None = None  # key of the poll crash being logged; None when polls work
         self._poll_fails = 0  # failed polls in the current spell
-        self._mail_backoff = notify.Backoff(cfg.poll_seconds)  # per channel wait after a failed send (this process only)
+        self._mail_backoff = notify.Backoff(self.cfg.poll_seconds)  # per channel wait after a failed send (this process only)
         self._mail_failing = False  # the queue could not be cleared since the last send that worked: warned once
         self._alert_failing = False  # alerts could not be sent since the last send that worked: warned once
         self._alert_mark_cleared = False  # alerts off: the mark was removed once in this process
         self._alert_started = False  # the first alert pass of this process has read the pending events
         self._notify_ok: dict[str, bool] = {}  # notify.<channel>.ok as last written to the meta table
         self._fail_unrecorded = False  # "cannot record the failed poll" already logged in this spell
-        # MQTT presence (MQTT_URL set): published after each good poll; its retry wait is the "mqtt" channel's backoff
-        self._mqtt = Publisher(cfg, db, __version__) if cfg.mqtt_on else None
-        # the "mqtt" event channel publishes through the publisher's connection (none: it is not tried, the message
-        # stays queued; only the publisher's own failures move the "mqtt" backoff then)
-        notify.set_shared_client(lambda: self._mqtt.client if self._mqtt and self._mqtt.connected else None)
         self._mqtt_failed_polls = 0  # failed polls in a row; at SOURCE_DOWN_POLLS the status goes offline
         self._mqtt_failing = False  # the broker could not be reached since the last publish that worked: warned once
         self._runs: dict[str, _Run] = {}  # in LW_CONNECTORS order: the merge's tie-break order
@@ -194,8 +197,28 @@ class Collector:
         # committed: written by whichever outcome transaction comes next, dropped only after it committed
         self._pending_src: list[tuple[int, str, str]] = []
         self._pending_down: dict[str, str] = {}
+        self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
+        self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
+        self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
+        self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
+
+    def _init_mqtt(self) -> None:
+        # MQTT presence (MQTT_URL set): published after each good poll; its retry wait is the "mqtt" channel's backoff
+        self._mqtt = Publisher(self.cfg, self.db, __version__) if self.cfg.mqtt_on else None
+        # the "mqtt" event channel publishes through the publisher's connection (none: it is not tried, the message
+        # stays queued; only the publisher's own failures move the "mqtt" backoff then)
+        notify.set_shared_client(lambda: self._mqtt.client if self._mqtt and self._mqtt.connected else None)
+
+    def _add_instances(self, specs: list[InstanceSpec], client: Fw1Client | None) -> None:
+        # one context for all instances: it lends them the device names (the switch names unnamed uplinks with them)
+        self._ctx = instances_context(specs)
+        self._ctx.device_names = self._device_names
+        self._ctx.device_ips = self._device_ips
         for spec in specs:
             self._add(spec, client if spec.name == "fw1" else None)
+
+    def _reconcile_removed(self, specs: list[InstanceSpec]) -> None:
+        db = self.db
         # an instance removed from the configuration (or renamed) would keep its "Seen by" line forever: its rows never
         # update again. Disabled instances are still configured, so theirs stay (writes to the seen table).
         # devices.loc_source naming such an instance would credit the location to a source that no longer exists
@@ -233,12 +256,6 @@ class Collector:
         if pruned or cleared:
             log.info("removed %d seen rows and %d location sources of instances that are no longer configured",
                      pruned, cleared)
-        self._no_lease_since: dict[str, int] = {}  # mac -> first poll that listed it without a lease (grace/immediate)
-        self._undecided_since: dict[str, int] = {}  # new private MAC -> first poll it was held back (lease producer down)
-        # None: never stored (first poll). _answered: the primary producers that answered at least once
-        self._lease_holders, self._answered = self._load_lease_holders() or (None, None)
-        self._prune_ref: tuple[int, float] | None = None  # (event prune reference, monotonic time) of the last _write
-        self._baseline_wait_logged = False  # the "baseline held back" warning is logged once, not every poll
 
     def _load_lease_holders(self) -> tuple[frozenset[str], frozenset[str]] | None:
         """(the instances that listed a lease when they last answered, the instances that answered at least once)
