@@ -2,7 +2,7 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.7.0 (2026-11-09)
 
 ### Changed
 - A private (locally administered) MAC is shown in gold in the device list instead of a yellow row border, and the 🕵️ next to the MAC is gone (the words *private address* stay under the name, now in gold and without the 🕵️ that the narrow layout showed there; the device panel keeps the icon).
