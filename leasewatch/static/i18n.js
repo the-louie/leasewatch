@@ -282,6 +282,10 @@ window.LW_STRINGS = {
     "type.arp": "fixed address",
     "type.dynamic": "DHCP",
     "type.static": "DHCP static",
+    "warn.dropped": "records dropped",
+    "warn.kea6_unavailable": "DHCPv6 leases unavailable",
+    "warn.labels_unavailable": "reservations unavailable",
+    "warn.ndp_unavailable": "NDP table unavailable",
   },
   sv: {
     "app.click_to_copy": "Klicka för att kopiera",
@@ -561,5 +565,9 @@ window.LW_STRINGS = {
     "type.arp": "fast adress",
     "type.dynamic": "DHCP",
     "type.static": "DHCP statisk",
+    "warn.dropped": "poster förkastade",
+    "warn.kea6_unavailable": "DHCPv6-leases kan inte läsas",
+    "warn.labels_unavailable": "reservationer kan inte läsas",
+    "warn.ndp_unavailable": "NDP-tabellen kan inte läsas",
   },
 };

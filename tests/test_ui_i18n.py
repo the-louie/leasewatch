@@ -69,6 +69,9 @@ def kind_keys() -> list[str]:
     return ["kind." + k for k in re.findall(r"\"([a-z_]+)\"", block)]
 
 
+WARN_KEYS = ["warn.dropped", "warn.kea6_unavailable", "warn.labels_unavailable", "warn.ndp_unavailable"]
+
+
 def computed_key_args() -> set[str]:
     """The argument text of every t() call whose key is not a string literal."""
     return set(re.findall(r"\bt\((?![\")])([^,)]*)", (STATIC / "app.js").read_text(encoding="utf-8")))
@@ -131,9 +134,9 @@ class I18nDriftTest(unittest.TestCase):
             self.assertEqual(" ".join(value.split()), self.en[key], f"{key} ({name})")
 
     # every key in every section is used: by a mark in index.html, a t("…") literal in app.js, or a key app.js builds
-    # (kind.* in kindText, one per EV_KINDS kind); the next test keeps that list of built keys complete
+    # (kind.* in kindText, one per EV_KINDS kind; warn.* in warnText, the connector warning keys); the next test keeps that list of built keys complete
     def test_no_dead_keys(self) -> None:
-        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs} | set(app_keys()) | set(kind_keys())
+        used = {k for k, _ in self.marks.texts} | {k for _, _, k, _ in self.marks.attrs} | set(app_keys()) | set(kind_keys()) | set(WARN_KEYS)
         dead = [k for k in self.en if k not in used]
         self.assertEqual(dead, [])
 

@@ -217,7 +217,7 @@
       // read in the failing ones, so its old "ok" is shown grey, not green
       // a last good poll in the future (the clock stepped back) says nothing: then the instance's own result is shown
       const old = !m.last_poll_ok && s.ts && m.last_poll_ts && s.ts <= m.last_poll_ts && !(m.last_poll_ts > m.now);
-      const tip = old ? t("status.not_read", { name, ago: rel(s.ts) }) : s.ok ? t("status.ok", { name }) : `${name}: ${s.error}`;
+      const tip = old ? t("status.not_read", { name, ago: rel(s.ts) }) : s.ok ? (s.warnings?.length ? `${name}: ${s.warnings.map(warnText).join(", ")}` : t("status.ok", { name })) : `${name}: ${s.error}`;
       txt.insertAdjacentHTML("beforeend", `<span class="src" title="${esc(tip)}"><span class="dot ${old ? "" : s.ok ? "ok" : "bad"}"></span>${esc(label)}</span>`);
     }
     $("#status").title = m.last_error ? t("status.last_error", { msg: m.last_error }) : t("status.polls_every", { n: m.poll_seconds });
@@ -626,6 +626,8 @@
   }
   // an event kind's label; a kind the table lacks (a newer server) shows as sent
   const kindText = k => { const key = "kind." + k, v = t(key); return v === key ? k : v; };
+  // a connector warning key (a read the connector could not make); an unknown one shows as it is
+  const warnText = w => { const key = "warn." + w, v = t(key); return v === key ? w : v; };
 
   // ---------- drawer ----------
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,

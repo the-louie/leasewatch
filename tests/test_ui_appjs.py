@@ -302,6 +302,22 @@ renderStatus(); out.normal = $("#statusText").innerHTML;
         self.assertIn('title="fw1: boom"><span class="dot bad">', out["normal"])
         self.assertIn('<span class="dot "></span>sw', out["normal"])
 
+    # an OK connector with warnings: the tooltip names them in the page's language, an unknown key as it is; the dot stays green
+    def test_status_tooltip_warnings(self) -> None:
+        script = r"""const showBanner = () => {};
+window.LW_STRINGS.sv = { "warn.ndp_unavailable": "NDP-tabellen kan inte läsas" };
+//--
+const now = Math.round(Date.now() / 1000);
+const conns = [{ name: "fw1", label: "fw1", ok: true, error: "", ts: now, warnings: ["ndp_unavailable", "odd_key"] }, { name: "sw1", label: "sw", ok: true, error: "", ts: now, warnings: [] }];
+state.meta = { now, stale: false, last_poll_ts: now, last_poll_ok: true, last_error: "", poll_seconds: 60, last_raw: "", new_days: 7, connectors: conns };
+renderStatus(); out.html = $("#statusText").innerHTML;
+"""
+        en = _run(["renderStatus", "warnText"], script)
+        self.assertIn('title="fw1: NDP table unavailable, odd_key"><span class="dot ok">', en["html"])
+        self.assertIn('title="sw1: OK"><span class="dot ok">', en["html"])
+        sv = _run(["renderStatus", "warnText"], 'location.search = "?lang=sv";\n' + script)
+        self.assertIn('title="fw1: NDP-tabellen kan inte läsas, odd_key"', sv["html"])
+
     # restoring focus after a re-render must not scroll the focused row back into view
     def test_focus_restore_does_not_scroll(self) -> None:
         out = _run(["renderTable", "filtered"], r"""const setFields = () => {}, openDrawer = () => {};
