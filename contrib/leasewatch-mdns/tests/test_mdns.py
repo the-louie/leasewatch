@@ -107,10 +107,11 @@ class FakeSocketFactory:
         self.link_options = link_options
         self.sockets: list[FakeSocket] = []
 
-    def __call__(self) -> FakeSocket:
+    def __call__(self, group: str = mc.MDNS_GROUP, port: int = mc.MDNS_PORT) -> FakeSocket:
         if self.error is not None:
             raise self.error
         s = FakeSocket(link_options=self.link_options)
+        s.group, s.port = group, port  # which group and port the connector asked for
         self.sockets.append(s)
         return s
 
@@ -154,7 +155,7 @@ class SettingsTest(Base):
         self.assertEqual(info.produces, frozenset({"sighting"}))
         self.assertEqual(info.roles, frozenset({"names"}))
         self.assertEqual({s.key: s.default for s in info.settings},
-                         {"interface": "", "max_age_days": "7", "max_entries": "4096", "relays": ""})
+                         {"interface": "", "max_age_days": "7", "max_entries": "4096", "relays": "", "ssdp": "0"})
 
     def test_needs_device_ips(self) -> None:
         old_host = types.SimpleNamespace(now=lambda: NOW)  # a host older than 1.5: no device_ips
@@ -753,6 +754,149 @@ class JoinTest(unittest.TestCase):
         c = MdnsConnector("mdns1", {}, HostContext(now=lambda: NOW))
         self.addCleanup(c.close)
         self.assertEqual(c.collect().stats["joined"], 2)
+
+
+class SsdpSocketTest(Base):
+    """SSDP=1: a second socket and listener on 239.255.255.250:1900, with its own counters and rate budget."""
+
+    def test_ssdp_off_opens_one_socket(self) -> None:
+        c = self.conn()
+        self.assertFalse(c.ssdp)
+        stats = c.collect().stats
+        self.assertEqual([(s.group, s.port) for s in self.factory.sockets], [(mc.MDNS_GROUP, mc.MDNS_PORT)])
+        self.assertIsNone(c._ssdp_thread)
+        self.assertFalse(any(k.startswith("ssdp_") for k in stats))
+
+    def test_ssdp_on_opens_two_sockets_close_closes_both(self) -> None:
+        c = self.conn(ssdp="1")
+        c.check()
+        self.assertEqual([(s.group, s.port) for s in self.factory.sockets],
+                         [("224.0.0.251", 5353), ("239.255.255.250", 1900)])
+        threads = (c._thread, c._ssdp_thread)
+        self.assertTrue(all(t is not None and t.is_alive() and t.daemon for t in threads))
+        self.assertEqual(threads[1].name, "ssdp-mdns1")
+        for s in self.factory.sockets:  # the link options are asked for on both
+            self.assertEqual(s.options, [(socket.IPPROTO_IP, mc.IP_RECVTTL, 1), (socket.IPPROTO_IP, mc.IP_PKTINFO, 1)])
+        c.check()  # running: no third socket
+        self.assertEqual(len(self.factory.sockets), 2)
+        c.close()
+        self.assertTrue(all(s.closed for s in self.factory.sockets))
+        self.assertFalse(any(t.is_alive() for t in threads))
+        self.assertIsNone(c._ssdp_thread)
+
+    def test_ssdp_bind_failure_leaves_nothing_open(self) -> None:
+        sockets: list[FakeSocket] = []
+
+        def factory(group: str = mc.MDNS_GROUP, port: int = mc.MDNS_PORT) -> FakeSocket:
+            if port == mc.SSDP_PORT:
+                raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+            sockets.append(FakeSocket())
+            return sockets[-1]
+
+        c = MdnsConnector("mdns1", {"ssdp": "1"}, self.ctx(), socket_factory=factory)
+        self.addCleanup(c.close)
+        with self.assertRaises(ConnectorError) as cm:
+            c.check()
+        self.assertEqual(str(cm.exception), f"mdns: cannot listen on 1900 ({os.strerror(errno.EADDRINUSE)})")
+        self.assertEqual(len(sockets), 1)
+        self.assertTrue(sockets[0].closed)
+        self.assertIsNone(c._thread)
+        self.assertIsNone(c._ssdp_thread)
+        self.assertIsNone(c._sock)
+
+    def test_ssdp_packet_counted_apart(self) -> None:
+        c = self.conn(ssdp="true")
+        with mock.patch.object(dns, "parse_response") as parse:
+            c.check()
+            s = self.factory.sockets[1]
+            s.deliver(b"NOTIFY * HTTP/1.1\r\n\r\n", dst=mc.SSDP_GROUP)
+            self.assertTrue(wait_until(lambda: s.received == 1 and c._counts["ssdp_packets"] == 1))
+            self.assertEqual(parse.call_count, 0)  # never handed to the mDNS parser
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_packets"], stats["ssdp_dropped_rate"], stats["ssdp_errors"]), (1, 0, 0))
+        self.assertEqual((stats["packets"], stats["unicast"], stats["off_link"], stats["errors"]), (0, 0, 0, 0))
+        self.assertEqual(stats["ssdp_joined"], 0)  # the fake factory joins nothing
+        self.assertEqual(c.collect().stats["ssdp_packets"], 0)  # counted per collect()
+
+    def test_rate_windows_independent(self) -> None:
+        c = self.conn(ssdp="1")
+        clock = [5000.2]
+        c._clock = lambda: clock[0]
+        with mock.patch.object(dns, "parse_response", return_value=packet()) as parse:
+            for _ in range(201):
+                c._handle_ssdp(b"", ("10.0.0.40", 1900), None)
+            for _ in range(200):
+                c._handle(b"", (IP_A, 5353))
+            self.assertEqual(parse.call_count, 200)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_packets"], stats["ssdp_dropped_rate"]), (201, 1))
+        self.assertEqual((stats["packets"], stats["dropped_rate"]), (200, 0))
+
+    def test_ssdp_receive_errors_counted_apart(self) -> None:
+        c = self.conn(ssdp="1")
+        with mock.patch.object(mc, "RECV_TIMEOUT", 0.01):
+            c.check()
+            s = self.factory.sockets[1]
+            s.fail_next(OSError(errno.ENETDOWN, os.strerror(errno.ENETDOWN)))
+            s.deliver(dst=mc.SSDP_GROUP)
+            self.assertTrue(wait_until(lambda: c._counts["ssdp_packets"] == 1))
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_errors"], stats["errors"]), (1, 0))
+
+    def test_validate_ssdp(self) -> None:
+        for v in ("0", "1", "true", "false", "yes", "off", " TRUE "):
+            with self.subTest(value=v):
+                self.assertEqual(self.conn(ssdp=v).validate(), [])
+        for v in ("maybe", "2", ""):
+            with self.subTest(value=v):
+                problems = self.conn(ssdp=v).validate()
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("SSDP", problems[0])
+        self.assertEqual(self.factory.sockets, [])
+
+    def test_link_info_ifindex(self) -> None:
+        ttl = (socket.IPPROTO_IP, socket.IP_TTL, struct.pack("=i", 4))
+        info = (socket.IPPROTO_IP, mc.IP_PKTINFO, struct.pack("=i4s4s", 7, socket.inet_aton("10.0.0.2"),
+                                                              socket.inet_aton(mc.SSDP_GROUP)))
+        self.assertEqual(mc._link_info([ttl, info]), (4, mc.SSDP_GROUP, 7))
+        self.assertEqual(mc._link_info([info]).ifindex, 7)
+        self.assertEqual(mc._link_info([]), (None, None, None))
+        self.assertEqual(mc._link_reject([ttl, info]), (False, False))  # the mDNS rule: not the mDNS group
+
+
+class SsdpJoinTest(unittest.TestCase):
+    """_default_socket(group, port) for SSDP: the same joins, on port 1900 and 239.255.255.250."""
+
+    setUp = JoinTest.setUp
+    open = JoinTest.open
+
+    def test_ssdp_group_and_port(self) -> None:
+        c = MdnsConnector("mdns1", {"ssdp": "1"}, HostContext(now=lambda: NOW))
+        with self.assertLogs("leasewatch.contrib.mdns", "INFO") as logs:
+            sock = c._default_socket(group=mc.SSDP_GROUP, port=mc.SSDP_PORT)
+        ssdp = socket.inet_aton(mc.SSDP_GROUP)
+        self.assertEqual(sock.bound, ("", 1900))
+        self.assertEqual(sock.joins(), [struct.pack("=4s4si", ssdp, ANY, 2), struct.pack("=4s4si", ssdp, ANY, 3)])
+        self.assertEqual((c._ssdp_joined, c._ssdp_joined_idx), (2, frozenset({2, 3})))
+        self.assertEqual((c._joined, c._joined_idx), (0, frozenset()))  # the mDNS figures are untouched
+        self.assertIn("mdns: listening for SSDP on 2 interfaces", [r.getMessage() for r in logs.records])
+
+    def test_joined_indexes(self) -> None:
+        c, _sock = self.open()
+        self.assertEqual(c._joined_idx, frozenset({2, 3}))
+        c, _sock = self.open("d2")
+        self.assertEqual(c._joined_idx, frozenset({3}))
+        c, _sock = self.open("10.0.0.2")  # joined by address: the kernel picks the interface, no index is known
+        self.assertEqual(c._joined_idx, frozenset())
+
+    def test_ssdp_joined_in_stats(self) -> None:
+        c = MdnsConnector("mdns1", {"ssdp": "1"}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        stats = c.collect().stats
+        self.assertEqual((stats["joined"], stats["ssdp_joined"]), (2, 2))
+        self.assertEqual([s.bound for s in RecordingSocket.made], [("", 5353), ("", 1900)])
+        c.close()
+        self.assertTrue(all(s.closed for s in RecordingSocket.made))
 
 
 class ListenOnlyTest(unittest.TestCase):

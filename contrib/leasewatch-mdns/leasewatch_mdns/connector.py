@@ -1,7 +1,8 @@
 """mDNS/DNS-SD as a connector: device names and models heard in the announcements on the LAN.
 
 Listen-only. One daemon thread binds UDP 5353, joins the group 224.0.0.251 and receives; it never transmits a packet
-(no query, no probe, no answer). What it hears is a name and an IPv4 address; the host's device_ips() turns the
+(no query, no probe, no answer). With SSDP=1 a second daemon thread does the same on UDP 1900 and the group
+239.255.255.250 (SSDP announcements), with its own socket, rate budget and counters. What it hears is a name and an IPv4 address; the host's device_ips() turns the
 address into the device's MAC. A name whose address the host does not know is counted as unmapped and dropped.
 
 The names live in a cache keyed by MAC between polls. collect() returns a snapshot of it as sightings of kind "scan"
@@ -19,10 +20,10 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 
 from leasewatch.connectors import (API_VERSION, Batch, ConnectorError, ConnectorInfo, HostContext, Setting,
-                                   SettingsMixin, Sighting)
+                                   SettingsMixin, Sighting, parse_bool)
 
 from . import dns
 
@@ -30,6 +31,8 @@ log = logging.getLogger("leasewatch.contrib.mdns")
 
 MDNS_GROUP = "224.0.0.251"
 MDNS_PORT = 5353
+SSDP_GROUP = "239.255.255.250"  # SSDP (UPnP) announcements; with SSDP=1 a second socket listens there
+SSDP_PORT = 1900
 RECV_SIZE = 9000  # the largest mDNS packet RFC 6762 allows over a jumbo-frame link
 RECV_TIMEOUT = 1.0  # seconds; the listener checks its stop event at least this often
 RATE_LIMIT = 200  # packets parsed per second; the rest are counted in dropped_rate and skipped
@@ -90,10 +93,35 @@ def _relay_set(value: str) -> tuple[frozenset[str], int]:
     return frozenset(found), bad
 
 
-def _link_reject(ancdata: Any) -> tuple[bool, bool]:
-    """(ttl_ok, dest_ok) for a packet with these control messages: the IP TTL is 255, and the destination is the
-    group. A TTL or destination that is missing is not ok."""
-    ttl = dst = None
+class _Window:
+    """The rate budget of one socket: at most `limit` packets per second of the connector's clock. Each protocol
+    has its own, so a flood on one cannot starve the other. Used with the connector's lock held."""
+
+    def __init__(self, limit: int = RATE_LIMIT) -> None:
+        self.limit = limit
+        self.second = -1  # the second the budget counts in
+        self.count = 0
+
+    def take(self, second: int) -> bool:
+        """True when one more packet fits in `second`'s budget (and counts it), False when it is spent."""
+        if second != self.second:
+            self.second, self.count = second, 0
+        if self.count >= self.limit:
+            return False
+        self.count += 1
+        return True
+
+
+class LinkInfo(NamedTuple):
+    """What a packet's control messages say: its IP TTL, its destination address (ipi_addr) and the index of the
+    interface it arrived on (ipi_ifindex); None for each one missing."""
+    ttl: int | None
+    dst: str | None
+    ifindex: int | None
+
+
+def _link_info(ancdata: Any) -> LinkInfo:
+    ttl = dst = ifindex = None
     for level, kind, data in ancdata:
         if level != socket.IPPROTO_IP:
             continue
@@ -103,8 +131,17 @@ def _link_reject(ancdata: Any) -> tuple[bool, bool]:
             elif len(data) == 1:  # the BSDs: one byte
                 ttl = data[0]
         elif kind == IP_PKTINFO and len(data) >= 12:
+            # struct in_pktinfo: the interface index (a native int), the local address, the destination address
+            ifindex = struct.unpack("=i", data[:4])[0]
             dst = socket.inet_ntoa(data[8:12])
-    return ttl == LINK_TTL, dst == MDNS_GROUP
+    return LinkInfo(ttl, dst, ifindex)
+
+
+def _link_reject(ancdata: Any) -> tuple[bool, bool]:
+    """(ttl_ok, dest_ok) for an mDNS packet with these control messages: the IP TTL is 255, and the destination is
+    the group. A TTL or destination that is missing is not ok."""
+    info = _link_info(ancdata)
+    return info.ttl == LINK_TTL, info.dst == MDNS_GROUP
 
 
 class MdnsConnector(SettingsMixin):
@@ -121,34 +158,49 @@ class MdnsConnector(SettingsMixin):
                     help="names kept at most; the oldest heard goes first"),
             Setting("relays", default="",
                     help="comma-separated IPv4 addresses of mDNS repeaters whose packets are accepted at any TTL"),
+            Setting("ssdp", default="0",
+                    help="also listen to SSDP announcements on 239.255.255.250:1900 for a product label; the socket "
+                         "is never written to"),
         ),
     )
 
     def __init__(self, name: str, settings: Mapping[str, str], ctx: HostContext | None = None,
-                 socket_factory: Callable[[], Any] | None = None) -> None:
+                 socket_factory: Callable[..., Any] | None = None) -> None:
         self._init_settings(name, settings, ctx)
         self.interface = self.settings["interface"].strip()
         self.max_age_days = _int(self.settings["max_age_days"], "7")
         self.max_entries = _int(self.settings["max_entries"], "4096")
         self.relays = _relay_set(self.settings["relays"])[0]
+        self.ssdp = bool(parse_bool(self.settings["ssdp"]))
+        # called with no arguments for the mDNS socket and with group= and port= for the SSDP one
         self._socket_factory = socket_factory or self._default_socket
-        self._clock: Callable[[], float] = time.monotonic  # the rate budget and the warning interval
-        self._lock = threading.Lock()  # the cache, its IP index and the counters
+        self._clock: Callable[[], float] = time.monotonic  # the rate budgets and the warning interval
+        self._lock = threading.Lock()  # the cache, its IP index, the counters and the rate windows
         self._cache: dict[str, _Entry] = {}  # mac -> entry, in the order last heard (oldest first)
         self._by_ip: dict[str, str] = {}  # ip -> the mac whose entry holds it
-        self._counts = dict.fromkeys(("packets", "malformed", "unmapped", "wrong_port", "off_link", "unicast",
-                                      "relayed", "dropped_rate", "errors"), 0)
-        self._joined = 0  # interfaces the group was joined on by the current socket
-        self._window = -1  # the second the rate budget counts in
-        self._in_window = 0
+        keys = ["packets", "malformed", "unmapped", "wrong_port", "off_link", "unicast", "relayed", "dropped_rate",
+                "errors"]
+        if self.ssdp:  # the SSDP socket's counters, in the same dict; without SSDP the stats are as before
+            keys += ["ssdp_packets", "ssdp_dropped_rate", "ssdp_errors"]
+        self._counts = dict.fromkeys(keys, 0)
+        self._joined = 0  # interfaces the mDNS group was joined on by the current socket
+        self._ssdp_joined = 0  # the same for the SSDP group
+        # the interface indexes each group was joined on by index (empty when INTERFACE is an address, or with an
+        # injected socket factory)
+        self._joined_idx: frozenset[int] = frozenset()
+        self._ssdp_joined_idx: frozenset[int] = frozenset()
+        self._mdns_window = _Window()
+        self._ssdp_window = _Window()
         self._warned: dict[str, float] = {}  # source ip -> clock of its last malformed-packet warning
         self._warn_since = -WARN_INTERVAL  # clock when the current window of WARN_BUDGET warnings started
         self._warn_count = 0  # warnings logged in that window
         self._link_warned = False  # the "cannot check the sender's link" warning was logged
         self._state = threading.Lock()  # starting and stopping the listener
         self._stop = threading.Event()
-        self._sock: Any = None
+        self._sock: Any = None  # the mDNS socket and its listener
         self._thread: threading.Thread | None = None
+        self._ssdp_sock: Any = None  # the SSDP socket and its listener (SSDP=1 only)
+        self._ssdp_thread: threading.Thread | None = None
 
     # --- settings ----------------------------------------------------------------------------------------------
 
@@ -156,6 +208,8 @@ class MdnsConnector(SettingsMixin):
         problems = self._generic_problems()
         if not hasattr(self.ctx, "device_ips"):
             problems.append(NEEDS_HOST)
+        if parse_bool(self.settings["ssdp"]) is None:
+            problems.append("SSDP must be a boolean (1/0, true/false, yes/no, on/off)")
         bad = _relay_set(self.settings["relays"])[1]
         if bad:
             problems.append(f"relays entry {bad} is not an IPv4 address")
@@ -175,35 +229,38 @@ class MdnsConnector(SettingsMixin):
 
     # --- the socket --------------------------------------------------------------------------------------------
 
-    def _default_socket(self) -> socket.socket:
-        """A UDP socket on port 5353 that is a member of 224.0.0.251, on every interface or on the configured one.
+    def _default_socket(self, group: str = MDNS_GROUP, port: int = MDNS_PORT) -> socket.socket:
+        """A UDP socket on `port` that is a member of `group` (by default 5353 and 224.0.0.251; for SSDP 1900 and
+        239.255.255.250), on every interface or on the configured one. It only receives.
 
         It binds to the wildcard address even when an interface is configured: on Linux a socket bound to a unicast
         address receives no multicast. The interface is chosen by the group membership instead. Without an
         interface the group is joined on each non-loopback interface by its index (one join with the address
         0.0.0.0 would join on the default-route interface only); an interface that refuses the join is skipped,
         and no join at all fails the start."""
-        group = socket.inet_aton(MDNS_GROUP)
+        group_addr = socket.inet_aton(group)
         any_addr = socket.inet_aton("0.0.0.0")
+        indexes: set[int] = set()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "SO_REUSEPORT"):  # another responder (avahi) may hold the port as well
+            if hasattr(socket, "SO_REUSEPORT"):  # another responder (avahi, an SSDP stack) may hold the port as well
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            sock.bind(("", MDNS_PORT))
+            sock.bind(("", port))
             if self.interface:
                 try:  # hear only this interface, not the groups another socket joined elsewhere
                     sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
                 except OSError:  # not Linux
                     pass
                 try:
-                    mreq = group + socket.inet_aton(str(ipaddress.IPv4Address(self.interface)))
+                    mreq = group_addr + socket.inet_aton(str(ipaddress.IPv4Address(self.interface)))
                 except ValueError:  # a name: struct ip_mreqn (group, local address any, interface index)
                     try:
                         index = socket.if_nametoindex(self.interface)
                     except OSError:
                         raise ConnectorError(f"mdns: no interface named {self.interface}") from None
-                    mreq = struct.pack("=4s4si", group, any_addr, index)
+                    mreq = struct.pack("=4s4si", group_addr, any_addr, index)
+                    indexes.add(index)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
                 joined = 1
             else:
@@ -217,21 +274,26 @@ class MdnsConnector(SettingsMixin):
                         continue
                     try:
                         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                                        struct.pack("=4s4si", group, any_addr, index))
+                                        struct.pack("=4s4si", group_addr, any_addr, index))
                     except OSError as e:  # down, no IPv4, or no multicast: the others still count
                         failed += 1
-                        log.debug("connector %s: cannot join %s on %s (%s)", self.name, MDNS_GROUP, ifname,
+                        log.debug("connector %s: cannot join %s on %s (%s)", self.name, group, ifname,
                                   _errno_text(e))
                         continue
                     joined += 1
+                    indexes.add(index)
                 if not joined:
-                    raise ConnectorError(f"mdns: cannot join {MDNS_GROUP} on any interface ({failed} refused)")
+                    raise ConnectorError(f"mdns: cannot join {group} on any interface ({failed} refused)")
             sock.settimeout(RECV_TIMEOUT)
         except BaseException:
             sock.close()
             raise
-        self._joined = joined
-        log.info("mdns: listening on %d interfaces", joined)
+        if group == SSDP_GROUP:
+            self._ssdp_joined, self._ssdp_joined_idx = joined, frozenset(indexes)
+            log.info("mdns: listening for SSDP on %d interfaces", joined)
+        else:
+            self._joined, self._joined_idx = joined, frozenset(indexes)
+            log.info("mdns: listening on %d interfaces", joined)
         return sock
 
     def _start(self) -> None:
@@ -242,13 +304,33 @@ class MdnsConnector(SettingsMixin):
                 sock = self._socket_factory()
             except OSError as e:
                 raise ConnectorError(f"mdns: cannot listen on {MDNS_PORT} ({_errno_text(e)})") from None
-            checked = self._link_options(sock)
-            # a new event per thread: a listener that outlived close()'s join must not be woken up again
-            self._stop = threading.Event()
+            ssdp_sock = None
+            try:
+                checked = self._link_options(sock)
+                if self.ssdp:
+                    try:
+                        ssdp_sock = self._socket_factory(group=SSDP_GROUP, port=SSDP_PORT)
+                    except OSError as e:
+                        raise ConnectorError(f"mdns: cannot listen on {SSDP_PORT} ({_errno_text(e)})") from None
+                    ssdp_checked = self._link_options(ssdp_sock)
+            except BaseException:  # no half-started connector: the socket already open is closed again
+                for s in (ssdp_sock, sock):
+                    if s is not None:
+                        s.close()
+                raise
+            # one new event per start, shared by both listeners: a listener that outlived close()'s join must not
+            # be woken up again
+            stop = self._stop = threading.Event()
             self._sock = sock
-            self._thread = threading.Thread(target=self._run, args=(sock, self._stop, checked),
+            self._thread = threading.Thread(target=self._run, args=(sock, stop, checked, self._handle_mdns),
                                             name=f"mdns-{self.name}", daemon=True)
             self._thread.start()
+            if ssdp_sock is not None:
+                self._ssdp_sock = ssdp_sock
+                self._ssdp_thread = threading.Thread(
+                    target=self._run, args=(ssdp_sock, stop, ssdp_checked, self._handle_ssdp, "ssdp_"),
+                    name=f"ssdp-{self.name}", daemon=True)
+                self._ssdp_thread.start()
 
     def _link_options(self, sock: Any) -> bool:
         """Ask for each packet's TTL and destination address (RFC 6762 11). False when the OS refuses: the listener
@@ -280,40 +362,57 @@ class MdnsConnector(SettingsMixin):
             return ""
         return "relayed" if isinstance(addr, tuple) and addr and addr[0] in self.relays else "off_link"
 
-    def _run(self, sock: Any, stop: threading.Event, checked: bool = False) -> None:
-        """The listener: receive until stopped. No exception ends it; each one is counted in "errors". With
-        `checked`, each packet comes with its TTL and destination, and one from off the link or sent unicast is
-        rejected."""
+    def _run(self, sock: Any, stop: threading.Event, checked: bool = False,
+             handler: Callable[[bytes, Any, Any], None] | None = None, prefix: str = "") -> None:
+        """One listener: receive on `sock` until stopped and pass each packet to `handler(data, addr, ancdata)`
+        (the mDNS one by default). With `checked`, ancdata is the packet's control messages (its TTL, destination
+        and interface); without, None. No exception ends the loop; each one is counted in `prefix` + "errors"."""
+        handler = handler or self._handle_mdns
+        errors = prefix + "errors"
         while not stop.is_set():
             try:
                 if checked:
                     data, ancdata, _flags, addr = sock.recvmsg(RECV_SIZE, ANC_SIZE)
-                    reject = self._verdict(ancdata, addr)
                 else:
                     data, addr = sock.recvfrom(RECV_SIZE)
-                    reject = ""
+                    ancdata = None
             except TimeoutError:  # socket.timeout
                 continue
             except Exception:  # noqa: BLE001 - a closed or broken socket; never let it end the thread unasked
                 if stop.is_set():
                     break
-                self._count("errors")
+                self._count(errors)
                 log.debug("connector %s: receive failed", self.name, exc_info=True)
                 stop.wait(RECV_TIMEOUT)  # a socket that fails at once every time must not spin
                 continue
             if stop.is_set():
                 break
             try:
-                self._handle(data, addr, reject)
+                handler(data, addr, ancdata)
             except Exception:  # noqa: BLE001 - one bad packet or a failing device_ips() must not end the thread
-                self._count("errors")
+                self._count(errors)
                 log.debug("connector %s: packet not handled", self.name, exc_info=True)
 
     # --- what is heard -----------------------------------------------------------------------------------------
 
+    def _handle_mdns(self, data: bytes, addr: Any, ancdata: Any) -> None:
+        """One packet from the mDNS socket: the RFC 6762 link verdict from its control messages (none when the OS
+        cannot give them: then every source is accepted), then _handle()."""
+        self._handle(data, addr, "" if ancdata is None else self._verdict(ancdata, addr))
+
+    def _handle_ssdp(self, data: bytes, addr: Any, ancdata: Any) -> None:
+        """One packet from the SSDP socket, with its control messages (None when the OS cannot give them; the TTL
+        rule of mDNS does not apply to SSDP). For now it is counted and held to the socket's own rate budget; the
+        NOTIFY parse and the link rule for SSDP build on this."""
+        second = int(self._clock())
+        with self._lock:
+            self._counts["ssdp_packets"] += 1
+            if not self._ssdp_window.take(second):
+                self._counts["ssdp_dropped_rate"] += 1
+
     def _handle(self, data: bytes, addr: Any, reject: str = "") -> None:
-        """One received packet: the link checks (`reject` names the one it failed, or "relayed"), the rate budget, the parse,
-        then every name it carries."""
+        """One received mDNS packet: the link checks (`reject` names the one it failed, or "relayed"), the rate
+        budget, the parse, then every name it carries."""
         second = int(self._clock())
         with self._lock:
             self._counts["packets"] += 1
@@ -323,12 +422,9 @@ class MdnsConnector(SettingsMixin):
             if not (isinstance(addr, tuple) and len(addr) > 1 and addr[1] == MDNS_PORT):
                 self._counts["wrong_port"] += 1  # RFC 6762 6: a response not from port 5353 is not mDNS
                 return
-            if second != self._window:
-                self._window, self._in_window = second, 0
-            if self._in_window >= RATE_LIMIT:
+            if not self._mdns_window.take(second):
                 self._counts["dropped_rate"] += 1
                 return
-            self._in_window += 1
             if reject:  # "relayed": counted only for a packet that goes on to the parser
                 self._counts[reject] += 1
         packet = dns.parse_response(bytes(data))
@@ -424,6 +520,8 @@ class MdnsConnector(SettingsMixin):
                               hostname=e.hostname, label=e.label) for mac, e in entries]
         # the counters cover the time since the previous collect()
         stats = {"names": len(sightings), "joined": self._joined, **counts}
+        if self.ssdp:
+            stats["ssdp_joined"] = self._ssdp_joined
         if not sightings:
             # an empty cache (just started, or nothing heard for MAX_AGE_DAYS) is no evidence that a label was
             # removed: the host keeps the stored labels
@@ -433,12 +531,16 @@ class MdnsConnector(SettingsMixin):
     def close(self) -> None:
         with self._state:
             self._stop.set()
-            sock, self._sock = self._sock, None
-            thread, self._thread = self._thread, None
-        if sock is not None:
-            try:
-                sock.close()
-            except Exception:  # noqa: BLE001 - close() never raises
-                pass
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(JOIN_TIMEOUT)
+            socks = (self._sock, self._ssdp_sock)
+            threads = (self._thread, self._ssdp_thread)
+            self._sock = self._ssdp_sock = self._thread = self._ssdp_thread = None
+        for sock in socks:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:  # noqa: BLE001 - close() never raises
+                    pass
+        deadline = time.monotonic() + JOIN_TIMEOUT  # both listeners together wait at most JOIN_TIMEOUT
+        for thread in threads:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
