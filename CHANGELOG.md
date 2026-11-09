@@ -9,7 +9,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 - The device list's online dot is now a link-type icon in the same colours: Wi-Fi, wired, or a ring when no switch or controller has placed the device; the tooltip says both the type and the online state.
 
 ### Fixed
-- The full device table no longer scrolls sideways on a desktop, so the Mark known column is always in view: from a 1400 px window the page is 1380 px wide (was 1280), and below that the date phrases ("not since the start") wrap when the table is tight.
+- The full device table no longer scrolls sideways on a desktop, so the Mark known column is always in view: from a 1400 px window the page is 1380 px wide (was 1280), and below that the date phrases ("not since the start") wrap when the table is tight. The Mark known button ("Markera som känd") wraps too when the table is tight, in every language and at every width, instead of being cut off at the right edge.
 
 ## 1.6.0 (2026-11-09)
 

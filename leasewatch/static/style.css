@@ -144,13 +144,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .c-where .sig { font-variant-numeric: tabular-nums; }
 .status .src { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
 .status .src .dot { width: 7px; height: 7px; }
-@media (max-width: 1279px) { :lang(sv) .c-act .btn.ack { white-space: normal; text-align: left; line-height: 1.15; } } /* "Markera som känd" wraps where the table is tight */
+.c-act .btn.ack { white-space: normal; text-align: left; line-height: 1.15; } /* "Mark known" / "Markera som känd" wraps where the table is tight, so the table does not scroll sideways */
 th.c-first, th.c-last { white-space: normal; } /* a long heading (Swedish "Första gången sedd") wraps instead of widening the column past its dates */
 .c-first, .c-last { white-space: nowrap; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
-/* below 1400 px the page is capped at 1232 px and a full table is tight: a long phrase ("not since the start") may wrap there, so the actions column fits without a sideways scroll; from 1400 px the page is 100 px wider instead */
+/* below 1400 px the page is capped at 1232 px and a full table is tight: a long phrase ("not since the start") may wrap there, and the Mark known button wraps too (any width), so the table fits without a sideways scroll; from 1400 px the page is 100 px wider and the dates stop wrapping */
 @media (max-width: 1399px) { td.c-first, td.c-last { white-space: normal; } }
 .c-first.recent { color: var(--text); }
-.c-act { width: 1%; text-align: right; white-space: nowrap; }
+.c-act { width: auto; text-align: right; }
 /* click-to-copy MAC and IP text: nothing is added on hover, and "Copied" floats above the text, so no column moves */
 .cp { position: relative; cursor: copy; border-radius: 4px; }
 /* the IPv6 line under the IPv4 one: cut with an ellipsis (the title has it all). overflow: clip with a clip margin keeps
@@ -250,7 +250,6 @@ footer { max-width: 1280px; margin: 0 auto; padding: 0 24px 30px; color: var(--m
   .c-dev { max-width: none; }
   .dev-name { flex-wrap: wrap; row-gap: 2px; } /* a long name and its badges: the badges move to a second line */
   td, th { padding-left: 8px; padding-right: 8px; }
-  .c-act { width: auto; }
   .status span:last-child { display: none; }
   .vlans { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -16px; margin-right: -16px; padding: 0 16px 2px; }
   .chip { flex: none; }

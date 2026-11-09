@@ -261,6 +261,49 @@ const scenarios = {
     }));
     return res;
   },
+  // the Mark known button: per language, width and status filter, whether it ends inside the table's scroll container
+  // and whether the table or the page scrolls sideways (the phone layout too)
+  async actcolumn(page, base) {
+    const res = {};
+    const measure = () => page.evaluate(() => {
+      const wrap = document.querySelector('.table-wrap'), wr = wrap.getBoundingClientRect();
+      const vis = [...document.querySelectorAll('#rows tr')].filter(t => t.offsetParent !== null);
+      const btns = vis.map(t => t.querySelector('.c-act .btn.ack')).filter(Boolean);
+      const dot = vis.length ? vis[0].querySelector('td.c-dot') : null;
+      return { table_scroll: wrap.scrollWidth - wrap.clientWidth,
+               page_scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+               cols: Object.fromEntries([...document.querySelectorAll('#tbl thead th')].filter(t => t.offsetWidth).map(t => [t.className, t.offsetWidth])),
+               btns: btns.length, rows: vis.length, dot_w: dot ? Math.round(dot.getBoundingClientRect().width) : null,
+               btn_over: btns.length ? Math.round(Math.max(...btns.map(b => b.getBoundingClientRect().right)) - wr.right) : null,
+               btn_h: btns.length ? Math.round(Math.max(...btns.map(b => b.getBoundingClientRect().height))) : null,
+               btn_lines: btns.length ? Math.max(...btns.map(b => { const r = document.createRange(); r.selectNodeContents(b);
+                 return new Set([...r.getClientRects()].map(q => Math.round(q.top))).size; })) : null,
+               btn_text: btns.length ? btns[0].textContent : null };
+    });
+    const setFilter = async f => {
+      await page.evaluate(v => { const s = document.querySelector('#fStatus'); s.value = v; s.dispatchEvent(new Event('change')); }, f);
+      await new Promise(r => setTimeout(r, 150));
+    };
+    for (const lang of ['en', 'sv']) {
+      await page.goto(`${base}?lang=${lang}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#rows tr');
+      await new Promise(r => setTimeout(r, 300));
+      res[lang] = {};
+      for (const width of [1280, 1400, 400]) {
+        await page.setViewport({ width, height: 900 });
+        res[lang][width] = {};
+        for (const f of (width === 400 ? ['all'] : ['all', 'online'])) {
+          await setFilter(f);
+          res[lang][width][f] = await measure();
+        }
+      }
+      await setFilter('all');
+    }
+    await page.setViewport({ width: 1400, height: 900 });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#rows tr');
+    return res;
+  },
   // long Type and "Connected via" text: per width the horizontal scroll of the table and the page, and per row the
   // text of the Type and Connected-via cells next to their title (the full text a cut cell must still offer)
   async longtext(page) {

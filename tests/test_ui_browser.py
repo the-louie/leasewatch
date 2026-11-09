@@ -666,6 +666,49 @@ class BrowserLongTextTest(_BrowserCase):
         self.assertEqual(cells[self.PLAIN]["where"]["title"], "")
 
 
+class BrowserActColumnTest(_BrowserCase):
+    """A tight table (an online device with an IPv6 line, a baseline device that is offline, private MACs, a switch
+    port and Wi-Fi details, two unacked devices): the Mark known button wraps instead of being cut off at the right
+    edge of the table, in English and Swedish, at laptop, desktop and phone widths."""
+    V6 = "2001:db8:1:0:211:22ff:fe33:4455"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        def s(m: str, n: int, host: str, online: bool = True, lease: str = "dynamic") -> Sighting:
+            return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme Networks", vlan="HomeNet", iface="lan",
+                            source="dhcp", lease_type=lease, online=online)
+        first = [s("00:00:5e:00:53:31", 31, "office-pc"), s("02:00:00:00:31:02", 32, "alex-iphone"),
+                 s("00:00:5e:00:53:33", 33, "garage-sensor", online=False),
+                 s("00:00:5e:00:53:34", 34, "kitchen-speaker", lease="static"),
+                 s("00:00:5e:00:53:35", 35, "switch-uplink", lease="")]
+        second = [s("02:00:00:00:31:06", 36, "guest-phone"), s("00:00:5e:00:53:37", 37, "hall-printer")]
+        base, db = start(cls, first, second)
+        db.q("UPDATE devices SET ip6=? WHERE mac=?", (cls.V6, "00:00:5e:00:53:31"))
+        db.q("UPDATE devices SET sw_port=?, sw_via=? WHERE mac=?", ("GigabitEthernet1/0/12", "sw-rack-hp5130", "00:00:5e:00:53:35"))
+        db.q("UPDATE devices SET wifi_ssid=?, wifi_ap=?, wifi_signal=? WHERE mac=?",
+             ("HomeNet-Upstairs-5GHz", "ap-upstairs-hallway", -61, "02:00:00:00:31:02"))
+        db.q("UPDATE devices SET wifi_ssid=?, wifi_ap=?, wifi_signal=? WHERE mac=?",
+             ("HomeNet-Guest", "ap-basement-workshop", -74, "02:00:00:00:31:06"))
+        cls.run_scenarios(base, ("actcolumn",))
+
+    def test_ack_button_never_cut_off(self) -> None:
+        d = self.result("actcolumn")
+        for lang in ("en", "sv"):
+            for width, filters in (("1280", ("all", "online")), ("1400", ("all", "online")), ("400", ("all",))):
+                for f in filters:
+                    with self.subTest(lang=lang, width=width, filter=f):
+                        m = d[lang][width][f]
+                        self.assertGreaterEqual(m["btns"], 1, m)
+                        self.assertEqual(m["table_scroll"], 0, m)
+                        self.assertEqual(m["page_scroll"], 0, m)
+                        self.assertLessEqual(m["btn_over"], 0, m)
+                        if width != "400":
+                            self.assertEqual(m["dot_w"], 28, m)
+        self.assertLessEqual(d["sv"]["1280"]["all"]["btn_lines"], 3, d["sv"]["1280"]["all"])  # it wraps, and stays readable
+
+
 class BrowserSsidWidthTest(_BrowserCase):
     """Long SSID names, a NEW private-MAC row and a NEW watched row with a 19-character name (two badges beside it):
     no sideways scroll at phone widths, filtered or not."""
@@ -682,7 +725,7 @@ class BrowserSsidWidthTest(_BrowserCase):
         a, b, c, w = cls.MACS
         # c and w appear after the baseline: NEW
         base, db = start(cls, [s(a, 40, "laptop"), s(b, 41, "phone")],
-                         [s(c, 42, "newcomer"), s(w, 43, "living-room-speaker")])
+                         [s(c, 42, "newcomer"), s(w, 43, "kitchen-speaker")])
         db.q("UPDATE devices SET watch=1 WHERE mac=?", (w,))
         now = int(time.time())
         for m, ssid in ((a, cls.S32), (b, cls.S40), (c, cls.S32)):
@@ -699,7 +742,7 @@ class BrowserSsidWidthTest(_BrowserCase):
                     r = d[f"{name}_{width}"]
                     self.assertGreater(r["rows"], 0, r)
                     if name == "none":
-                        self.assertEqual(r["watched_new"], ["living-room-speaker"], r)
+                        self.assertEqual(r["watched_new"], ["kitchen-speaker"], r)
                     self.assertLessEqual(r["table_scroll"], 0, r)
                     self.assertLessEqual(r["page_scroll"], 0, r)
                     self.assertEqual(r["over"], [], r)
@@ -718,7 +761,7 @@ class BrowserTagsTest(_BrowserCase):
             return Sighting(mac=m, ip=f"10.0.1.{n}", hostname=host, vendor="Acme", vlan="HomeNet", iface="lan",
                             source="dhcp", lease_type="dynamic", online=online)
         base, _db = start(cls, [s(cls.A, 50, "thermostat", True), s(cls.B, 51, "printer", False),
-                                s(cls.W, 52, "living-room-speaker", True)])
+                                s(cls.W, 52, "kitchen-speaker", True)])
         cls.run_scenarios(base, ("tags",))
 
     def test_no_chip_row_without_tags(self) -> None:
