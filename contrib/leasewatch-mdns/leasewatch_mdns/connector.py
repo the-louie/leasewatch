@@ -38,7 +38,9 @@ RECV_SIZE = 9000  # the largest mDNS packet RFC 6762 allows over a jumbo-frame l
 RECV_TIMEOUT = 1.0  # seconds; the listener checks its stop event at least this often
 RATE_LIMIT = 200  # packets parsed per second; the rest are counted in dropped_rate and skipped
 WARN_INTERVAL = 3600.0  # seconds between two malformed-packet warnings for one source address
-SSDP_REPARSE = 600.0  # seconds before a NOTIFY from the same source is parsed again; a device sends bursts
+# seconds after a label is stored for a source address before any datagram from it is read again (until then each
+# is counted as ssdp_repeat, before the rate budget and the parse); a device sends bursts
+SSDP_REPARSE = 600.0
 SSDP_MAX_TTL = 4  # a NOTIFY with a higher IP TTL is counted (ssdp_ttl_gt4), not dropped
 MAX_WARNED = 1024  # source addresses remembered for that; the memory is cleared when it is full
 WARN_BUDGET = 10  # malformed-packet warnings per WARN_INTERVAL from all sources together; the rest go to DEBUG
@@ -156,7 +158,7 @@ def _link_reject(ancdata: Any) -> tuple[bool, bool]:
 
 class MdnsConnector(SettingsMixin):
     INFO = ConnectorInfo(
-        type="mdns", version="0.1.0", api_version=API_VERSION, produces=frozenset({"sighting"}),
+        type="mdns", version="0.2.0", api_version=API_VERSION, produces=frozenset({"sighting"}),
         # a secondary source: the host never fails a poll or holds the baseline for it
         roles=frozenset({"names"}),
         settings=(
@@ -203,6 +205,9 @@ class MdnsConnector(SettingsMixin):
         # injected socket factory)
         self._joined_idx: frozenset[int] = frozenset()
         self._ssdp_joined_idx: frozenset[int] = frozenset()
+        # the SSDP socket is bound to its group address (False: to the wildcard address, sharing port 1900's unicast
+        # datagrams with other programs on this host; also False with an injected socket factory)
+        self._ssdp_bound_group = False
         self._mdns_window = _Window()
         self._ssdp_window = _Window()
         self._warned: dict[str, float] = {}  # source ip -> clock of its last malformed-packet warning
@@ -247,8 +252,11 @@ class MdnsConnector(SettingsMixin):
         """A UDP socket on `port` that is a member of `group` (by default 5353 and 224.0.0.251; for SSDP 1900 and
         239.255.255.250), on every interface or on the configured one. It only receives.
 
-        It binds to the wildcard address even when an interface is configured: on Linux a socket bound to a unicast
-        address receives no multicast. The interface is chosen by the group membership instead. Without an
+        The mDNS socket binds to the wildcard address even when an interface is configured: on Linux a socket bound
+        to a unicast address receives no multicast. The interface is chosen by the group membership instead. The
+        SSDP socket binds to the group address, so it receives only the group's datagrams and a unicast datagram to
+        port 1900 still reaches another program on this host that listens there (a media server, Home Assistant);
+        where the OS refuses that bind it falls back to the wildcard address, after one warning. Without an
         interface the group is joined on each non-loopback interface by its index (one join with the address
         0.0.0.0 would join on the default-route interface only); an interface that refuses the join is skipped,
         and no join at all fails the start."""
@@ -260,7 +268,16 @@ class MdnsConnector(SettingsMixin):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):  # another responder (avahi, an SSDP stack) may hold the port as well
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            sock.bind(("", port))
+            group_bound = False
+            if group == SSDP_GROUP:
+                try:
+                    sock.bind((group, port))
+                    group_bound = True
+                except OSError as e:  # EADDRNOTAVAIL where binding to a multicast address is not supported
+                    log.warning("mdns: SSDP socket shares port %d with other programs on this host", port)
+                    log.debug("connector %s: cannot bind to %s (%s)", self.name, group, _errno_text(e))
+            if not group_bound:
+                sock.bind(("", port))
             if self.interface:
                 try:  # hear only this interface, not the groups another socket joined elsewhere
                     sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
@@ -304,6 +321,7 @@ class MdnsConnector(SettingsMixin):
             raise
         if group == SSDP_GROUP:
             self._ssdp_joined, self._ssdp_joined_idx = joined, frozenset(indexes)
+            self._ssdp_bound_group = group_bound
             log.info("mdns: listening for SSDP on %d interfaces", joined)
         else:
             self._joined, self._joined_idx = joined, frozenset(indexes)
@@ -417,10 +435,12 @@ class MdnsConnector(SettingsMixin):
     def _handle_ssdp(self, data: bytes, addr: Any, ancdata: Any) -> None:
         """One packet from the SSDP socket, with its control messages (None when the OS cannot give them: then the
         link checks are skipped). The link rule (a multicast destination, an interface the group was joined on),
-        the rate budget (only a packet that passed the link rule uses it), the TTL count, the NOTIFY parse, the
-        repeat check (a source whose label was stored less than SSDP_REPARSE ago), the source's MAC, the LOCATION
-        host check, then the product label. Each step that fails is counted and ends it. The repeat window starts
-        only when a label is stored, so a NOTIFY that gives none does not hide the same host's next one."""
+        the repeat check (a source whose label was stored less than SSDP_REPARSE ago), the rate budget (only a
+        packet that passed both uses it), the TTL count, the NOTIFY parse, the source's MAC, the LOCATION host
+        check, then the product label. Each step that fails is counted and ends it. The repeat check needs only the
+        source address, so any datagram from a source inside its window (a byebye or a malformed one too) is
+        counted as ssdp_repeat and is neither parsed nor charged to the budget. The repeat window starts only when
+        a label is stored, so a NOTIFY that gives none does not hide the same host's next one."""
         second = int(self._clock())
         now_clock = self._clock()
         source = addr[0] if isinstance(addr, tuple) and addr else "?"
@@ -435,7 +455,11 @@ class MdnsConnector(SettingsMixin):
                 if (self.interface and self._ssdp_joined_idx and info.ifindex not in self._ssdp_joined_idx):
                     self._counts["ssdp_wrong_if"] += 1
                     return
-            if not self._ssdp_window.take(second):  # only a packet that passed the link rule uses the budget
+            last = self._ssdp_seen.get(source)
+            if last is not None and now_clock - last < SSDP_REPARSE:
+                self._counts["ssdp_repeat"] += 1
+                return
+            if not self._ssdp_window.take(second):  # only a packet that passed the link and repeat checks uses it
                 self._counts["ssdp_dropped_rate"] += 1
                 return
             if info is not None:
@@ -445,10 +469,6 @@ class MdnsConnector(SettingsMixin):
         with self._lock:
             if notify is None:
                 self._counts["ssdp_" + reason] += 1
-                return
-            last = self._ssdp_seen.get(source)
-            if last is not None and now_clock - last < SSDP_REPARSE:
-                self._counts["ssdp_repeat"] += 1
                 return
         mac = self.ctx.device_ips().get(source)
         with self._lock:
@@ -607,6 +627,7 @@ class MdnsConnector(SettingsMixin):
         stats = {"names": len(sightings), "joined": self._joined, **counts}
         if self.ssdp:
             stats["ssdp_joined"] = self._ssdp_joined
+            stats["ssdp_group_bound"] = int(self._ssdp_bound_group)
             stats["ssdp_labels"] = len(labels)
         if not sightings:
             # an empty cache (just started, or nothing heard for MAX_AGE_DAYS) is no evidence that a label was

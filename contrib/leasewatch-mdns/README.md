@@ -61,7 +61,11 @@ connector would hear nothing. Use one of these instead:
   every address of the host).
 - **A macvlan network** on the VLAN to listen on, with the container attached to it.
 
-With `SSDP=1` the SSDP socket needs the same: host networking or a macvlan, for the same reason.
+With `SSDP=1` the SSDP socket needs the same: host networking or a macvlan, for the same reason. The SSDP socket is
+bound to the group address 239.255.255.250, so unicast traffic to port 1900 (an M-SEARCH sent straight to this host)
+still reaches a media server or Home Assistant on the same host. Where the OS refuses that bind, the socket shares
+port 1900 with them and takes some of their unicast datagrams away; the WARNING "mdns: SSDP socket shares port 1900
+with other programs on this host" and `ssdp_group_bound: 0` say so.
 
 Only the VLANs the host is attached to are heard. mDNS does not cross a router, so for devices on other VLANs (for
 example an IoT VLAN) run an mDNS repeater on the firewall, such as os-mdns-repeater on OPNsense, and make sure the
@@ -102,8 +106,10 @@ names a UPnP library rather than a device; these names are generic: `Portable SD
 address, found as for mDNS.
 
 The mDNS label wins: SSDP fills the label only when mDNS gave none. A device known by SSDP alone gets a sighting
-with a label and no hostname, because an SSDP announcement carries no host name. Once a label is stored for a source address, its
-NOTIFYs are not read again for 10 minutes (`ssdp_repeat`), so a device's bursts cost one parse. SSDP has its own cache, with the same
+with a label and no hostname, because an SSDP announcement carries no host name. Once a label is stored for a source address, any
+datagram from that address is counted `ssdp_repeat` for 10 minutes, without being parsed or charged to the rate
+budget (a byebye or a malformed packet too), so a device's bursts cost one parse and cannot crowd out another
+device. SSDP has its own cache, with the same
 `MAX_AGE_DAYS` and `MAX_ENTRIES`, and its own rate budget of 200 packets a second.
 
 The SSDP status counts, reset each poll, are all there when `SSDP=1` and absent otherwise:
@@ -113,7 +119,8 @@ The SSDP status counts, reset each poll, are all there when `SSDP=1` and absent 
 `ssdp:byebye`, such as `ssdp:update`), `ssdp_byebye`, `ssdp_malformed`, `ssdp_oversized` (over 2048 bytes), `ssdp_repeat`,
 `ssdp_unmapped` (no known device holds the address), `ssdp_mismatch`, `ssdp_generic` (a generic UPnP stack),
 `ssdp_no_label` (no product after `UPnP/`); `ssdp_joined` is the number of interfaces the SSDP group is joined on,
-and `ssdp_labels` the number of devices that hold an SSDP label.
+`ssdp_labels` the number of devices that hold an SSDP label, and `ssdp_group_bound` is 1 when the SSDP socket is
+bound to the group address and 0 when it shares port 1900 (see "Running in a container").
 
 A malformed packet is logged as a WARNING at most once an hour per source address, and at most 10 times an hour in
 total; after that, malformed packets are logged at DEBUG until the hour is over.
@@ -147,6 +154,9 @@ never fetches the `LOCATION` URL of a NOTIFY; it reads the host in it and nothin
   not listed is not heard.
 
 ## Installing
+
+Version 0.2.0 (`RELAYS`, `SSDP`) needs leasewatch 1.5 or later; copy the plugin again when upgrading from the 1.5
+copy, which refuses the two new settings as unknown.
 
 The package declares the entry point `mdns` in the group `leasewatch.connectors.v1`. In the container, copy this
 directory into a plugin directory and mount it read-only:

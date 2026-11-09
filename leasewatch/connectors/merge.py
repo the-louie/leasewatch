@@ -416,8 +416,9 @@ def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
     """The device's stable IPv6 address after this poll. A worse class never replaces the stored one; nothing listed
     keeps it (NDP aged it out); within its class it stays while still listed, so a renumbering that lists the old
     and the new address side by side changes it only once the old one has left. An unlisted one is replaced by one of
-    its own class only when its /64 prefix is listed for no device this poll: a renumbering is network-wide, while
-    NDP ages one device's entry for one of two live prefixes out on its own schedule."""
+    its own class: an EUI-64 one only when its /64 prefix is listed for no device this poll (a renumbering is
+    network-wide, while NDP ages one device's entry for one of two live prefixes out on its own schedule); a DHCPv6
+    one at once, because a lease that is no longer listed does not come back."""
     if not m.ip6_stable or not stored:
         return stored or m.ip6_stable
     best = m.ip6_stables[m.ip6_stable]
@@ -428,7 +429,7 @@ def _settle_ip6_stable(macs: tuple[str, ...], stored: str, m: Merged) -> str:
         cls = k[:3] if k[2] == 0 else (k[0], 0, 1)
     if stored in m.ip6_stables and cls == best:
         return stored
-    if best == cls and _prefix64(stored) in m.live64:
+    if best == cls and _prefix64(stored) in m.live64 and any(eui64_of(x, stored) for x in macs):
         return stored
     return m.ip6_stable if best <= cls else stored
 

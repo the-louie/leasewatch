@@ -3,6 +3,7 @@ budget and that nothing is ever transmitted. Synthetic data only; no socket is o
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import queue
 import socket
@@ -21,6 +22,7 @@ from leasewatch.connectors import API_VERSION, Batch, ConnectorError, HostContex
 from leasewatch_mdns import connector as mc  # noqa: E402
 from leasewatch_mdns import dns  # noqa: E402
 from leasewatch_mdns.connector import MdnsConnector  # noqa: E402
+from leasewatch_mdns.ssdp import parse_notify  # noqa: E402
 
 sys.path.insert(0, HERE)
 import fixtures as fx  # noqa: E402
@@ -154,7 +156,7 @@ class Base(unittest.TestCase):
 class SettingsTest(Base):
     def test_describe(self) -> None:
         info = MdnsConnector.describe()
-        self.assertEqual((info.type, info.version, info.api_version), ("mdns", "0.1.0", API_VERSION))
+        self.assertEqual((info.type, info.version, info.api_version), ("mdns", "0.2.0", API_VERSION))
         self.assertEqual(info.produces, frozenset({"sighting"}))
         self.assertEqual(info.roles, frozenset({"names"}))
         self.assertEqual({s.key: s.default for s in info.settings},
@@ -631,11 +633,13 @@ class RecordingSocket:
 
     refuse: set[int] = set()
     no_multicast_all = False
+    refuse_bind: set[str] = set()  # addresses bind() refuses with EADDRNOTAVAIL
     made: list[RecordingSocket] = []
 
     def __init__(self, family: int, kind: int) -> None:
         self.options: list[tuple[int, int, object]] = []
         self.bound: tuple | None = None
+        self.binds: list[tuple] = []  # every bind() asked for, refused ones too
         self.closed = False
         RecordingSocket.made.append(self)
 
@@ -647,6 +651,9 @@ class RecordingSocket:
         self.options.append((level, option, value))
 
     def bind(self, address: tuple) -> None:
+        self.binds.append(address)
+        if address[0] in self.refuse_bind:
+            raise OSError(errno.EADDRNOTAVAIL, os.strerror(errno.EADDRNOTAVAIL))
         self.bound = address
 
     def settimeout(self, value: float) -> None:
@@ -681,6 +688,7 @@ class JoinTest(unittest.TestCase):
     def setUp(self) -> None:
         RecordingSocket.refuse = set()
         RecordingSocket.no_multicast_all = False
+        RecordingSocket.refuse_bind = set()
         RecordingSocket.made = []
         self.patches = [mock.patch.object(socket, "socket", RecordingSocket),
                         mock.patch.object(socket, "if_nameindex", lambda: list(INTERFACES)),
@@ -994,6 +1002,41 @@ class SsdpPathTest(Base):
         stats = c.collect().stats
         self.assertEqual((stats["ssdp_repeat"], stats["ssdp_labels"], stats["ssdp_packets"]), (1, 1, 3))
 
+    def test_burst_is_parsed_once(self) -> None:
+        c = self.ssdp()
+        calls = []
+
+        def counting(data: bytes):
+            calls.append(data)
+            return parse_notify(data)
+
+        with mock.patch.object(mc, "parse_notify", counting):
+            for _ in range(6):
+                self.send(c)
+        stats = c.collect().stats
+        self.assertEqual((len(calls), stats["ssdp_repeat"], stats["ssdp_labels"]), (1, 5, 1))
+
+    def test_repeat_flood_does_not_use_the_budget(self) -> None:
+        c = self.ssdp()
+        self.send(c)  # labelled
+        self.clock[0] += 1  # a new second: the flood and the new device share it
+        for _ in range(250):
+            self.send(c)
+        self.ips["10.0.0.41"] = "02:00:00:00:00:41"
+        self.send(c, fx.notify(fx.SONOS_SERVER, location="http://10.0.0.41:1400/d.xml"), src="10.0.0.41")
+        batch = c.collect()
+        self.assertEqual((batch.stats["ssdp_repeat"], batch.stats["ssdp_dropped_rate"], batch.stats["ssdp_labels"]),
+                         (250, 0, 2))
+        self.assertIn("02:00:00:00:00:41", [s.mac for s in batch.sightings])
+
+    def test_byebye_and_malformed_inside_the_window_are_repeats(self) -> None:
+        c = self.ssdp()
+        self.send(c)
+        self.send(c, fx.BYEBYE)
+        self.send(c, fx.MALFORMED)
+        stats = c.collect().stats
+        self.assertEqual((stats["ssdp_repeat"], stats["ssdp_byebye"], stats["ssdp_malformed"]), (2, 0, 0))
+
     def test_repeat_memory_is_capped(self) -> None:
         c = self.ssdp()
         with mock.patch.object(mc, "MAX_WARNED", 3):
@@ -1107,7 +1150,8 @@ class SsdpMatrixTest(Base):
     def send(self, c: MdnsConnector, data: bytes = fx.SONOS, src: str = SONOS_IP) -> None:
         c._handle_ssdp(data, (src, 1900), anc())
 
-    SSDP_KEYS = ["ssdp_byebye", "ssdp_dropped_rate", "ssdp_errors", "ssdp_generic", "ssdp_joined", "ssdp_labels",
+    SSDP_KEYS = ["ssdp_byebye", "ssdp_dropped_rate", "ssdp_errors", "ssdp_generic", "ssdp_group_bound",
+                 "ssdp_joined", "ssdp_labels",
                  "ssdp_malformed", "ssdp_mismatch", "ssdp_no_label", "ssdp_not_notify", "ssdp_oversized",
                  "ssdp_packets", "ssdp_repeat", "ssdp_ttl_gt4", "ssdp_unicast", "ssdp_unmapped", "ssdp_wrong_if"]
     MDNS_KEYS = ["dropped_rate", "errors", "joined", "labels_unavailable", "malformed", "names", "off_link",
@@ -1213,7 +1257,9 @@ class SsdpJoinTest(unittest.TestCase):
         with self.assertLogs("leasewatch.contrib.mdns", "INFO") as logs:
             sock = c._default_socket(group=mc.SSDP_GROUP, port=mc.SSDP_PORT)
         ssdp = socket.inet_aton(mc.SSDP_GROUP)
-        self.assertEqual(sock.bound, ("", 1900))
+        self.assertEqual(sock.binds, [("239.255.255.250", 1900)])  # the group, not the wildcard
+        self.assertTrue(c._ssdp_bound_group)
+        self.assertNotIn(logging.WARNING, [r.levelno for r in logs.records])
         self.assertEqual(sock.joins(), [struct.pack("=4s4si", ssdp, ANY, 2), struct.pack("=4s4si", ssdp, ANY, 3)])
         self.assertEqual((c._ssdp_joined, c._ssdp_joined_idx), (2, frozenset({2, 3})))
         self.assertEqual((c._joined, c._joined_idx), (0, frozenset()))  # the mDNS figures are untouched
@@ -1231,10 +1277,31 @@ class SsdpJoinTest(unittest.TestCase):
         c = MdnsConnector("mdns1", {"ssdp": "1"}, HostContext(now=lambda: NOW))
         self.addCleanup(c.close)
         stats = c.collect().stats
-        self.assertEqual((stats["joined"], stats["ssdp_joined"]), (2, 2))
-        self.assertEqual([s.bound for s in RecordingSocket.made], [("", 5353), ("", 1900)])
+        self.assertEqual((stats["joined"], stats["ssdp_joined"], stats["ssdp_group_bound"]), (2, 2, 1))
+        self.assertEqual([s.bound for s in RecordingSocket.made], [("", 5353), ("239.255.255.250", 1900)])
         c.close()
         self.assertTrue(all(s.closed for s in RecordingSocket.made))
+
+    def test_group_bind_refused_falls_back_to_wildcard(self) -> None:
+        RecordingSocket.refuse_bind = {mc.SSDP_GROUP}
+        c = MdnsConnector("mdns1", {"ssdp": "1"}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        with self.assertLogs("leasewatch.contrib.mdns", "DEBUG") as logs:
+            stats = c.collect().stats
+        mdns_sock, ssdp_sock = RecordingSocket.made
+        self.assertEqual(mdns_sock.binds, [("", 5353)])  # the mDNS socket never tries the group
+        self.assertEqual(ssdp_sock.binds, [("239.255.255.250", 1900), ("", 1900)])
+        self.assertEqual(ssdp_sock.bound, ("", 1900))
+        warnings = [r.getMessage() for r in logs.records if r.levelno == logging.WARNING]
+        self.assertEqual(warnings, ["mdns: SSDP socket shares port 1900 with other programs on this host"])
+        self.assertEqual((stats["ssdp_group_bound"], stats["ssdp_joined"]), (0, 2))
+
+    def test_mdns_socket_binds_wildcard_and_no_group_bound_key_without_ssdp(self) -> None:
+        c = MdnsConnector("mdns1", {}, HostContext(now=lambda: NOW))
+        self.addCleanup(c.close)
+        stats = c.collect().stats
+        self.assertEqual([s.binds for s in RecordingSocket.made], [[("", 5353)]])
+        self.assertNotIn("ssdp_group_bound", stats)
 
 
 class ListenOnlyTest(unittest.TestCase):

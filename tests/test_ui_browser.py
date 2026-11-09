@@ -1569,6 +1569,29 @@ class BrowserDraftTest(_BrowserCase):
         self.assertEqual(d["after_discard"], {"name": "", "tags": "", "line": None})
 
 
+class BrowserDraftOrderTest(_BrowserCase):
+    """The newest save of a device decides its draft; reverting a restored draft drops it."""
+    D = "02:00:00:00:70:01"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        logging.disable(logging.CRITICAL)
+        cls.addClassCleanup(logging.disable, logging.NOTSET)
+        base, _db = start(cls, [Sighting(mac=cls.D, ip="10.0.1.70", hostname="camera", vendor="Acme", vlan="HomeNet",
+                                         iface="lan", source="dhcp", lease_type="dynamic", online=True)])
+        cls.run_scenarios(base, ("draftorder",))
+
+    def test_older_save_going_through_keeps_the_newer_failures_draft(self) -> None:
+        d = self.result("draftorder")
+        self.assertEqual((d["asked"], d["server"]), (0, "First"))
+        self.assertEqual(d["reopened"], {"name": "Second", "line": "Unsaved draft restored"})
+
+    def test_typing_the_stored_value_back_drops_the_draft(self) -> None:
+        d = self.result("draftorder")["revert"]
+        self.assertEqual(d["dialogs"], 0)
+        self.assertEqual(d["next"], {"name": "First", "line": None})
+
+
 class BrowserAuthTest(_BrowserCase):
     """Basic auth on: the page sends the credentials (page.authenticate) and loads under the same CSP."""
 

@@ -634,7 +634,11 @@
   // typed Name/Note not saved yet are dropped by a close or by opening another device: true when there are none,
   // or the user agrees to drop them
   function discardOk() {
-    if (!formEdited(state.open)) return true;
+    if (!formEdited(state.open)) {
+      // typed back to the stored values: reverting drops a restored draft, so a later open does not bring it back
+      if (state.form?.mac === state.open && !state.saving) delete state.drafts[state.open];
+      return true;
+    }
     if (!confirm(t("drawer.discard"))) return false;
     delete state.drafts[state.open]; // dropped on purpose: a later open must not bring it back
     return true;
@@ -884,7 +888,8 @@
         throw e;
       }
       finally { if (state.saving === saving) state.saving = null; } // on a failure the form's reference is state.form again
-      if (form) { delete state.drafts[mac]; $("#fDraft")?.classList.add("hidden"); }
+      // only the newest save of the device decides: an older one going through must not drop the draft a newer failure left
+      if (form && seq === state.saveSeq[mac]) { delete state.drafts[mac]; $("#fDraft")?.classList.add("hidden"); }
       // a drawer GET of this device still running may have been served before the save: its reply is stale. An open's
       // pending Name focus moves to the refresh below. Another device's GET is left alone
       const g = state.drawerGet?.mac === mac ? state.drawerGet : null;

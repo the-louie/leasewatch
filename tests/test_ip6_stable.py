@@ -133,6 +133,28 @@ class Renumbering(Base):
         self.assertEqual([h["ip6"] for h in hist(res)], [EUI2])
 
 
+class Dhcp6Lease(Base):
+    NEW = "2001:db8::1:99"
+
+    def test_unlisted_lease_gives_way_to_a_new_lease_in_the_same_prefix(self):
+        res = self.merge([row(A, ip6_stable=DHCP)], [sight(), dhcp6(self.NEW)])
+        self.assertEqual(res.rows[A]["ip6_stable"], self.NEW)
+        self.assertEqual(ev(res), [("ip6", f"{DHCP} -> {self.NEW}")])
+        self.assertEqual([h["ip6"] for h in hist(res)], [self.NEW])
+        res = self.merge([res.rows[A]], [sight(), dhcp6(self.NEW)])
+        self.assertEqual((ev(res), hist(res)), ([], []))
+
+    def test_listed_lease_stays_beside_a_second_lease(self):
+        res = self.merge([row(A, ip6_stable=DHCP)], [sight(), dhcp6(DHCP), dhcp6("2001:db8::1:10")])
+        self.assertEqual(res.rows[A]["ip6_stable"], DHCP)
+        self.assertEqual((ev(res), hist(res)), ([], []))
+
+    def test_unlisted_lease_stays_against_a_worse_class(self):
+        res = self.merge([row(A, ip6_stable=DHCP)], [sight(), ndp(EUI)])
+        self.assertEqual(res.rows[A]["ip6_stable"], DHCP)
+        self.assertEqual((ev(res), hist(res)), ([], []))
+
+
 class History(Base):
     def test_new_row_takes_the_stable_candidate(self):
         res = self.merge([], [sight(), ndp(TEMP), ndp(EUI)])

@@ -962,6 +962,48 @@ const scenarios = {
     res.sv.after_discard = await view();
     return res;
   },
+  // two saves of one device out at once: the older going through must not drop the draft the newer failure left;
+  // typing the stored values back into a restored draft and closing drops it for good
+  async draftorder(page) {
+    const D = '02:00:00:00:70:01';
+    page.__allow = [500];
+    const dialogs = [];
+    page.on('dialog', async d => { dialogs.push(d.message()); await d.dismiss(); });
+    let hold = false; const held = [];
+    await page.setRequestInterception(true);
+    page.on('request', r => { if (r.method() === 'POST' && hold) held.push(r); else r.continue(); });
+    const banner = () => page.$eval('#banner', b => b.classList.contains('hidden') ? null : b.textContent);
+    const view = () => page.evaluate(() => { const l = document.querySelector('#fDraft');
+      return { name: document.querySelector('#fName').value, line: l && !l.classList.contains('hidden') ? l.textContent : null }; });
+    const setVal = async (sel, v) => { await page.click(sel, { clickCount: 3 }); await page.keyboard.press('Backspace'); await page.type(sel, v); };
+    const waitHeld = async n => { while (held.length < n) await new Promise(r => setTimeout(r, 20)); };
+    const res = {};
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    hold = true;
+    await setVal('#fName', 'First'); await page.click('#fSave'); await waitHeld(1);
+    await setVal('#fName', 'Second'); await page.click('#fSave'); await waitHeld(2);
+    hold = false;
+    const before = dialogs.length;
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    res.asked = dialogs.length - before;
+    await held[1].respond({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' });
+    await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+    await held[0].continue();
+    await page.waitForFunction(async m => (await (await fetch(`/api/devices/${m}`)).json()).device.name === 'First', {}, D);
+    await new Promise(r => setTimeout(r, 300)); // the older save's refresh has run
+    res.banner = await banner();
+    res.server = (await serverDevice(page, D)).name;
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    res.reopened = await view();
+    // type the stored value back: nothing to discard; the next open has no draft
+    await setVal('#fName', 'First');
+    const n = dialogs.length;
+    await page.keyboard.press('Escape'); await waitClosed(page);
+    res.revert = { dialogs: dialogs.length - n };
+    await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+    res.revert.next = await view();
+    return res;
+  },
   // a ?device= link whose first load fails: the drawer opens after the next successful load
   async deeplinkretry(page, base) {
     const DEV = '02:00:00:00:10:01';

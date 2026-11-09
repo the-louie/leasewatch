@@ -512,6 +512,39 @@ out.after_latest = { ...state.drafts };
         self.assertEqual(out["after_older"], {})
         self.assertEqual(out["after_latest"], {"02:00:00:00:00:01": {"name": "last", "note": "", "tags": ""}})
 
+    # an older save that goes through after a newer one failed leaves the newer one's draft
+    def test_older_successful_save_keeps_the_newer_failures_draft(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "formValues", "formEdited", "applyForm"], self.DRAWER + r"""
+state.open = server.mac; await refreshDrawer(server.mac, true);
+let release; const gate = new Promise(r => { release = r; });
+typing = () => { typing = null; return gate; }; // holds the first POST that gets through
+byId.fName.value = "First";
+const older = setFields(server.mac, formValues(), byId.fName);
+await null;
+failPost = true;
+byId.fName.value = "Second";
+const newer = setFields(server.mac, formValues(), byId.fName);
+state.open = null; // closed while both saves are out
+await newer;
+release(); await older;
+out.drafts = { ...state.drafts };
+""")
+        self.assertEqual(out["drafts"], {"02:00:00:00:00:01": {"name": "Second", "note": "", "tags": ""}})
+
+    # typing the stored values back into a restored draft drops it; a later open has none
+    def test_reverting_a_restored_draft_drops_it(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "formValues", "formEdited", "applyForm", "discardOk"], self.DRAWER + r"""
+state.drafts[server.mac] = { name: "A", note: "", tags: "iot" };
+state.open = server.mac; await refreshDrawer(server.mac, true);
+out.restored = byId.fName.value;
+byId.fName.value = ""; byId.fTags.value = "";
+out.ok = discardOk();
+out.drafts = { ...state.drafts };
+""")
+        self.assertEqual(out["restored"], "A")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["drafts"], {})
+
     # a baseline device is already known: "Save & mark known" is not the primary action
     def test_baseline_device_ack_button_not_primary(self) -> None:
         out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml"], self.DRAWER + r"""
