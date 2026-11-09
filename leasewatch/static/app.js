@@ -54,6 +54,7 @@
     drawerGet: null, // {mac, focus, ctl} of the one drawer GET in flight: only its reply is applied; replacing it aborts it
     skew: 0, // server clock minus browser clock at the last load: "on the wire" is judged in server time
     form: null, // {mac, name, note} the drawer form was rendered with (or last saved): what "edited" is measured against
+    saveSeq: {}, // mac -> the number of the latest form save sent; only that one may leave a draft when it fails
     drafts: {}, // mac -> {name, note, tags} a failed save sent after its drawer closed; restored on the next open, memory only
     saving: null, // {form, name, note} posted from that Name input while its save runs: its reference until the POST settles
     // URL -> {etag, data} of the last 200 of the two big GETs, in memory (the server sends Cache-Control: no-store, so
@@ -860,11 +861,26 @@
     // module state: while the POST runs, what it posts is the reference of the form it was typed in (see formEdited)
     const saving = form && form === $("#fName") && state.form?.mac === mac ? { form, ...applyForm(fields, state.form) } : null;
     if (saving) state.saving = saving;
+    const seq = form ? state.saveSeq[mac] = (state.saveSeq[mac] || 0) + 1 : 0;
     try {
       try { await api(`/api/devices/${mac}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }); }
       catch (e) {
-        // the drawer (or its form) the text was typed in is gone: keep what was sent for the next open of this device
-        if (form && !(state.open === mac && form === $("#fName"))) state.drafts[mac] = applyForm(fields, {});
+        // an older save failing after a newer one went out leaves nothing: the newer one decides
+        if (form && seq === state.saveSeq[mac]) {
+          if (!(state.open === mac && form === $("#fName"))) {
+            const cur = $("#fName", $("#dBody"));
+            if (state.open === mac && cur && $("#fSave") && state.form?.mac === mac) {
+              // the drawer was reopened meanwhile: a clean form gets the text back at once; one typed in again keeps its
+              // typing and the old text is dropped
+              if (formEdited(mac)) delete state.drafts[mac];
+              else {
+                const dr = applyForm(fields, {});
+                for (const [k, sel] of Object.entries(FORM_FIELDS)) $(sel).value = dr[k] ?? $(sel).value;
+                state.drafts[mac] = dr; $("#fDraft")?.classList.remove("hidden");
+              }
+            } else state.drafts[mac] = applyForm(fields, {});
+          }
+        }
         throw e;
       }
       finally { if (state.saving === saving) state.saving = null; } // on a failure the form's reference is state.form again
@@ -901,28 +917,33 @@
     finally { state.bulkBusy = false; }
     await load();
     // after the load: its status line would clear a banner shown before it
-    if (err) showBanner(done ? partial({ done, total: macs.length, msg: err.message }) : t("err.save_failed", { msg: err.message }));
+    if (err) showBanner(done ? partial({ done, changed, total: macs.length, msg: err.message }) : t("err.save_failed", { msg: err.message }));
     else if (ok) showBanner(ok({ n: changed }));
   }
 
   // the tags typed in the Select bar, as the server normalises them: lower case, trimmed, no empty ones, no repeats
   const barTags = () => [...new Set($("#selTags").value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean))];
+  // a tag as the server stores it: lower case, NFC, blanks inside it as "-"
+  const normTag = s => s.trim().toLowerCase().normalize("NFC").replace(/\s+/g, "-");
   function bulkTags(adding) {
     const tags = barTags();
     if (!tags.length || state.bulkBusy) return;
     let macs = [...state.sel];
     if (adding) {
-      const full = state.devices.filter(d => state.sel.has(d.mac) && new Set([...tagsOf(d), ...tags]).size > 8);
+      const norm = [...new Set(tags.map(normTag).filter(Boolean))];
+      const full = state.devices.filter(d => state.sel.has(d.mac) && new Set([...tagsOf(d), ...norm]).size > 8);
       if (full.length) {
-        const names = full.map(d => d.name || d.hostname || d.ip || d.mac).join(", ");
-        if (!confirm(t("sel.tags_full", { n: full.length, names }))) return;
         const skip = new Set(full.map(d => d.mac));
         macs = macs.filter(m => !skip.has(m));
+        if (!macs.length) { showBanner(t("sel.tags_none_left")); return; }
+        const names = full.map(d => d.name || d.hostname || d.ip || d.mac).join(", ");
+        if (!confirm(t("sel.tags_full", { n: full.length, names }))) return;
       }
     }
     const field = adding ? "tags_add" : "tags_remove";
     const say = adding ? p => t("err.bulk_tagged", p) : p => t("err.bulk_untagged", p);
-    bulkSet({ [field]: tags.join(",") }, p => say({ n: p.done }) + ": " + p.msg, { macs, ok: say });
+    const sayPartial = adding ? p => t("err.bulk_tagged_partial", p) : p => t("err.bulk_untagged_partial", p);
+    bulkSet({ [field]: tags.join(",") }, p => p.changed ? sayPartial({ n: p.changed, msg: p.msg }) : t("err.save_failed", { msg: p.msg }), { macs, ok: say });
   }
 
   // ---------- url state ----------

@@ -317,10 +317,9 @@ class MdnsConnector(SettingsMixin):
         second = int(self._clock())
         with self._lock:
             self._counts["packets"] += 1
-            if reject:
+            if reject and reject != "relayed":
                 self._counts[reject] += 1
-                if reject != "relayed":
-                    return
+                return
             if not (isinstance(addr, tuple) and len(addr) > 1 and addr[1] == MDNS_PORT):
                 self._counts["wrong_port"] += 1  # RFC 6762 6: a response not from port 5353 is not mDNS
                 return
@@ -330,6 +329,8 @@ class MdnsConnector(SettingsMixin):
                 self._counts["dropped_rate"] += 1
                 return
             self._in_window += 1
+            if reject:  # "relayed": counted only for a packet that goes on to the parser
+                self._counts[reject] += 1
         packet = dns.parse_response(bytes(data))
         if packet.malformed:
             self._malformed(addr[0] if isinstance(addr, tuple) and addr else "?")

@@ -349,7 +349,7 @@ out.behind = seenHtml([{ source: "fw1", last_seen: srv - 700, last_present: srv 
 const server = { mac: "02:00:00:00:00:01", name: "", note: "", acked: 0, baseline: 0, vlan: "LAN", ip: "10.0.0.5", first_seen: 1, last_seen: 1, sources: "arp" };
 let typing = null, failGet = false, failPost = false, posts = [];
 const api = async (path, opts) => {
-  if (opts?.method && failPost) throw new Error("boom");
+  if (opts?.method && failPost) { if (typeof failPost === "function") await failPost(); throw new Error("boom"); }
   if (opts?.method) { posts.push(JSON.parse(opts.body)); await null; if (typing) await typing(); Object.assign(server, JSON.parse(opts.body)); server.acked = server.acked ? 1 : 0; return { ok: true }; }
   if (failGet) throw new Error("timeout");
   return { device: { ...server }, history: [], events: [], seen: [] };
@@ -460,6 +460,29 @@ out.after = { drafts: { ...state.drafts }, hidden: byId.fDraft.classList.contain
         self.assertEqual(out["draft"], {"name": "A", "note": "", "tags": "iot"})
         self.assertEqual(out["restored"], {"name": "A", "tags": "iot", "hidden": False, "edited": True})
         self.assertEqual(out["after"], {"drafts": {}, "hidden": True})
+
+    # an older save that fails after a newer save of the device went through leaves no draft; one that is the latest does
+    def test_older_failed_save_leaves_no_draft_after_a_newer_one(self) -> None:
+        out = _run(["refreshDrawer", "drawerActions", "setFields", "seenHtml", "formValues", "formEdited", "applyForm"], self.DRAWER + r"""
+state.open = server.mac; await refreshDrawer(server.mac, true);
+byId.fName.value = "old";
+let release; const gate = new Promise(r => { release = r; });
+failPost = () => gate;
+const older = setFields(server.mac, formValues(), byId.fName);
+await null;
+failPost = false;
+byId.fName.value = "new";
+const newer = setFields(server.mac, formValues(), byId.fName);
+state.open = null; // the drawer is closed while the older save is still out
+await newer;
+release(); await older;
+out.after_older = { ...state.drafts };
+failPost = () => Promise.resolve();
+await setFields(server.mac, { name: "last", note: "", tags: "" }, byId.fName);
+out.after_latest = { ...state.drafts };
+""")
+        self.assertEqual(out["after_older"], {})
+        self.assertEqual(out["after_latest"], {"02:00:00:00:00:01": {"name": "last", "note": "", "tags": ""}})
 
     # a baseline device is already known: "Save & mark known" is not the primary action
     def test_baseline_device_ack_button_not_primary(self) -> None:

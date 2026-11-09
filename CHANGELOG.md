@@ -6,7 +6,7 @@ All notable changes to leasewatch are listed here. The format follows [Keep a Ch
 
 ### Added
 - Bulk tagging: `POST /api/devices` takes `tags_add` and `tags_remove` (comma lists), alone or with `acked` or `archived`. Each device keeps its own tags minus the removed ones and gains the added ones; one `tags` event per changed device, as from the single POST. All or nothing: a device that would get more than 8 tags fails the request with 400 `{"error": "at most 8 tags", "full": [mac, ...]}`; a tag in both lists is a 400.
-- Bulk tagging from the Select bar: a tag input with Add and Remove for the selected devices; a device already at 8 tags is found before anything is sent, left out, and named in a banner.
+- Bulk tagging from the Select bar: a tag input with Add and Remove for the selected devices; a device that would pass 8 tags is found before anything is sent and named in a confirm, and left out when you continue; the banner afterwards counts the devices changed.
 - Per-connector `warnings` in `/api/status` and in the status tooltip (`ndp_unavailable`, `kea6_unavailable`, `labels_unavailable`, `dropped`).
 
 ### Changed

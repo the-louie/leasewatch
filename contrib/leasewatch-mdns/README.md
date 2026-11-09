@@ -83,7 +83,7 @@ device's entry. A goodbye (TTL 0) does not remove the name: the name is kept for
 
 The listener thread starts at the first `check()` or `collect()` and parses at most 200 packets a second; the rest
 are counted as `dropped_rate`. The status counts, reset each poll, are `names`, `packets`, `malformed`,
-`unmapped`, `wrong_port`, `off_link`, `unicast`, `relayed` (accepted at a TTL other than 255 from a listed repeater),
+`unmapped`, `wrong_port`, `off_link`, `unicast`, `relayed` (accepted at a TTL other than 255 from a listed repeater, and then handled: not counted when it fails the port check or the rate budget),
 `dropped_rate` and `errors`; `joined` is the number of interfaces
 the group is joined on.
 

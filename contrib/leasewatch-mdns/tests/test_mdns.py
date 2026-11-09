@@ -431,6 +431,26 @@ class PacketPathTest(Base):
         self.assertEqual(batch.sightings, [])
         self.assertEqual((batch.stats["packets"], batch.stats["wrong_port"]), (1, 1))
 
+    def test_relayed_counted_only_when_handled(self) -> None:
+        c = self.conn(relays="10.0.0.9")
+        clock = [5000.2]
+        c._clock = lambda: clock[0]
+        with mock.patch.object(dns, "parse_response", return_value=packet(("printer-7", IP_A, "P1"))) as parse:
+            c._handle(b"announce", ("10.0.0.9", 40000), "relayed")
+            self.assertEqual(parse.call_count, 0)
+            stats = c.collect().stats
+            self.assertEqual((stats["packets"], stats["wrong_port"], stats["relayed"]), (1, 1, 0))
+            for _ in range(200):
+                c._handle(b"", ("10.0.0.9", 5353), "relayed")
+            c._handle(b"", ("10.0.0.9", 5353), "relayed")
+            self.assertEqual(parse.call_count, 200)
+            stats = c.collect().stats
+            self.assertEqual((stats["packets"], stats["dropped_rate"], stats["relayed"]), (201, 1, 200))
+            clock[0] = 5001.0
+            c._handle(b"", ("10.0.0.9", 5353), "relayed")
+            self.assertIn(MAC_A, c._cache)
+            self.assertEqual(c.collect().stats["relayed"], 1)
+
     def test_link_options_requested(self) -> None:
         c = self.conn()
         c.check()

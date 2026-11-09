@@ -1489,7 +1489,7 @@ class BrowserSelectTagsTest(_BrowserCase):
     def test_full_row_is_left_out_after_a_confirm(self) -> None:
         d = self.result("sel_tags")["full"]
         self.assertEqual(len(d["dialogs"]), 1, d)
-        self.assertEqual(d["dialogs"][0], "1 device already has 8 tags and is left out: hub. Continue?")
+        self.assertEqual(d["dialogs"][0], "1 device would have more than 8 tags and is left out: hub. Continue?")
         self.assertEqual(d["server"][self.F], "a1,a2,a3,a4,a5,a6,a7,a8")
         self.assertEqual((d["server"][self.P], d["server"][self.Q]), ("iot", "iot"))
         self.assertEqual(d["chip"], "iot 2/2")
@@ -1502,6 +1502,9 @@ class BrowserSelectTagsTest(_BrowserCase):
                 self.assertLessEqual(m["bar_right"], m["vw"] + 0.5, m)
                 self.assertEqual(m["btns"], 0, m)
                 self.assertTrue(m["last_clear"], m)
+                self.assertTrue(m["pad_ok"], m)
+                self.assertTrue(m["tail_clear"], m)
+                self.assertFalse(m["tail_clear_no_pad"], m)
 
     def test_swedish_labels(self) -> None:
         self.assertEqual(self.result("sel_tags")["sv"], {"add": "Lägg till tagg", "remove": "Ta bort tagg",
@@ -1548,6 +1551,17 @@ class BrowserDraftTest(_BrowserCase):
         self.assertTrue(d["banner"].startswith("Save failed: "), d["banner"])
         self.assertEqual((d["view"]["name"], d["view"]["line"], d["open"]), ("Open Fail", None, True))
         self.assertEqual(d["reopened"], {"name": "Draft Name", "tags": "iot, owner:alex", "line": None})
+
+    def test_failure_after_a_reopen_fills_a_clean_form(self) -> None:
+        d = self.result("draft")["reopen_clean"]
+        self.assertEqual(d["before"]["name"], "Draft Name")
+        self.assertEqual((d["after"]["name"], d["after"]["line"]), ("Held Name", "Unsaved draft restored"))
+        self.assertEqual(d["next"], {"name": "Draft Name", "tags": "iot, owner:alex", "line": None})  # discarded
+
+    def test_failure_after_a_reopen_keeps_typing_and_drops_the_draft(self) -> None:
+        d = self.result("draft")["reopen_typed"]
+        self.assertEqual((d["after"]["name"], d["after"]["line"]), ("Typed Again", None))
+        self.assertEqual(d["next"], {"name": "Draft Name", "tags": "iot, owner:alex", "line": None})
 
     def test_swedish_line_and_discard_drops_the_draft(self) -> None:
         d = self.result("draft")["sv"]

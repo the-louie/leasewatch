@@ -824,12 +824,22 @@ const scenarios = {
     res.narrow = {};
     for (const width of [400, 360]) {
       await page.setViewport({ width, height: 700 });
-      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      // scrolled to the end of the page: the last table row and the last thing on the page (the events sit below the
+      // table) clear the bar only through the padding of main. The same check with that padding at 0 must fail
+      await page.evaluate(() => { const rows = document.querySelectorAll('#rows tr'); rows[rows.length - 1].scrollIntoView(false);
+        window.scrollTo(0, document.documentElement.scrollHeight); });
       res.narrow[width] = await page.evaluate(() => {
-        const bar = document.querySelector('#selbar').getBoundingClientRect(), rows = document.querySelectorAll('#rows tr'),
-              last = rows[rows.length - 1].getBoundingClientRect(), de = document.documentElement;
+        const tailEl = () => { const m = document.querySelector('main'), kids = [...m.children].filter(e => e.offsetHeight > 0 && e.id !== 'selbar'); return kids[kids.length - 1]; };
+        const barEl = document.querySelector('#selbar'), bar = barEl.getBoundingClientRect(), rows = document.querySelectorAll('#rows tr'),
+              last = rows[rows.length - 1].getBoundingClientRect(), de = document.documentElement, mainEl = document.querySelector('main'),
+              pad = parseFloat(getComputedStyle(mainEl).paddingBottom),
+              clear = () => tailEl().getBoundingClientRect().bottom <= barEl.getBoundingClientRect().top + 0.5;
+        const tail_clear = clear();
+        mainEl.style.paddingBottom = '0px'; window.scrollTo(0, de.scrollHeight);
+        const tail_clear_no_pad = clear();
+        mainEl.style.paddingBottom = ''; window.scrollTo(0, de.scrollHeight);
         return { page_scroll: de.scrollWidth - de.clientWidth, bar_left: bar.left, bar_right: bar.right, vw: de.clientWidth,
-                 bar_h: bar.height, last_clear: last.bottom <= bar.top + 0.5,
+                 bar_h: bar.height, last_clear: last.bottom <= bar.top + 0.5, pad_ok: pad >= bar.height, tail_clear, tail_clear_no_pad,
                  btns: [...document.querySelectorAll('#selbar > *:not(.hidden)')].filter(e => e.getBoundingClientRect().right > bar.right + 0.5).length };
       });
     }
@@ -913,6 +923,33 @@ const scenarios = {
     await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
     res.open_fail.reopened = await view();
     await page.keyboard.press('Escape'); await waitClosed(page);
+    // Save, close, reopen while the POST is held, then it fails: a clean reopened form gets the text at once; a form typed
+    // in again keeps its typing and the old text is dropped
+    const heldThenFail = async (name, typeAgain) => {
+      await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+      await setVal('#fName', name);
+      mode = 'hold'; held = null;
+      await page.click('#fSave');
+      while (!held) await new Promise(r => setTimeout(r, 20));
+      await page.keyboard.press('Escape'); await waitClosed(page);
+      await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+      const before = await view();
+      if (typeAgain) await setVal('#fName', typeAgain);
+      await hideBanner();
+      await held.respond({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' });
+      await page.waitForFunction(() => !document.querySelector('#banner').classList.contains('hidden'));
+      mode = 'pass';
+      const after = await view();
+      res.answer = true; // leaving the form: discard what is in it
+      await page.keyboard.press('Escape'); await waitClosed(page);
+      res.answer = false;
+      await page.click(`${row(D)} .c-dev`); await waitOpen(page, D);
+      const next = await view();
+      await page.keyboard.press('Escape'); await waitClosed(page);
+      return { before, after, next };
+    };
+    res.reopen_clean = await heldThenFail('Held Name', null);
+    res.reopen_typed = await heldThenFail('Held Old', 'Typed Again');
     // Swedish
     await page.goto(`${base}?lang=sv`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector(row(E));
