@@ -4,7 +4,7 @@
 
 What changed between releases: [CHANGELOG.md](CHANGELOG.md).
 
-![screenshot](docs/screenshot.png)
+![screenshot: the device list, light on the left and dark on the right](docs/screenshot-light-dark.png)
 
 
 - One row per MAC with vendor, IP, hostname, network (VLAN), lease type, first seen / last online, a history of address changes and an event log. The events list under the table shows 60 at a time ("Load more" adds the next 60), can be filtered by kind and by a From / To day (kept in the address as `ek`, `es`, `eu`), and has an "Export CSV" link for the same filter.
