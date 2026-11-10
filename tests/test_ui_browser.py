@@ -680,8 +680,8 @@ class BrowserLongTextTest(_BrowserCase):
 
 class BrowserActColumnTest(_BrowserCase):
     """A tight table (an online device with an IPv6 line, a baseline device that is offline, private MACs, a switch
-    port and Wi-Fi details, two unacked devices): the Mark known button wraps instead of being cut off at the right
-    edge of the table, in English and Swedish, at laptop, desktop and phone widths."""
+    port and Wi-Fi details, two unacked devices): the row's known button ("✅ Known" / "✅ Känd") stays on one line and
+    is never cut off at the right edge of the table, in English and Swedish, at laptop, desktop and phone widths."""
     V6 = "2001:db8:1:0:211:22ff:fe33:4455"
 
     @classmethod
@@ -718,7 +718,7 @@ class BrowserActColumnTest(_BrowserCase):
                         self.assertLessEqual(m["btn_over"], 0, m)
                         if width != "400":
                             self.assertEqual(m["dot_w"], 28, m)
-        self.assertLessEqual(d["sv"]["1280"]["all"]["btn_lines"], 3, d["sv"]["1280"]["all"])  # it wraps, and stays readable
+                            self.assertEqual(m["btn_lines"], 1, m)  # "✅ Known" / "✅ Känd" fits on one line (1.7.1)
 
 
 class BrowserSsidWidthTest(_BrowserCase):
@@ -971,7 +971,7 @@ class BrowserLangSvTest(_BrowserCase):
         self.assertEqual(d["html_lang"], "sv")
         self.assertEqual(d["sub"]["shown"], d["sub"]["table"])
         self.assertEqual(d["sub"]["shown"], "Vem finns på nätverket, nyast först")  # the owner-facing sample
-        self.assertEqual(d["row_ack"]["shown"], "Markera som känd")
+        self.assertEqual(d["row_ack"]["shown"], "✅ Känd")
         self.assertEqual(d["new_label"], {"shown": "nya (7 d)", "table": "nya (7 d)"})  # the default 7 days, as after the status reply
         for part in (d["new_badge"], d["row_ack"], d["kind_option"], d["headings"], *d["headers"].values(), *d["drawer"].values()):
             self.assertEqual(part["shown"], part["table"], part)

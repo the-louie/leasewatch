@@ -2,6 +2,11 @@
 
 All notable changes to leasewatch are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.7.1 (2026-11-10)
+
+### Changed
+- The row button that marks a device known reads "✅ Known" (Swedish "✅ Känd") instead of "Mark known" ("Markera som känd"): the Swedish text took two or three lines in the table even on a wide window. The tooltip and the screen-reader name are unchanged ("Acknowledge: I know this device"); the Select bar's button keeps its full text. The row button no longer wraps at all (1.7.0 let it wrap, which split the short text between the icon and the word).
+
 ## 1.7.0 (2026-11-09)
 
 ### Changed

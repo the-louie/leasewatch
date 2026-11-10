@@ -144,10 +144,10 @@ tbody tr:last-child td { border-bottom: 0; }
 .c-where .sig { font-variant-numeric: tabular-nums; }
 .status .src { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
 .status .src .dot { width: 7px; height: 7px; }
-.c-act .btn.ack { white-space: normal; text-align: left; line-height: 1.15; } /* "Mark known" / "Markera som känd" wraps where the table is tight, so the table does not scroll sideways */
+.c-act .btn.ack { white-space: nowrap; } /* the row button ("✅ Known" / "✅ Känd", 1.7.1) is short enough to stay on one line: under auto layout a wrapping button split between the icon and the word even with room in the table */
 th.c-first, th.c-last { white-space: normal; } /* a long heading (Swedish "Första gången sedd") wraps instead of widening the column past its dates */
 .c-first, .c-last { white-space: nowrap; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
-/* below 1400 px the page is capped at 1232 px and a full table is tight: a long phrase ("not since the start") may wrap there, and the Mark known button wraps too (any width), so the table fits without a sideways scroll; from 1400 px the page is 100 px wider and the dates stop wrapping */
+/* below 1400 px the page is capped at 1232 px and a full table is tight: a long phrase ("not since the start") may wrap there, so the table fits without a sideways scroll; from 1400 px the page is 100 px wider and the dates stop wrapping */
 @media (max-width: 1399px) { td.c-first, td.c-last { white-space: normal; } }
 .c-first.recent { color: var(--text); }
 .c-act { width: auto; text-align: right; }
